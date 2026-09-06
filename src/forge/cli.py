@@ -455,30 +455,139 @@ def review_cmd(run_id: str):
 
 @main.command(name="run")
 @click.argument("task", type=str, required=False, default=None)
-@click.option("--file", "-f", "spec_file", type=click.Path(exists=True, dir_okay=False), help="Path to markdown spec/requirements file.")
 @click.option("--from-critic", "-c", is_flag=True, default=False, help="Automatically resume from the latest Critic audit report.")
 @click.option("--run", "run_id", type=str, default=None, help="Existing Run ID to resume from.")
-@click.option("--autonomous", "-a", is_flag=True, default=False, help="Run all stages autonomously without confirmation prompts.")
-@click.option("--max-retries", "-r", type=int, default=3, help="Max auto-repair retry iterations if Reviewer requests changes.")
-@click.option("--auto-commit", is_flag=True, default=False, help="Automatically git commit upon approved review.")
 @click.option("--no-critic", is_flag=True, default=False, help="Skip the final post-execution codebase health audit.")
-def run_pipeline(
-    task: Optional[str],
-    spec_file: Optional[str],
-    from_critic: bool,
-    run_id: Optional[str],
-    autonomous: bool,
-    max_retries: int,
-    auto_commit: bool,
-    no_critic: bool,
-):
-    """Run autonomous multi-agent pipeline: Architect -> Planner -> [Executor <-> Reviewer Loop] -> Critic."""
+def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], no_critic: bool):
+    """Run standard multi-agent pipeline with step-by-step confirmation checkpoints."""
     root = Path.cwd()
     config = Config.load(root)
     git = GitService(root)
     run_mgr = RunManager(root)
 
-    # 1. Determine task from file, critic, or argument
+    # 1. Determine Run & Task
+    if from_critic or (run_id and not task):
+        try:
+            prev_run = run_mgr.resume(run_id)
+        except Exception as e:
+            click.secho(f"Error loading run: {e}", fg="red")
+            sys.exit(1)
+
+        critic_md = run_mgr.load_stage_markdown(prev_run, "critic")
+        if not critic_md:
+            click.secho(f"No Critic report found in {prev_run.run_id}.", fg="red")
+            sys.exit(1)
+
+        task = task or f"Fix issues and tech debt identified in Critic audit from {prev_run.run_id}"
+        run = run_mgr.create_run(task=task)
+        critic_json = run_mgr.load_stage_json(prev_run, "critic") or {}
+        run_mgr.save_stage_artifacts(
+            run=run,
+            sequence_number=0,
+            role_name="critic",
+            markdown_content=critic_md,
+            json_data=critic_json,
+            adapter_name="critic_handoff",
+        )
+        click.echo(f"\n🔗 Linked pipeline to previous Critic report from {prev_run.run_id}!")
+    else:
+        if not task:
+            click.secho("Error: Missing TASK. Please provide a task or use --from-critic (-c).", fg="red")
+            sys.exit(1)
+        run = run_mgr.create_run(task=task)
+
+    context = Context(run=run, project_root=root, config=config, git=git)
+
+    stages_to_run = ["architect", "planner", "executor", "reviewer"]
+    if not no_critic:
+        stages_to_run.append("critic")
+
+    click.echo(f"\n🚀 [Run: {run.run_id}] Starting Standard Forge Pipeline:")
+    click.secho(f"   \"{run.task}\"\n", bold=True)
+
+    for stage_name in stages_to_run:
+        stage_cfg = config.stages.get(stage_name)
+        adapter_name = stage_cfg.adapter if stage_cfg else "opencode"
+        model = stage_cfg.model if stage_cfg else None
+        effort = stage_cfg.effort if stage_cfg else None
+        auto_approve = stage_cfg.auto_approve if stage_cfg else (stage_name == "executor")
+
+        try:
+            adapter = AdapterRegistry.get(
+                name=adapter_name,
+                model=model,
+                effort=effort,
+                auto_approve=auto_approve,
+            )
+        except Exception as e:
+            click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
+            sys.exit(1)
+
+        if not adapter.is_available():
+            click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
+            sys.exit(1)
+
+        seq = 5 if (stage_name == "critic" and len(stages_to_run) == 5) else None
+        role = Role.load(stage_name, project_root=root)
+        if seq is not None:
+            role = Role(
+                name=role.name,
+                sequence_number=seq,
+                template_content=role.template_content,
+                protocol_content=role.protocol_content,
+            )
+
+        stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
+
+        click.echo(f"\n▶ Executing Stage: {role.sequence_number:02d}_{role.name.upper()} ({adapter.name})...")
+        result = stage.run(context)
+
+        click.echo(f"  ✓ {role.name.capitalize()} completed | Status: {result.status} ({result.duration_seconds:.1f}s)")
+
+        if result.status in ("REJECTED", "BLOCKED", "FAILED"):
+            click.secho(f"\n⚠️ Pipeline halted at stage '{role.name}' due to status '{result.status}'.", fg="yellow")
+            run.status = result.status
+            run.save_metadata()
+            return
+
+        if stage_name != stages_to_run[-1]:
+            next_stage_name = stages_to_run[stages_to_run.index(stage_name) + 1]
+            if not click.confirm(f"\nProceed to next stage ({next_stage_name.upper()})?", default=True):
+                click.echo("Pipeline paused by user.")
+                run.status = f"PAUSED_AFTER_{role.name.upper()}"
+                run.save_metadata()
+                return
+
+    run.status = "COMPLETED"
+    run.save_metadata()
+    click.secho(f"\n✨ Forge Pipeline completed successfully for {run.run_id}!", fg="green", bold=True)
+    click.echo(f"   Artifacts saved in .forge/runs/{run.run_id}/\n")
+
+
+@main.command(name="auto")
+@click.argument("task", type=str, required=False, default=None)
+@click.option("--file", "-f", "spec_file", type=click.Path(exists=True, dir_okay=False), help="Path to markdown spec/requirements file.")
+@click.option("--from-critic", "-c", is_flag=True, default=False, help="Automatically resume from the latest Critic audit report.")
+@click.option("--run", "run_id", type=str, default=None, help="Existing Run ID to resume from.")
+@click.option("--max-retries", "-r", type=int, default=3, help="Max auto-repair retry iterations between Executor and Reviewer.")
+@click.option("--auto-commit", is_flag=True, default=False, help="Automatically git commit upon approved review.")
+@click.option("--no-critic", is_flag=True, default=False, help="Skip the final post-execution codebase health audit.")
+def auto_pipeline(
+    task: Optional[str],
+    spec_file: Optional[str],
+    from_critic: bool,
+    run_id: Optional[str],
+    max_retries: int,
+    auto_commit: bool,
+    no_critic: bool,
+):
+    """Run fully autonomous iterative loop: Architect -> Planner -> [Executor <-> Reviewer Self-Repair Loop] -> Critic."""
+    root = Path.cwd()
+    config = Config.load(root)
+    git = GitService(root)
+    run_mgr = RunManager(root)
+
+    # 1. Determine task
     if spec_file:
         try:
             with open(spec_file, "r", encoding="utf-8") as f:
@@ -511,17 +620,17 @@ def run_pipeline(
             json_data=critic_json,
             adapter_name="critic_handoff",
         )
-        click.echo(f"\n🔗 Linked pipeline to previous Critic report from {prev_run.run_id}!")
+        click.echo(f"\n🔗 Linked autonomous loop to previous Critic report from {prev_run.run_id}!")
     else:
         if not task:
-            click.secho("Error: Missing TASK. Please provide a task string, --file spec.md, or --from-critic.", fg="red")
+            click.secho("Error: Missing TASK. Provide a task string, --file spec.md, or --from-critic (-c).", fg="red")
             sys.exit(1)
         run = run_mgr.create_run(task=task)
 
     context = Context(run=run, project_root=root, config=config, git=git)
-
     task_summary = task.strip().splitlines()[0][:70] if task else ""
-    click.echo(f"\n🚀 [Run: {run.run_id}] Starting Autonomous Forge Pipeline:")
+
+    click.echo(f"\n⚡ [Run: {run.run_id}] Starting Fully Autonomous Forge Loop:")
     click.secho(f"   \"{task_summary}...\"\n", bold=True)
 
     # Stage 1: Architect
@@ -539,14 +648,8 @@ def run_pipeline(
     click.echo(f"  ✓ Architect completed | Status: {arch_res.status} ({arch_res.duration_seconds:.1f}s)")
 
     if arch_res.status in ("REJECTED", "BLOCKED"):
-        click.secho(f"\n⚠️ Pipeline halted: Architect rejected design with status '{arch_res.status}'.", fg="yellow")
+        click.secho(f"\n⚠️ Autonomous loop halted: Architect rejected design with status '{arch_res.status}'.", fg="yellow")
         run.status = arch_res.status
-        run.save_metadata()
-        return
-
-    if not autonomous and not click.confirm("\nProceed to Planner?", default=True):
-        click.echo("Pipeline paused by user.")
-        run.status = "PAUSED_AFTER_ARCHITECT"
         run.save_metadata()
         return
 
@@ -565,14 +668,8 @@ def run_pipeline(
     click.echo(f"  ✓ Planner completed | Status: {plan_res.status} ({plan_res.duration_seconds:.1f}s)")
 
     if plan_res.status in ("BLOCKED", "REJECTED"):
-        click.secho(f"\n⚠️ Pipeline halted: Planner blocked with status '{plan_res.status}'.", fg="yellow")
+        click.secho(f"\n⚠️ Autonomous loop halted: Planner blocked with status '{plan_res.status}'.", fg="yellow")
         run.status = plan_res.status
-        run.save_metadata()
-        return
-
-    if not autonomous and not click.confirm("\nProceed to Executor?", default=True):
-        click.echo("Pipeline paused by user.")
-        run.status = "PAUSED_AFTER_PLANNER"
         run.save_metadata()
         return
 
@@ -604,12 +701,6 @@ def run_pipeline(
         exec_res = exec_stage.run(context)
         click.echo(f"  ✓ Executor finished | Status: {exec_res.status} ({exec_res.duration_seconds:.1f}s)")
 
-        if not autonomous and not click.confirm(f"\nProceed to Reviewer{iter_label}?", default=True):
-            click.echo("Pipeline paused by user.")
-            run.status = "PAUSED_AFTER_EXECUTOR"
-            run.save_metadata()
-            return
-
         click.echo(f"\n▶ [4/5] Executing Reviewer ({rev_adapter.name}){iter_label}...")
         rev_res = rev_stage.run(context)
         click.echo(f"  ✓ Reviewer finished | Status: {rev_res.status} ({rev_res.duration_seconds:.1f}s)")
@@ -619,7 +710,7 @@ def run_pipeline(
             click.secho(f"\n✅ Implementation APPROVED by Reviewer on attempt {iteration}!", fg="green", bold=True)
             break
         elif rev_res.status == "CHANGES_REQUIRED" and iteration < max_retries:
-            click.secho(f"\n🔄 Reviewer requested changes. Initiating auto-repair iteration {iteration + 1}...", fg="yellow")
+            click.secho(f"\n🔄 Reviewer requested changes. Launching auto-repair iteration {iteration + 1}...", fg="yellow")
         else:
             click.secho(f"\n⚠️ Reviewer verdict: {rev_res.status}.", fg="yellow")
             break
@@ -630,32 +721,29 @@ def run_pipeline(
         if git.is_git_repo() and git.commit(commit_msg):
             click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'", fg="green")
 
-    # Stage 5: Closing Critic Audit (if enabled)
+    # Stage 5: Closing Critic Audit
     if not no_critic:
-        if not autonomous and not click.confirm("\nProceed to Post-Execution Critic Health Audit?", default=True):
-            click.echo("Pipeline paused before final audit.")
-        else:
-            critic_cfg = config.stages.get("critic")
-            critic_adapter = AdapterRegistry.get(
-                name=critic_cfg.adapter if critic_cfg else "opencode",
-                model=critic_cfg.model if critic_cfg else None,
-                effort=critic_cfg.effort if critic_cfg else None,
-                auto_approve=critic_cfg.auto_approve if critic_cfg else False,
-            )
-            critic_role = Role(
-                name="critic",
-                sequence_number=5,
-                template_content=Role.load("critic", project_root=root).template_content,
-                protocol_content=Role.load("critic", project_root=root).protocol_content,
-            )
-            click.echo(f"\n▶ [5/5] Executing Post-Execution Critic ({critic_adapter.name})...")
-            critic_stage = Stage(role=critic_role, adapter=critic_adapter, run_manager=run_mgr)
-            critic_res = critic_stage.run(context)
-            click.echo(f"  ✓ Post-Execution Critic audit completed | Status: {critic_res.status} ({critic_res.duration_seconds:.1f}s)")
+        critic_cfg = config.stages.get("critic")
+        critic_adapter = AdapterRegistry.get(
+            name=critic_cfg.adapter if critic_cfg else "opencode",
+            model=critic_cfg.model if critic_cfg else None,
+            effort=critic_cfg.effort if critic_cfg else None,
+            auto_approve=critic_cfg.auto_approve if critic_cfg else False,
+        )
+        critic_role = Role(
+            name="critic",
+            sequence_number=5,
+            template_content=Role.load("critic", project_root=root).template_content,
+            protocol_content=Role.load("critic", project_root=root).protocol_content,
+        )
+        click.echo(f"\n▶ [5/5] Executing Post-Execution Critic ({critic_adapter.name})...")
+        critic_stage = Stage(role=critic_role, adapter=critic_adapter, run_manager=run_mgr)
+        critic_res = critic_stage.run(context)
+        click.echo(f"  ✓ Post-Execution Critic audit completed | Status: {critic_res.status} ({critic_res.duration_seconds:.1f}s)")
 
     run.status = "APPROVED" if approved else rev_res.status
     run.save_metadata()
-    click.secho(f"\n✨ Forge Pipeline finished for {run.run_id} (Status: {run.status})!", fg="green", bold=True)
+    click.secho(f"\n✨ Autonomous Loop finished for {run.run_id} (Status: {run.status})!", fg="green", bold=True)
     click.echo(f"   Artifacts saved in .forge/runs/{run.run_id}/\n")
     run_mgr = RunManager()
     runs = run_mgr.list_runs()
