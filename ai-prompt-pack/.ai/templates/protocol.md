@@ -1,0 +1,29 @@
+# Common Agent Protocol v1.0
+
+Every agent MUST emit a machine report.
+
+```yaml
+ROLE:
+PROMPT_VERSION: 1.0
+TASK_ID:
+
+START_TIME:
+END_TIME:
+DURATION:
+
+STATUS:
+EXIT_CODE:
+HANDOFF:
+REASON:
+
+INPUTS:
+OUTPUTS:
+
+ISSUES:
+  CRITICAL:
+  MAJOR:
+  MINOR:
+
+CONFIDENCE:
+NEXT_ACTION:
+```

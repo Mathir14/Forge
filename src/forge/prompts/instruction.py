@@ -1,0 +1,15 @@
+"""Instruction data container passed to the prompt compiler."""
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+
+@dataclass
+class Instruction:
+    role_name: str
+    task: str
+    project_docs: Dict[str, str] = field(default_factory=dict)
+    previous_stage_outputs: Dict[str, str] = field(default_factory=dict)
+    git_diff: Optional[str] = None
+    changed_files: List[str] = field(default_factory=list)
+    protocol_schema: str = ""
