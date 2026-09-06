@@ -1,5 +1,6 @@
 """Builder that constructs an Instruction object from Context and Role."""
 
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 from forge.core.context import Context
@@ -18,8 +19,8 @@ class InstructionBuilder:
                 try:
                     with open(doc_file, "r", encoding="utf-8") as f:
                         project_docs[doc_file.stem] = f.read()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.warning("Failed to read project doc %s: %s", doc_file, e)
 
         # Load previous stage outputs from run
         previous_stage_outputs: Dict[str, str] = {}
@@ -30,8 +31,8 @@ class InstructionBuilder:
                     with open(p, "r", encoding="utf-8") as f:
                         stage_name = p.stem.split("_", 1)[-1] if "_" in p.stem else p.stem
                         previous_stage_outputs[stage_name] = f.read()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.warning("Failed to read previous stage output %s: %s", p, e)
 
         # Git diff and changed files
         git_diff: Optional[str] = None

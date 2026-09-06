@@ -2,15 +2,72 @@
 
 import sys
 from pathlib import Path
+from typing import Optional, Dict, Any, List
 import click
 
 from forge.core.config import Config
 from forge.core.git import GitService
 from forge.core.role import Role
 from forge.core.context import Context
+from forge.stages.result import StageResult
+from forge.adapters.base import BaseAdapter
 from forge.adapters.registry import AdapterRegistry
 from forge.storage.run_manager import RunManager
 from forge.stages.stage import Stage
+
+
+def _get_adapter(config: Config, stage_name: str) -> BaseAdapter:
+    """Resolve and validate adapter for a given stage."""
+    stage_cfg = config.stages.get(stage_name)
+    if stage_name == "executor":
+        adapter_name = stage_cfg.adapter if (stage_cfg and stage_cfg.adapter) else "antigravity"
+        model = stage_cfg.model if (stage_cfg and stage_cfg.model) else "gemini-3.7-flash-high"
+        effort = stage_cfg.effort if (stage_cfg and stage_cfg.effort) else "high"
+        auto_approve = stage_cfg.auto_approve if stage_cfg else False
+    else:
+        adapter_name = stage_cfg.adapter if (stage_cfg and stage_cfg.adapter) else "opencode"
+        model = stage_cfg.model if stage_cfg else None
+        effort = stage_cfg.effort if stage_cfg else None
+        auto_approve = stage_cfg.auto_approve if stage_cfg else False
+
+    try:
+        adapter = AdapterRegistry.get(
+            name=adapter_name,
+            model=model,
+            effort=effort,
+            auto_approve=auto_approve,
+        )
+    except Exception as e:
+        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
+        sys.exit(1)
+
+    if not adapter.is_available():
+        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
+        click.echo("Run 'forge doctor' to inspect available tools.")
+        sys.exit(1)
+
+    return adapter
+
+
+def _print_stage_summary(result: StageResult, run_id: str, role_name: str, seq: int) -> None:
+    """Print standard stage completion summary and issues."""
+    click.echo("=" * 60)
+    click.echo(result.raw_markdown)
+    click.echo("=" * 60)
+
+    click.echo(f"\n📊 {role_name.capitalize()} Summary:")
+    click.echo(f"  • Status:       {result.status}")
+    click.echo(f"  • Handoff:      {result.handoff}")
+    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
+    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
+    click.echo(f"  • Exit Code:    {result.response.exit_code}")
+    click.echo(f"  • Artifacts:    .forge/runs/{run_id}/{seq:02d}_{role_name}.md & .json\n")
+
+    if result.machine_report.issues:
+        click.echo("⚠️ Reported Issues:")
+        for severity, issues in result.machine_report.issues.items():
+            for issue in issues:
+                click.echo(f"  [{severity}] {issue}")
 
 
 @click.group()
@@ -89,7 +146,7 @@ stages:
     adapter: antigravity
     model: gemini-3.7-flash-high
     effort: high
-    auto_approve: true
+    auto_approve: false
   reviewer:
     adapter: opencode
     model: null
@@ -97,6 +154,7 @@ stages:
 execution:
   mode: interactive
   auto_commit: false
+  timeout: 300
 """
         with open(cfg_file, "w", encoding="utf-8") as f:
             f.write(cfg_content)
@@ -120,27 +178,7 @@ def critic_cmd(target: str):
     run = run_mgr.create_run(task=f"Critique: {target}")
     context = Context(run=run, project_root=root, config=config, git=git)
 
-    # Load Critic role and configured adapter
-    critic_cfg = config.stages.get("critic")
-    adapter_name = critic_cfg.adapter if critic_cfg else "opencode"
-    model = critic_cfg.model if critic_cfg else None
-
-    try:
-        adapter = AdapterRegistry.get(
-            name=adapter_name,
-            model=model,
-            effort=critic_cfg.effort if critic_cfg else None,
-            auto_approve=critic_cfg.auto_approve if critic_cfg else False,
-        )
-    except Exception as e:
-        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
-        sys.exit(1)
-
-    if not adapter.is_available():
-        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
-        click.echo("Run 'forge doctor' to inspect available tools.")
-        sys.exit(1)
-
+    adapter = _get_adapter(config, "critic")
     role = Role.load("critic", project_root=root)
     stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
 
@@ -148,24 +186,7 @@ def critic_cmd(target: str):
     click.secho(f"   \"{target}\"\n", bold=True)
 
     result = stage.run(context)
-
-    click.echo("=" * 60)
-    click.echo(result.raw_markdown)
-    click.echo("=" * 60)
-
-    click.echo(f"\n📊 Critic Summary:")
-    click.echo(f"  • Status:       {result.status}")
-    click.echo(f"  • Handoff:      {result.handoff}")
-    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
-    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
-    click.echo(f"  • Exit Code:    {result.response.exit_code}")
-    click.echo(f"  • Artifacts:    .forge/runs/{run.run_id}/00_critic.md & .json\n")
-
-    if result.machine_report.issues:
-        click.echo("⚠️ Reported Issues:")
-        for severity, issues in result.machine_report.issues.items():
-            for issue in issues:
-                click.echo(f"  [{severity}] {issue}")
+    _print_stage_summary(result, run.run_id, "critic", role.sequence_number)
 
 
 @main.command(name="architect")
@@ -181,27 +202,7 @@ def architect_cmd(task: str):
     run = run_mgr.create_run(task=task)
     context = Context(run=run, project_root=root, config=config, git=git)
 
-    # Load Architect role and configured adapter
-    arch_cfg = config.stages.get("architect")
-    adapter_name = arch_cfg.adapter if arch_cfg else "opencode"
-    model = arch_cfg.model if arch_cfg else None
-
-    try:
-        adapter = AdapterRegistry.get(
-            name=adapter_name,
-            model=model,
-            effort=arch_cfg.effort if arch_cfg else None,
-            auto_approve=arch_cfg.auto_approve if arch_cfg else False,
-        )
-    except Exception as e:
-        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
-        sys.exit(1)
-
-    if not adapter.is_available():
-        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
-        click.echo("Run 'forge doctor' to inspect available tools.")
-        sys.exit(1)
-
+    adapter = _get_adapter(config, "architect")
     role = Role.load("architect", project_root=root)
     stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
 
@@ -209,29 +210,12 @@ def architect_cmd(task: str):
     click.secho(f"   \"{task}\"\n", bold=True)
 
     result = stage.run(context)
-
-    click.echo("=" * 60)
-    click.echo(result.raw_markdown)
-    click.echo("=" * 60)
-
-    click.echo(f"\n📊 Architect Summary:")
-    click.echo(f"  • Status:       {result.status}")
-    click.echo(f"  • Handoff:      {result.handoff}")
-    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
-    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
-    click.echo(f"  • Exit Code:    {result.response.exit_code}")
-    click.echo(f"  • Artifacts:    .forge/runs/{run.run_id}/01_architect.md & .json\n")
-
-    if result.machine_report.issues:
-        click.echo("⚠️ Reported Issues:")
-        for severity, issues in result.machine_report.issues.items():
-            for issue in issues:
-                click.echo(f"  [{severity}] {issue}")
+    _print_stage_summary(result, run.run_id, "architect", role.sequence_number)
 
 
 @main.command(name="planner")
 @click.option("--run", "run_id", type=str, default=None, help="Run ID to execute Planner on (defaults to latest).")
-def planner_cmd(run_id: str):
+def planner_cmd(run_id: Optional[str]):
     """Run Planner role to break approved architecture into actionable tasks."""
     root = Path.cwd()
     config = Config.load(root)
@@ -255,27 +239,7 @@ def planner_cmd(run_id: str):
 
     context = Context(run=run, project_root=root, config=config, git=git)
 
-    # Load Planner role and configured adapter
-    plan_cfg = config.stages.get("planner")
-    adapter_name = plan_cfg.adapter if plan_cfg else "opencode"
-    model = plan_cfg.model if plan_cfg else None
-
-    try:
-        adapter = AdapterRegistry.get(
-            name=adapter_name,
-            model=model,
-            effort=plan_cfg.effort if plan_cfg else None,
-            auto_approve=plan_cfg.auto_approve if plan_cfg else False,
-        )
-    except Exception as e:
-        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
-        sys.exit(1)
-
-    if not adapter.is_available():
-        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
-        click.echo("Run 'forge doctor' to inspect available tools.")
-        sys.exit(1)
-
+    adapter = _get_adapter(config, "planner")
     role = Role.load("planner", project_root=root)
     stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
 
@@ -283,29 +247,12 @@ def planner_cmd(run_id: str):
     click.secho(f"   \"{run.task}\"\n", bold=True)
 
     result = stage.run(context)
-
-    click.echo("=" * 60)
-    click.echo(result.raw_markdown)
-    click.echo("=" * 60)
-
-    click.echo(f"\n📊 Planner Summary:")
-    click.echo(f"  • Status:       {result.status}")
-    click.echo(f"  • Handoff:      {result.handoff}")
-    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
-    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
-    click.echo(f"  • Exit Code:    {result.response.exit_code}")
-    click.echo(f"  • Artifacts:    .forge/runs/{run.run_id}/02_planner.md & .json\n")
-
-    if result.machine_report.issues:
-        click.echo("⚠️ Reported Issues:")
-        for severity, issues in result.machine_report.issues.items():
-            for issue in issues:
-                click.echo(f"  [{severity}] {issue}")
+    _print_stage_summary(result, run.run_id, "planner", role.sequence_number)
 
 
 @main.command(name="execute")
 @click.option("--run", "run_id", type=str, default=None, help="Run ID to execute Executor on (defaults to latest).")
-def execute_cmd(run_id: str):
+def execute_cmd(run_id: Optional[str]):
     """Run Executor role (Antigravity) to implement the approved plan."""
     root = Path.cwd()
     config = Config.load(root)
@@ -329,29 +276,7 @@ def execute_cmd(run_id: str):
 
     context = Context(run=run, project_root=root, config=config, git=git)
 
-    # Load Executor role and configured adapter
-    exec_cfg = config.stages.get("executor")
-    adapter_name = exec_cfg.adapter if exec_cfg else "antigravity"
-    model = exec_cfg.model if exec_cfg else "gemini-3.7-flash-high"
-    effort = exec_cfg.effort if exec_cfg else "high"
-    auto_approve = exec_cfg.auto_approve if exec_cfg else True
-
-    try:
-        adapter = AdapterRegistry.get(
-            name=adapter_name,
-            model=model,
-            effort=effort,
-            auto_approve=auto_approve,
-        )
-    except Exception as e:
-        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
-        sys.exit(1)
-
-    if not adapter.is_available():
-        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
-        click.echo("Run 'forge doctor' to inspect available tools.")
-        sys.exit(1)
-
+    adapter = _get_adapter(config, "executor")
     role = Role.load("executor", project_root=root)
     stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
 
@@ -359,29 +284,12 @@ def execute_cmd(run_id: str):
     click.secho(f"   \"{run.task}\"\n", bold=True)
 
     result = stage.run(context)
-
-    click.echo("=" * 60)
-    click.echo(result.raw_markdown)
-    click.echo("=" * 60)
-
-    click.echo(f"\n📊 Executor Summary:")
-    click.echo(f"  • Status:       {result.status}")
-    click.echo(f"  • Handoff:      {result.handoff}")
-    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
-    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
-    click.echo(f"  • Exit Code:    {result.response.exit_code}")
-    click.echo(f"  • Artifacts:    .forge/runs/{run.run_id}/03_executor.md & .json\n")
-
-    if result.machine_report.issues:
-        click.echo("⚠️ Reported Issues:")
-        for severity, issues in result.machine_report.issues.items():
-            for issue in issues:
-                click.echo(f"  [{severity}] {issue}")
+    _print_stage_summary(result, run.run_id, "executor", role.sequence_number)
 
 
 @main.command(name="review")
 @click.option("--run", "run_id", type=str, default=None, help="Run ID to execute Reviewer on (defaults to latest).")
-def review_cmd(run_id: str):
+def review_cmd(run_id: Optional[str]):
     """Run Reviewer role to perform adversarial audit on implementation and diffs."""
     root = Path.cwd()
     config = Config.load(root)
@@ -405,27 +313,7 @@ def review_cmd(run_id: str):
 
     context = Context(run=run, project_root=root, config=config, git=git)
 
-    # Load Reviewer role and configured adapter
-    rev_cfg = config.stages.get("reviewer")
-    adapter_name = rev_cfg.adapter if rev_cfg else "opencode"
-    model = rev_cfg.model if rev_cfg else None
-
-    try:
-        adapter = AdapterRegistry.get(
-            name=adapter_name,
-            model=model,
-            effort=rev_cfg.effort if rev_cfg else None,
-            auto_approve=rev_cfg.auto_approve if rev_cfg else False,
-        )
-    except Exception as e:
-        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
-        sys.exit(1)
-
-    if not adapter.is_available():
-        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
-        click.echo("Run 'forge doctor' to inspect available tools.")
-        sys.exit(1)
-
+    adapter = _get_adapter(config, "reviewer")
     role = Role.load("reviewer", project_root=root)
     stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
 
@@ -433,24 +321,7 @@ def review_cmd(run_id: str):
     click.secho(f"   \"{run.task}\"\n", bold=True)
 
     result = stage.run(context)
-
-    click.echo("=" * 60)
-    click.echo(result.raw_markdown)
-    click.echo("=" * 60)
-
-    click.echo(f"\n📊 Reviewer Summary:")
-    click.echo(f"  • Status:       {result.status}")
-    click.echo(f"  • Handoff:      {result.handoff}")
-    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
-    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
-    click.echo(f"  • Exit Code:    {result.response.exit_code}")
-    click.echo(f"  • Artifacts:    .forge/runs/{run.run_id}/04_reviewer.md & .json\n")
-
-    if result.machine_report.issues:
-        click.echo("⚠️ Reported Issues:")
-        for severity, issues in result.machine_report.issues.items():
-            for issue in issues:
-                click.echo(f"  [{severity}] {issue}")
+    _print_stage_summary(result, run.run_id, "reviewer", role.sequence_number)
 
 
 @main.command(name="run")
@@ -506,27 +377,7 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
     click.secho(f"   \"{run.task}\"\n", bold=True)
 
     for stage_name in stages_to_run:
-        stage_cfg = config.stages.get(stage_name)
-        adapter_name = stage_cfg.adapter if stage_cfg else "opencode"
-        model = stage_cfg.model if stage_cfg else None
-        effort = stage_cfg.effort if stage_cfg else None
-        auto_approve = stage_cfg.auto_approve if stage_cfg else (stage_name == "executor")
-
-        try:
-            adapter = AdapterRegistry.get(
-                name=adapter_name,
-                model=model,
-                effort=effort,
-                auto_approve=auto_approve,
-            )
-        except Exception as e:
-            click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
-            sys.exit(1)
-
-        if not adapter.is_available():
-            click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
-            sys.exit(1)
-
+        adapter = _get_adapter(config, stage_name)
         seq = 5 if (stage_name == "critic" and len(stages_to_run) == 5) else None
         role = Role.load(stage_name, project_root=root)
         if seq is not None:
@@ -569,7 +420,7 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
 @click.option("--file", "-f", "spec_file", type=click.Path(exists=True, dir_okay=False), help="Path to markdown spec/requirements file.")
 @click.option("--from-critic", "-c", is_flag=True, default=False, help="Automatically resume from the latest Critic audit report.")
 @click.option("--run", "run_id", type=str, default=None, help="Existing Run ID to resume from.")
-@click.option("--max-retries", "-r", type=int, default=3, help="Max auto-repair retry iterations between Executor and Reviewer.")
+@click.option("--max-retries", "-r", type=click.IntRange(min=1), default=3, help="Max auto-repair retry iterations between Executor and Reviewer.")
 @click.option("--auto-commit", is_flag=True, default=False, help="Automatically git commit upon approved review.")
 @click.option("--no-critic", is_flag=True, default=False, help="Skip the final post-execution codebase health audit.")
 def auto_pipeline(
@@ -635,13 +486,7 @@ def auto_pipeline(
 
     # Stage 1: Architect
     arch_role = Role.load("architect", project_root=root)
-    arch_cfg = config.stages.get("architect")
-    arch_adapter = AdapterRegistry.get(
-        name=arch_cfg.adapter if arch_cfg else "opencode",
-        model=arch_cfg.model if arch_cfg else None,
-        effort=arch_cfg.effort if arch_cfg else None,
-        auto_approve=arch_cfg.auto_approve if arch_cfg else False,
-    )
+    arch_adapter = _get_adapter(config, "architect")
     click.echo(f"▶ [1/5] Executing Architect ({arch_adapter.name})...")
     arch_stage = Stage(role=arch_role, adapter=arch_adapter, run_manager=run_mgr)
     arch_res = arch_stage.run(context)
@@ -655,13 +500,7 @@ def auto_pipeline(
 
     # Stage 2: Planner
     plan_role = Role.load("planner", project_root=root)
-    plan_cfg = config.stages.get("planner")
-    plan_adapter = AdapterRegistry.get(
-        name=plan_cfg.adapter if plan_cfg else "opencode",
-        model=plan_cfg.model if plan_cfg else None,
-        effort=plan_cfg.effort if plan_cfg else None,
-        auto_approve=plan_cfg.auto_approve if plan_cfg else False,
-    )
+    plan_adapter = _get_adapter(config, "planner")
     click.echo(f"\n▶ [2/5] Executing Planner ({plan_adapter.name})...")
     plan_stage = Stage(role=plan_role, adapter=plan_adapter, run_manager=run_mgr)
     plan_res = plan_stage.run(context)
@@ -674,27 +513,16 @@ def auto_pipeline(
         return
 
     # Stage 3 & 4: Self-Healing Executor <-> Reviewer Loop
-    exec_cfg = config.stages.get("executor")
-    exec_adapter = AdapterRegistry.get(
-        name=exec_cfg.adapter if exec_cfg else "antigravity",
-        model=exec_cfg.model if exec_cfg else "gemini-3.7-flash-high",
-        effort=exec_cfg.effort if exec_cfg else "high",
-        auto_approve=exec_cfg.auto_approve if exec_cfg else True,
-    )
+    exec_adapter = _get_adapter(config, "executor")
     exec_role = Role.load("executor", project_root=root)
     exec_stage = Stage(role=exec_role, adapter=exec_adapter, run_manager=run_mgr)
 
-    rev_cfg = config.stages.get("reviewer")
-    rev_adapter = AdapterRegistry.get(
-        name=rev_cfg.adapter if rev_cfg else "opencode",
-        model=rev_cfg.model if rev_cfg else None,
-        effort=rev_cfg.effort if rev_cfg else None,
-        auto_approve=rev_cfg.auto_approve if rev_cfg else False,
-    )
+    rev_adapter = _get_adapter(config, "reviewer")
     rev_role = Role.load("reviewer", project_root=root)
     rev_stage = Stage(role=rev_role, adapter=rev_adapter, run_manager=run_mgr)
 
     approved = False
+    max_retries = max(1, max_retries)
     for iteration in range(1, max_retries + 1):
         iter_label = f" (Attempt {iteration}/{max_retries})" if max_retries > 1 else ""
         click.echo(f"\n▶ [3/5] Executing Executor ({exec_adapter.name}){iter_label}...")
@@ -723,18 +551,13 @@ def auto_pipeline(
 
     # Stage 5: Closing Critic Audit
     if not no_critic:
-        critic_cfg = config.stages.get("critic")
-        critic_adapter = AdapterRegistry.get(
-            name=critic_cfg.adapter if critic_cfg else "opencode",
-            model=critic_cfg.model if critic_cfg else None,
-            effort=critic_cfg.effort if critic_cfg else None,
-            auto_approve=critic_cfg.auto_approve if critic_cfg else False,
-        )
+        critic_adapter = _get_adapter(config, "critic")
+        base_critic = Role.load("critic", project_root=root)
         critic_role = Role(
-            name="critic",
+            name=base_critic.name,
             sequence_number=5,
-            template_content=Role.load("critic", project_root=root).template_content,
-            protocol_content=Role.load("critic", project_root=root).protocol_content,
+            template_content=base_critic.template_content,
+            protocol_content=base_critic.protocol_content,
         )
         click.echo(f"\n▶ [5/5] Executing Post-Execution Critic ({critic_adapter.name})...")
         critic_stage = Stage(role=critic_role, adapter=critic_adapter, run_manager=run_mgr)
@@ -745,16 +568,6 @@ def auto_pipeline(
     run.save_metadata()
     click.secho(f"\n✨ Autonomous Loop finished for {run.run_id} (Status: {run.status})!", fg="green", bold=True)
     click.echo(f"   Artifacts saved in .forge/runs/{run.run_id}/\n")
-    run_mgr = RunManager()
-    runs = run_mgr.list_runs()
-    if not runs:
-        click.echo("No runs found in .forge/runs/")
-        return
-
-    click.echo(f"\nFound {len(runs)} Forge runs:\n")
-    for r in runs:
-        click.echo(f"  • {r.run_id} | {r.created_at} | Status: {r.status}")
-        click.echo(f"    Task: {r.task[:70]}")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Adapter registry and tool discovery."""
 
 import shutil
-from typing import Dict, Type, Optional, List
+from typing import Dict, Type, Optional, List, Any
 from forge.adapters.base import BaseAdapter
 from forge.adapters.opencode import OpenCodeAdapter
 from forge.adapters.antigravity import AntigravityAdapter

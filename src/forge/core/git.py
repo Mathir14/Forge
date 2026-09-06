@@ -9,13 +9,22 @@ class GitService:
     def __init__(self, repo_path: Optional[Path] = None):
         self.repo_path = repo_path or Path.cwd()
 
-    def _run(self, args: List[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["git"] + args,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True,
-        )
+    def _run(self, args: List[str], timeout: int = 60) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                ["git"] + args,
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(
+                args=["git"] + args,
+                returncode=124,
+                stdout="",
+                stderr="Git command timed out",
+            )
 
     def is_git_repo(self) -> bool:
         res = self._run(["rev-parse", "--is-inside-work-tree"])
@@ -34,14 +43,20 @@ class GitService:
 
     def changed_files(self) -> List[str]:
         """List untracked and modified files relative to repo root."""
-        res = self._run(["status", "--porcelain"])
+        res = self._run(["-c", "core.quotepath=false", "status", "--porcelain"])
         if res.returncode != 0 or not res.stdout.strip():
             return []
         files = []
         for line in res.stdout.splitlines():
-            line = line.strip()
-            if len(line) > 3:
-                files.append(line[3:].strip())
+            if len(line) >= 4:
+                raw_path = line[3:]
+                if " -> " in raw_path:
+                    path = raw_path.split(" -> ", 1)[1].strip()
+                else:
+                    path = raw_path.strip()
+                path = path.strip('"')
+                if path:
+                    files.append(path)
         return files
 
     def current_branch(self) -> str:
@@ -49,6 +64,8 @@ class GitService:
         return res.stdout.strip() if res.returncode == 0 else ""
 
     def commit(self, message: str) -> bool:
+        if not self.changed_files():
+            return False
         self._run(["add", "-A"])
         res = self._run(["commit", "-m", message])
         return res.returncode == 0

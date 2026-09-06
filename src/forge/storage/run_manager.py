@@ -1,8 +1,11 @@
 """Storage manager for Forge runs and stage artifacts."""
 
 import json
+import logging
 import re
 import shutil
+import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from forge.core.run import Run
@@ -10,6 +13,7 @@ from forge.core.run import Run
 
 class RunManager:
     RUN_DIR_PATTERN = re.compile(r"^run-(\d+)$")
+    TEMP_DIR_STALE_SECONDS = 300
 
     def __init__(self, project_root: Optional[Path] = None):
         self.project_root = project_root or Path.cwd()
@@ -18,6 +22,22 @@ class RunManager:
 
     def _ensure_dirs(self) -> None:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cleanup_orphaned_temp_dirs(self) -> None:
+        """Remove stale temp run dirs left over from crashed processes."""
+        try:
+            cutoff = time.time() - self.TEMP_DIR_STALE_SECONDS
+            for p in self.runs_dir.glob(".tmp_run_*"):
+                if not p.is_dir():
+                    continue
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        shutil.rmtree(p, ignore_errors=True)
+                        logging.warning("Removed orphaned temp run dir %s", p)
+                except (OSError, ValueError) as e:
+                    logging.warning("Failed to clean orphaned temp dir %s: %s", p, e)
+        except Exception as e:
+            logging.warning("Error during temp dir cleanup: %s", e)
 
     def list_runs(self) -> List[Run]:
         """List all runs ordered chronologically."""
@@ -37,23 +57,37 @@ class RunManager:
         return runs[-1] if runs else None
 
     def create_run(self, task: str) -> Run:
-        """Create a new sequentially numbered run directory (run-001, run-002, etc.)."""
+        """Create a new sequentially numbered run directory (run-001, run-002, etc.) atomically."""
         self._ensure_dirs()
-        runs = self.list_runs()
-        next_num = 1
-        if runs:
-            last_name = runs[-1].run_dir.name
-            m = self.RUN_DIR_PATTERN.match(last_name)
-            if m:
-                next_num = int(m.group(1)) + 1
+        self._cleanup_orphaned_temp_dirs()
+        while True:
+            runs = self.list_runs()
+            next_num = 1
+            if runs:
+                last_name = runs[-1].run_dir.name
+                m = self.RUN_DIR_PATTERN.match(last_name)
+                if m:
+                    next_num = int(m.group(1)) + 1
 
-        run_id = f"run-{next_num:03d}"
-        run_dir = self.runs_dir / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
+            run_id = f"run-{next_num:03d}"
+            target_dir = self.runs_dir / run_id
 
-        run = Run(run_id=run_id, task=task, run_dir=run_dir)
-        run.save_metadata()
-        return run
+            if target_dir.exists():
+                continue
+
+            temp_dir = Path(tempfile.mkdtemp(prefix=".tmp_run_", dir=self.runs_dir))
+            try:
+                run = Run(run_id=run_id, task=task, run_dir=temp_dir)
+                run.save_metadata()
+                if target_dir.exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    continue
+                temp_dir.rename(target_dir)
+                run.run_dir = target_dir
+                return run
+            except (FileExistsError, OSError):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                continue
 
     def resume(self, run_id: Optional[str] = None) -> Run:
         """Resume an existing run by ID or the latest run."""

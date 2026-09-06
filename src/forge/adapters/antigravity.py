@@ -13,7 +13,7 @@ class AntigravityAdapter(BaseAdapter):
         self,
         model: Optional[str] = "gemini-3.7-flash-high",
         effort: Optional[str] = "high",
-        auto_approve: bool = True,
+        auto_approve: bool = False,
         extra_flags: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(
@@ -30,7 +30,12 @@ class AntigravityAdapter(BaseAdapter):
     def is_available(self) -> bool:
         return self._get_binary() is not None
 
-    def execute(self, prompt: str, cwd: Optional[Path] = None) -> AdapterResponse:
+    def execute(
+        self,
+        prompt: str,
+        cwd: Optional[Path] = None,
+        timeout: Optional[int] = None,
+    ) -> AdapterResponse:
         bin_path = self._get_binary()
         if not bin_path:
             return AdapterResponse(
@@ -51,6 +56,7 @@ class AntigravityAdapter(BaseAdapter):
         if self.auto_approve:
             cmd.append("--dangerously-skip-permissions")
 
+        timeout_val = timeout if timeout is not None else self.DEFAULT_TIMEOUT
         start_time = time.time()
         try:
             res = subprocess.run(
@@ -58,6 +64,7 @@ class AntigravityAdapter(BaseAdapter):
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
+                timeout=timeout_val,
             )
             duration = time.time() - start_time
             raw = res.stdout if res.stdout else res.stderr
@@ -67,6 +74,15 @@ class AntigravityAdapter(BaseAdapter):
                 exit_code=res.returncode,
                 duration_seconds=duration,
                 raw_output=raw,
+            )
+        except subprocess.TimeoutExpired as e:
+            duration = time.time() - start_time
+            return AdapterResponse(
+                stdout=e.stdout if isinstance(e.stdout, str) else "",
+                stderr=f"Execution timed out after {timeout_val} seconds.",
+                exit_code=124,
+                duration_seconds=duration,
+                raw_output=f"Execution timed out after {timeout_val} seconds.",
             )
         except Exception as e:
             duration = time.time() - start_time

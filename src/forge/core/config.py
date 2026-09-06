@@ -19,6 +19,7 @@ class StageConfig:
 class ExecutionConfig:
     mode: str = "interactive"  # "interactive" or "autonomous"
     auto_commit: bool = False
+    timeout: int = 300
 
 
 @dataclass
@@ -39,7 +40,7 @@ class Config:
                     adapter="antigravity",
                     model="gemini-3.7-flash-high",
                     effort="high",
-                    auto_approve=True,
+                    auto_approve=False,
                 ),
                 "reviewer": StageConfig(adapter="opencode", model=None),
             },
@@ -80,14 +81,30 @@ class Config:
                 cfg.execution.mode = str(exec_data["mode"])
             if "auto_commit" in exec_data:
                 cfg.execution.auto_commit = bool(exec_data["auto_commit"])
+            if "timeout" in exec_data:
+                cfg.execution.timeout = int(exec_data["timeout"])
         if "stages" in data and isinstance(data["stages"], dict):
             for stage_name, stage_data in data["stages"].items():
                 if isinstance(stage_data, dict):
-                    existing = cfg.stages.get(stage_name, StageConfig())
-                    existing.adapter = stage_data.get("adapter", existing.adapter)
-                    existing.model = stage_data.get("model", existing.model)
-                    existing.effort = stage_data.get("effort", existing.effort)
-                    existing.auto_approve = stage_data.get("auto_approve", existing.auto_approve)
-                    if "extra_flags" in stage_data and isinstance(stage_data["extra_flags"], dict):
-                        existing.extra_flags.update(stage_data["extra_flags"])
-                    cfg.stages[stage_name] = existing
+                    existing = cfg.stages.get(stage_name)
+                    if existing:
+                        extra_flags = dict(existing.extra_flags)
+                        if "extra_flags" in stage_data and isinstance(stage_data["extra_flags"], dict):
+                            extra_flags.update(stage_data["extra_flags"])
+                        new_stage = StageConfig(
+                            adapter=stage_data.get("adapter", existing.adapter),
+                            model=stage_data.get("model", existing.model),
+                            effort=stage_data.get("effort", existing.effort),
+                            auto_approve=stage_data.get("auto_approve", existing.auto_approve),
+                            extra_flags=extra_flags,
+                        )
+                    else:
+                        extra_flags = stage_data.get("extra_flags", {}) if isinstance(stage_data.get("extra_flags"), dict) else {}
+                        new_stage = StageConfig(
+                            adapter=stage_data.get("adapter", "opencode"),
+                            model=stage_data.get("model"),
+                            effort=stage_data.get("effort"),
+                            auto_approve=stage_data.get("auto_approve", False),
+                            extra_flags=extra_flags,
+                        )
+                    cfg.stages[stage_name] = new_stage

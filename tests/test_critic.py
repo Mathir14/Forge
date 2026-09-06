@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 from forge.adapters.base import BaseAdapter, AdapterResponse
 from forge.core.context import Context
 from forge.core.config import Config
@@ -16,7 +17,12 @@ class MockCriticAdapter(BaseAdapter):
     def is_available(self) -> bool:
         return True
 
-    def execute(self, prompt: str, cwd: Path = None) -> AdapterResponse:
+    def execute(
+        self,
+        prompt: str,
+        cwd: Optional[Path] = None,
+        timeout: Optional[int] = None,
+    ) -> AdapterResponse:
         assert "CODEBASE CRITIC" in prompt or "CRITIC" in prompt
         return AdapterResponse(
             stdout=self.response_text,

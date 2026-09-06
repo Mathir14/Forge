@@ -33,9 +33,11 @@ class Stage:
         rendered_prompt = PromptCompiler.compile(instruction, self.role.template_content)
 
         # 2. Execute
+        timeout = context.config.execution.timeout if (context.config and context.config.execution) else None
         response = self.adapter.execute(
             prompt=rendered_prompt.text,
             cwd=context.project_root,
+            timeout=timeout,
         )
 
         # 3. Validate / Parse protocol

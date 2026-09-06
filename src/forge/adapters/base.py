@@ -16,6 +16,8 @@ class AdapterResponse:
 
 
 class BaseAdapter(ABC):
+    DEFAULT_TIMEOUT: int = 300
+
     def __init__(
         self,
         name: str,
@@ -36,6 +38,11 @@ class BaseAdapter(ABC):
         pass
 
     @abstractmethod
-    def execute(self, prompt: str, cwd: Optional[Path] = None) -> AdapterResponse:
+    def execute(
+        self,
+        prompt: str,
+        cwd: Optional[Path] = None,
+        timeout: Optional[int] = None,
+    ) -> AdapterResponse:
         """Run the prompt against the CLI tool and return response."""
         pass

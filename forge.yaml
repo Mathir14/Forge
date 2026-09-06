@@ -13,7 +13,7 @@ stages:
     adapter: antigravity
     model: gemini-3.7-flash-high
     effort: high
-    auto_approve: true
+    auto_approve: false
   reviewer:
     adapter: opencode
     model: null
@@ -21,3 +21,4 @@ stages:
 execution:
   mode: interactive
   auto_commit: false
+  timeout: 300

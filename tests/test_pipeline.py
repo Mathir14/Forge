@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 from forge.adapters.base import BaseAdapter, AdapterResponse
 from forge.core.context import Context
 from forge.core.config import Config
@@ -16,7 +17,12 @@ class MockStageAdapter(BaseAdapter):
     def is_available(self) -> bool:
         return True
 
-    def execute(self, prompt: str, cwd: Path = None) -> AdapterResponse:
+    def execute(
+        self,
+        prompt: str,
+        cwd: Optional[Path] = None,
+        timeout: Optional[int] = None,
+    ) -> AdapterResponse:
         full_text = f"# Stage Report for {self.name}\n\n```yaml\n{self.output_yaml_block}\n```"
         return AdapterResponse(
             stdout=full_text,
