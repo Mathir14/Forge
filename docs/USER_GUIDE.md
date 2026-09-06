@@ -37,7 +37,7 @@ Checks for:
 ## 2. Complete Command Reference
 
 | Command | Category | Description | Modifies Code? |
-| :--- | :--- | :--- | :---: |
+| :--- | :--- | :--- | :--- |
 | **`forge doctor`** | Diagnostics | Check CLI tools, git status, and environment | ❌ No |
 | **`forge init`** | Setup | Initialize `.ai/` prompt templates and `forge.yaml` in any project | ❌ No |
 | **`forge critic [TARGET]`** | Analysis | Relentlessly audit codebase/module for flaws, smells & tech debt | ❌ No |
@@ -45,8 +45,9 @@ Checks for:
 | **`forge planner [--run ID]`** | Planning | Break approved architecture into tasks & acceptance criteria | ❌ No |
 | **`forge execute [--run ID]`** | Execution | Implement plan with Antigravity (`agy`) and run validation tests | ✅ Yes |
 | **`forge review [--run ID]`** | Quality Gate | Perform adversarial audit on implementation and `git diff` | ❌ No |
-| **`forge run "<TASK>"`** | Orchestration | Execute full 5-stage pipeline with interactive confirmation | ✅ Yes |
-| **`forge run "<TASK>" -a`** | Orchestration | Execute full 5-stage pipeline autonomously without prompts | ✅ Yes |
+| **`forge run "<TASK>"`** | Orchestration | Execute pipeline with interactive confirmation between stages | ✅ Yes |
+| **`forge run "<TASK>" -a`** | Autonomous | Execute full pipeline autonomously without prompts | ✅ Yes |
+| **`forge run -f spec.md -a`** | Autonomous | Execute full pipeline autonomously from a markdown PRD/plan file | ✅ Yes |
 | **`forge run -c`** | Loop | Resume from latest Critic report and fix discovered issues | ✅ Yes |
 | **`forge runs`** | Telemetry | List all historical runs, timestamps, and status | ❌ No |
 
