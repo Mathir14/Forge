@@ -45,10 +45,10 @@ Checks for:
 | **`forge planner [--run ID]`** | Planning | Break approved architecture into tasks & acceptance criteria | ❌ No |
 | **`forge execute [--run ID]`** | Execution | Implement plan with Antigravity (`agy`) and run validation tests | ✅ Yes |
 | **`forge review [--run ID]`** | Quality Gate | Perform adversarial audit on implementation and `git diff` | ❌ No |
-| **`forge run "<TASK>"`** | Orchestration | Execute pipeline with interactive confirmation between stages | ✅ Yes |
-| **`forge run "<TASK>" -a`** | Autonomous | Execute full pipeline autonomously without prompts | ✅ Yes |
-| **`forge run -f spec.md -a`** | Autonomous | Execute full pipeline autonomously from a markdown PRD/plan file | ✅ Yes |
-| **`forge run -c`** | Loop | Resume from latest Critic report and fix discovered issues | ✅ Yes |
+| **`forge run "<TASK>"`** | Standard Flow | Step-by-step pipeline with interactive checkpoints between stages | ✅ Yes |
+| **`forge auto "<TASK>"`** | Autonomous | Fully autonomous self-repair iterative loop (Executor <-> Reviewer) | ✅ Yes |
+| **`forge auto -f spec.md`** | Autonomous | Hands-free autonomous execution from a markdown PRD/plan file | ✅ Yes |
+| **`forge auto -c`** | Autonomous | Autonomous self-improvement loop acting on previous Critic audit | ✅ Yes |
 | **`forge runs`** | Telemetry | List all historical runs, timestamps, and status | ❌ No |
 
 ---
