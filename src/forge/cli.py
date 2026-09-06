@@ -458,8 +458,9 @@ def review_cmd(run_id: str):
 @click.option("--from-critic", "-c", is_flag=True, default=False, help="Automatically resume from the latest Critic audit report.")
 @click.option("--run", "run_id", type=str, default=None, help="Existing Run ID to resume from.")
 @click.option("--autonomous", "-a", is_flag=True, default=False, help="Run all stages autonomously without confirmation prompts.")
-def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], autonomous: bool):
-    """Run full multi-agent pipeline: (Critic ->) Architect -> Planner -> Executor -> Reviewer."""
+@click.option("--no-critic", is_flag=True, default=False, help="Skip the final post-execution codebase health audit.")
+def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], autonomous: bool, no_critic: bool):
+    """Run full pipeline: Architect -> Planner -> Executor -> Reviewer -> Critic (Post-Audit)."""
     root = Path.cwd()
     config = Config.load(root)
     git = GitService(root)
@@ -468,27 +469,40 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
     # 1. Determine Run & Task
     if from_critic or run_id:
         try:
-            run = run_mgr.resume(run_id)
+            prev_run = run_mgr.resume(run_id)
         except Exception as e:
             click.secho(f"Error loading run: {e}", fg="red")
             sys.exit(1)
 
-        critic_md = run_mgr.load_stage_markdown(run, "critic")
+        critic_md = run_mgr.load_stage_markdown(prev_run, "critic")
         if not critic_md:
-            click.secho(f"No Critic report found in {run.run_id}.", fg="red")
+            click.secho(f"No Critic report found in {prev_run.run_id}.", fg="red")
             sys.exit(1)
 
-        task = task or f"Implement recommendations and fix issues identified in Critic report ({run.run_id})."
-        click.echo(f"\n🔗 Linking pipeline to Critic report in {run.run_id}!")
+        run = run_mgr.create_run(task=task or f"Fix issues and tech debt identified in Critic audit from {prev_run.run_id}")
+        # Copy previous critic report to the new run so Architect can consume it
+        critic_json = run_mgr.load_stage_json(prev_run, "critic") or {}
+        run_mgr.save_stage_artifacts(
+            run=run,
+            sequence_number=0,
+            role_name="critic",
+            markdown_content=critic_md,
+            json_data=critic_json,
+            adapter_name="critic_handoff",
+        )
+        click.echo(f"\n🔗 Linked pipeline to previous Critic report from {prev_run.run_id}!")
     else:
         if not task:
-            click.secho("Error: Missing TASK. Please provide a task or use --from-critic.", fg="red")
+            click.secho("Error: Missing TASK. Please provide a task or use --from-critic (-c).", fg="red")
             sys.exit(1)
         run = run_mgr.create_run(task=task)
 
     context = Context(run=run, project_root=root, config=config, git=git)
 
     stages_to_run = ["architect", "planner", "executor", "reviewer"]
+    if not no_critic:
+        stages_to_run.append("critic")
+
     click.echo(f"\n🚀 [Run: {run.run_id}] Starting Forge Pipeline for task:")
     click.secho(f"   \"{run.task}\"\n", bold=True)
 
@@ -514,7 +528,17 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
             click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
             sys.exit(1)
 
+        # Set sequence number: 5 if critic runs as closing stage
+        seq = 5 if (stage_name == "critic" and len(stages_to_run) == 5) else None
         role = Role.load(stage_name, project_root=root)
+        if seq is not None:
+            role = Role(
+                name=role.name,
+                sequence_number=seq,
+                template_content=role.template_content,
+                protocol_content=role.protocol_content,
+            )
+
         stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
 
         click.echo(f"\n▶ Executing Stage: {role.sequence_number:02d}_{role.name.upper()} ({adapter.name})...")
@@ -529,7 +553,8 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
             return
 
         if not autonomous and stage_name != stages_to_run[-1]:
-            if not click.confirm(f"\nProceed to next stage ({stages_to_run[stages_to_run.index(stage_name) + 1].upper()})?", default=True):
+            next_stage_name = stages_to_run[stages_to_run.index(stage_name) + 1]
+            if not click.confirm(f"\nProceed to next stage ({next_stage_name.upper()})?", default=True):
                 click.echo("Pipeline paused by user.")
                 run.status = f"PAUSED_AFTER_{role.name.upper()}"
                 run.save_metadata()
@@ -539,6 +564,8 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
     run.save_metadata()
     click.secho(f"\n✨ Forge Pipeline completed successfully for {run.run_id}!", fg="green", bold=True)
     click.echo(f"   Artifacts saved in .forge/runs/{run.run_id}/\n")
+    if not no_critic:
+        click.secho("💡 Post-execution Critic audit saved! Run 'forge run --from-critic' to address next findings.", fg="cyan")
     run_mgr = RunManager()
     runs = run_mgr.list_runs()
     if not runs:
