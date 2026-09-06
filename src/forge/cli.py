@@ -77,6 +77,113 @@ def main():
     pass
 
 
+STAGE_FORMATS = {
+    "critic": ("🧐", "Codebase Critic", "on:"),
+    "architect": ("🔨", "Architect", "for task:"),
+    "planner": ("📋", "Planner", "for task:"),
+    "executor": ("⚡", "Executor", "for task:"),
+    "reviewer": ("🔍", "Reviewer", "for task:"),
+}
+
+
+def _run_stage(
+    stage_name: str,
+    task: Optional[str] = None,
+    display_task: Optional[str] = None,
+    run_id: Optional[str] = None,
+    resume: bool = False,
+    resume_error: Optional[str] = None,
+    prerequisite_stage: Optional[str] = None,
+    prerequisite_error: Optional[str] = None,
+) -> None:
+    """Execute a single stage with common setup and teardown."""
+    root = Path.cwd()
+    config = Config.load(root)
+    git = GitService(root)
+    run_mgr = RunManager(root)
+
+    # Get or create run
+    if resume or run_id:
+        try:
+            run = run_mgr.resume(run_id)
+        except Exception as e:
+            click.secho(f"Error loading run: {e}", fg="red")
+            if resume_error:
+                click.echo(resume_error)
+            sys.exit(1)
+    else:
+        if not task:
+            click.secho(f"Error: Missing task for {stage_name}.", fg="red")
+            sys.exit(1)
+        run = run_mgr.create_run(task=task)
+
+    # Check prerequisite stage exists
+    if prerequisite_stage:
+        pre_json = run_mgr.load_stage_json(run, prerequisite_stage)
+        pre_md = run_mgr.load_stage_markdown(run, prerequisite_stage)
+        if not pre_json and not pre_md:
+            click.secho(f"No {prerequisite_stage.capitalize()} artifacts found in {run.run_id}.", fg="red")
+            click.echo(prerequisite_error or f"Run 'forge {prerequisite_stage}' first.")
+            sys.exit(1)
+
+    context = Context(run=run, project_root=root, config=config, git=git)
+    adapter = _get_adapter(config, stage_name)
+    role = Role.load(stage_name, project_root=root)
+    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
+
+    emoji, title, preposition = STAGE_FORMATS.get(stage_name, ("🔄", stage_name.capitalize(), "for task:"))
+    shown_text = display_task if display_task is not None else run.task
+    click.echo(f"\n{emoji} [Run: {run.run_id}] Invoking {title} ({adapter.name}) {preposition}")
+    click.secho(f"   \"{shown_text}\"\n", bold=True)
+
+    result = stage.run(context)
+    _print_stage_summary(result, run.run_id, stage_name, role.sequence_number)
+
+
+def _resolve_pipeline_run(
+    run_mgr: RunManager,
+    task: Optional[str],
+    from_critic: bool,
+    run_id: Optional[str],
+    pipeline_type: str = "pipeline",
+):
+    """Resolve or resume run for pipeline/auto execution."""
+    if from_critic or (run_id and not task):
+        try:
+            prev_run = run_mgr.resume(run_id)
+        except Exception as e:
+            click.secho(f"Error loading run: {e}", fg="red")
+            sys.exit(1)
+
+        critic_md = run_mgr.load_stage_markdown(prev_run, "critic")
+        if not critic_md:
+            click.secho(f"No Critic report found in {prev_run.run_id}.", fg="red")
+            sys.exit(1)
+
+        task = task or f"Fix issues and tech debt identified in Critic audit from {prev_run.run_id}"
+        run = run_mgr.create_run(task=task)
+        critic_json = run_mgr.load_stage_json(prev_run, "critic") or {}
+        run_mgr.save_stage_artifacts(
+            run=run,
+            sequence_number=0,
+            role_name="critic",
+            markdown_content=critic_md,
+            json_data=critic_json,
+            adapter_name="critic_handoff",
+        )
+        verb = "autonomous loop" if pipeline_type == "auto" else "pipeline"
+        click.echo(f"\n🔗 Linked {verb} to previous Critic report from {prev_run.run_id}!")
+    else:
+        if not task:
+            if pipeline_type == "auto":
+                click.secho("Error: Missing TASK. Provide a task string, --file spec.md, or --from-critic (-c).", fg="red")
+            else:
+                click.secho("Error: Missing TASK. Please provide a task or use --from-critic (-c).", fg="red")
+            sys.exit(1)
+        run = run_mgr.create_run(task=task)
+    return run
+
+
 @main.command(name="doctor")
 def doctor():
     """Check installed CLI tools, git status, and environment."""
@@ -169,159 +276,63 @@ execution:
 @click.argument("target", type=str, required=False, default="Audit and critique the codebase for architecture, security, code smells, and maintainability.")
 def critic_cmd(target: str):
     """Run Critic role to audit and expose flaws, code smells, and tech debt in TARGET."""
-    root = Path.cwd()
-    config = Config.load(root)
-    git = GitService(root)
-    run_mgr = RunManager(root)
-
-    # Create a new run
-    run = run_mgr.create_run(task=f"Critique: {target}")
-    context = Context(run=run, project_root=root, config=config, git=git)
-
-    adapter = _get_adapter(config, "critic")
-    role = Role.load("critic", project_root=root)
-    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
-
-    click.echo(f"\n🧐 [Run: {run.run_id}] Invoking Codebase Critic ({adapter.name}) on:")
-    click.secho(f"   \"{target}\"\n", bold=True)
-
-    result = stage.run(context)
-    _print_stage_summary(result, run.run_id, "critic", role.sequence_number)
+    _run_stage(
+        stage_name="critic",
+        task=f"Critique: {target}",
+        display_task=target,
+    )
 
 
 @main.command(name="architect")
 @click.argument("task", type=str)
 def architect_cmd(task: str):
     """Run Architect role to generate system architecture for TASK."""
-    root = Path.cwd()
-    config = Config.load(root)
-    git = GitService(root)
-    run_mgr = RunManager(root)
-
-    # Create a new run
-    run = run_mgr.create_run(task=task)
-    context = Context(run=run, project_root=root, config=config, git=git)
-
-    adapter = _get_adapter(config, "architect")
-    role = Role.load("architect", project_root=root)
-    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
-
-    click.echo(f"\n🔨 [Run: {run.run_id}] Invoking Architect ({adapter.name}) for task:")
-    click.secho(f"   \"{task}\"\n", bold=True)
-
-    result = stage.run(context)
-    _print_stage_summary(result, run.run_id, "architect", role.sequence_number)
+    _run_stage(
+        stage_name="architect",
+        task=task,
+    )
 
 
 @main.command(name="planner")
 @click.option("--run", "run_id", type=str, default=None, help="Run ID to execute Planner on (defaults to latest).")
 def planner_cmd(run_id: Optional[str]):
     """Run Planner role to break approved architecture into actionable tasks."""
-    root = Path.cwd()
-    config = Config.load(root)
-    git = GitService(root)
-    run_mgr = RunManager(root)
-
-    try:
-        run = run_mgr.resume(run_id)
-    except Exception as e:
-        click.secho(f"Error loading run: {e}", fg="red")
-        click.echo("Run 'forge architect \"<task>\"' first to create an architecture specification.")
-        sys.exit(1)
-
-    # Check that architect output exists for this run
-    arch_json = run_mgr.load_stage_json(run, "architect")
-    arch_md = run_mgr.load_stage_markdown(run, "architect")
-    if not arch_json and not arch_md:
-        click.secho(f"No Architect artifacts found in {run.run_id}.", fg="red")
-        click.echo("Planner requires prior Architect output. Run 'forge architect' first.")
-        sys.exit(1)
-
-    context = Context(run=run, project_root=root, config=config, git=git)
-
-    adapter = _get_adapter(config, "planner")
-    role = Role.load("planner", project_root=root)
-    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
-
-    click.echo(f"\n📋 [Run: {run.run_id}] Invoking Planner ({adapter.name}) for task:")
-    click.secho(f"   \"{run.task}\"\n", bold=True)
-
-    result = stage.run(context)
-    _print_stage_summary(result, run.run_id, "planner", role.sequence_number)
+    _run_stage(
+        stage_name="planner",
+        run_id=run_id,
+        resume=True,
+        resume_error='Run \'forge architect "<task>"\' first to create an architecture specification.',
+        prerequisite_stage="architect",
+        prerequisite_error="Planner requires prior Architect output. Run 'forge architect' first.",
+    )
 
 
 @main.command(name="execute")
 @click.option("--run", "run_id", type=str, default=None, help="Run ID to execute Executor on (defaults to latest).")
 def execute_cmd(run_id: Optional[str]):
     """Run Executor role (Antigravity) to implement the approved plan."""
-    root = Path.cwd()
-    config = Config.load(root)
-    git = GitService(root)
-    run_mgr = RunManager(root)
-
-    try:
-        run = run_mgr.resume(run_id)
-    except Exception as e:
-        click.secho(f"Error loading run: {e}", fg="red")
-        click.echo("Run 'forge architect' and 'forge planner' first.")
-        sys.exit(1)
-
-    # Check that planner output exists
-    plan_json = run_mgr.load_stage_json(run, "planner")
-    plan_md = run_mgr.load_stage_markdown(run, "planner")
-    if not plan_json and not plan_md:
-        click.secho(f"No Planner artifacts found in {run.run_id}.", fg="red")
-        click.echo("Executor requires prior Planner output. Run 'forge planner' first.")
-        sys.exit(1)
-
-    context = Context(run=run, project_root=root, config=config, git=git)
-
-    adapter = _get_adapter(config, "executor")
-    role = Role.load("executor", project_root=root)
-    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
-
-    click.echo(f"\n⚡ [Run: {run.run_id}] Invoking Executor ({adapter.name}) for task:")
-    click.secho(f"   \"{run.task}\"\n", bold=True)
-
-    result = stage.run(context)
-    _print_stage_summary(result, run.run_id, "executor", role.sequence_number)
+    _run_stage(
+        stage_name="executor",
+        run_id=run_id,
+        resume=True,
+        resume_error="Run 'forge architect' and 'forge planner' first.",
+        prerequisite_stage="planner",
+        prerequisite_error="Executor requires prior Planner output. Run 'forge planner' first.",
+    )
 
 
 @main.command(name="review")
 @click.option("--run", "run_id", type=str, default=None, help="Run ID to execute Reviewer on (defaults to latest).")
 def review_cmd(run_id: Optional[str]):
     """Run Reviewer role to perform adversarial audit on implementation and diffs."""
-    root = Path.cwd()
-    config = Config.load(root)
-    git = GitService(root)
-    run_mgr = RunManager(root)
-
-    try:
-        run = run_mgr.resume(run_id)
-    except Exception as e:
-        click.secho(f"Error loading run: {e}", fg="red")
-        click.echo("Run 'forge architect', 'forge planner', and 'forge execute' first.")
-        sys.exit(1)
-
-    # Check that executor output exists
-    exec_json = run_mgr.load_stage_json(run, "executor")
-    exec_md = run_mgr.load_stage_markdown(run, "executor")
-    if not exec_json and not exec_md:
-        click.secho(f"No Executor artifacts found in {run.run_id}.", fg="red")
-        click.echo("Reviewer requires prior Executor output. Run 'forge execute' first.")
-        sys.exit(1)
-
-    context = Context(run=run, project_root=root, config=config, git=git)
-
-    adapter = _get_adapter(config, "reviewer")
-    role = Role.load("reviewer", project_root=root)
-    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
-
-    click.echo(f"\n🔍 [Run: {run.run_id}] Invoking Reviewer ({adapter.name}) for task:")
-    click.secho(f"   \"{run.task}\"\n", bold=True)
-
-    result = stage.run(context)
-    _print_stage_summary(result, run.run_id, "reviewer", role.sequence_number)
+    _run_stage(
+        stage_name="reviewer",
+        run_id=run_id,
+        resume=True,
+        resume_error="Run 'forge architect', 'forge planner', and 'forge execute' first.",
+        prerequisite_stage="executor",
+        prerequisite_error="Reviewer requires prior Executor output. Run 'forge execute' first.",
+    )
 
 
 @main.command(name="run")
@@ -336,37 +347,7 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
     git = GitService(root)
     run_mgr = RunManager(root)
 
-    # 1. Determine Run & Task
-    if from_critic or (run_id and not task):
-        try:
-            prev_run = run_mgr.resume(run_id)
-        except Exception as e:
-            click.secho(f"Error loading run: {e}", fg="red")
-            sys.exit(1)
-
-        critic_md = run_mgr.load_stage_markdown(prev_run, "critic")
-        if not critic_md:
-            click.secho(f"No Critic report found in {prev_run.run_id}.", fg="red")
-            sys.exit(1)
-
-        task = task or f"Fix issues and tech debt identified in Critic audit from {prev_run.run_id}"
-        run = run_mgr.create_run(task=task)
-        critic_json = run_mgr.load_stage_json(prev_run, "critic") or {}
-        run_mgr.save_stage_artifacts(
-            run=run,
-            sequence_number=0,
-            role_name="critic",
-            markdown_content=critic_md,
-            json_data=critic_json,
-            adapter_name="critic_handoff",
-        )
-        click.echo(f"\n🔗 Linked pipeline to previous Critic report from {prev_run.run_id}!")
-    else:
-        if not task:
-            click.secho("Error: Missing TASK. Please provide a task or use --from-critic (-c).", fg="red")
-            sys.exit(1)
-        run = run_mgr.create_run(task=task)
-
+    run = _resolve_pipeline_run(run_mgr, task, from_critic, run_id, pipeline_type="pipeline")
     context = Context(run=run, project_root=root, config=config, git=git)
 
     stages_to_run = ["architect", "planner", "executor", "reviewer"]
@@ -448,36 +429,7 @@ def auto_pipeline(
             click.secho(f"Error reading spec file '{spec_file}': {e}", fg="red")
             sys.exit(1)
 
-    if from_critic or (run_id and not task):
-        try:
-            prev_run = run_mgr.resume(run_id)
-        except Exception as e:
-            click.secho(f"Error loading run: {e}", fg="red")
-            sys.exit(1)
-
-        critic_md = run_mgr.load_stage_markdown(prev_run, "critic")
-        if not critic_md:
-            click.secho(f"No Critic report found in {prev_run.run_id}.", fg="red")
-            sys.exit(1)
-
-        task = task or f"Fix issues and tech debt identified in Critic audit from {prev_run.run_id}"
-        run = run_mgr.create_run(task=task)
-        critic_json = run_mgr.load_stage_json(prev_run, "critic") or {}
-        run_mgr.save_stage_artifacts(
-            run=run,
-            sequence_number=0,
-            role_name="critic",
-            markdown_content=critic_md,
-            json_data=critic_json,
-            adapter_name="critic_handoff",
-        )
-        click.echo(f"\n🔗 Linked autonomous loop to previous Critic report from {prev_run.run_id}!")
-    else:
-        if not task:
-            click.secho("Error: Missing TASK. Provide a task string, --file spec.md, or --from-critic (-c).", fg="red")
-            sys.exit(1)
-        run = run_mgr.create_run(task=task)
-
+    run = _resolve_pipeline_run(run_mgr, task, from_critic, run_id, pipeline_type="auto")
     context = Context(run=run, project_root=root, config=config, git=git)
     task_summary = task.strip().splitlines()[0][:70] if task else ""
 

@@ -284,3 +284,155 @@ def test_cli_import_and_commands():
     assert "Forge Doctor" in doctor_result.output
 
 
+def test_antigravity_adapter_stdin_prompt():
+    from unittest.mock import patch, MagicMock
+
+    with patch("shutil.which", return_value="/usr/bin/agy"):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
+            adapter = AntigravityAdapter()
+            adapter.execute("hello world prompt")
+            
+            cmd = mock_run.call_args[0][0]
+            kwargs = mock_run.call_args[1]
+            assert "-p" in cmd or "--print" in cmd
+            assert "hello world prompt" not in cmd
+            assert "--input-mode" not in cmd
+            assert kwargs.get("input") == "hello world prompt"
+
+
+def test_cli_run_stage_and_commands(tmp_path):
+    from unittest.mock import patch, MagicMock
+    from click.testing import CliRunner
+    from forge.cli import main
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        # Init
+        init_res = runner.invoke(main, ["init"])
+        assert init_res.exit_code == 0
+        assert (Path.cwd() / "forge.yaml").exists()
+
+        mock_resp = AdapterResponse(
+            stdout="```yaml\nROLE: ARCHITECT\nSTATUS: APPROVED\nHANDOFF: PLANNER\n```",
+            stderr="",
+            exit_code=0,
+            duration_seconds=0.1,
+            raw_output="```yaml\nROLE: ARCHITECT\nSTATUS: APPROVED\nHANDOFF: PLANNER\n```",
+        )
+
+        with patch("forge.adapters.opencode.OpenCodeAdapter.execute", return_value=mock_resp), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True):
+            
+            # Architect command
+            arch_res = runner.invoke(main, ["architect", "Design auth system"])
+            assert arch_res.exit_code == 0
+            assert "Invoking Architect (opencode) for task:" in arch_res.output
+            assert (Path.cwd() / ".forge" / "runs" / "run-001" / "01_architect.json").exists()
+
+            # Planner command with prerequisite satisfied (testing default to latest run without --run)
+            plan_mock = AdapterResponse(
+                stdout="```yaml\nROLE: PLANNER\nSTATUS: READY\nHANDOFF: EXECUTOR\n```",
+                stderr="",
+                exit_code=0,
+                duration_seconds=0.1,
+                raw_output="```yaml\nROLE: PLANNER\nSTATUS: READY\nHANDOFF: EXECUTOR\n```",
+            )
+            with patch("forge.adapters.opencode.OpenCodeAdapter.execute", return_value=plan_mock):
+                plan_res = runner.invoke(main, ["planner"])
+                assert plan_res.exit_code == 0
+                assert "Invoking Planner (opencode) for task:" in plan_res.output
+                assert (Path.cwd() / ".forge" / "runs" / "run-001" / "02_planner.json").exists()
+
+            # Executor command with prerequisite satisfied (testing default to latest run without --run)
+            exec_mock = AdapterResponse(
+                stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+                stderr="",
+                exit_code=0,
+                duration_seconds=0.1,
+                raw_output="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            )
+            with patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_mock), \
+                 patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True):
+                exec_res = runner.invoke(main, ["execute"])
+                assert exec_res.exit_code == 0
+                assert "Invoking Executor (antigravity) for task:" in exec_res.output
+                assert (Path.cwd() / ".forge" / "runs" / "run-001" / "03_executor.json").exists()
+
+            # Reviewer command with prerequisite satisfied (testing default to latest run without --run)
+            rev_mock = AdapterResponse(
+                stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
+                stderr="",
+                exit_code=0,
+                duration_seconds=0.1,
+                raw_output="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
+            )
+            with patch("forge.adapters.opencode.OpenCodeAdapter.execute", return_value=rev_mock):
+                rev_res = runner.invoke(main, ["review"])
+                assert rev_res.exit_code == 0
+                assert "Invoking Reviewer (opencode) for task:" in rev_res.output
+                assert (Path.cwd() / ".forge" / "runs" / "run-001" / "04_reviewer.json").exists()
+
+            # Critic command
+            critic_mock = AdapterResponse(
+                stdout="```yaml\nROLE: CRITIC\nSTATUS: CRITIQUE_COMPLETE\nHANDOFF: ARCHITECT\n```",
+                stderr="",
+                exit_code=0,
+                duration_seconds=0.1,
+                raw_output="```yaml\nROLE: CRITIC\nSTATUS: CRITIQUE_COMPLETE\nHANDOFF: ARCHITECT\n```",
+            )
+            with patch("forge.adapters.opencode.OpenCodeAdapter.execute", return_value=critic_mock):
+                critic_res = runner.invoke(main, ["critic", "Check codebase"])
+                assert critic_res.exit_code == 0
+                assert "Invoking Codebase Critic (opencode) on:" in critic_res.output
+                assert (Path.cwd() / ".forge" / "runs" / "run-002" / "00_critic.json").exists()
+
+
+def test_cli_prerequisite_failures(tmp_path):
+    from click.testing import CliRunner
+    from forge.cli import main
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        runner.invoke(main, ["init"])
+        
+        # Planner fails if run doesn't exist (explicit --run)
+        plan_res = runner.invoke(main, ["planner", "--run", "run-999"])
+        assert plan_res.exit_code == 1
+        assert "Error loading run" in plan_res.output
+
+        # Planner fails if no runs exist at all (default to latest)
+        plan_no_runs = runner.invoke(main, ["planner"])
+        assert plan_no_runs.exit_code == 1
+        assert "Error loading run" in plan_no_runs.output
+        assert "Run 'forge architect" in plan_no_runs.output
+
+        # Executor fails if no runs exist at all (default to latest)
+        exec_no_runs = runner.invoke(main, ["execute"])
+        assert exec_no_runs.exit_code == 1
+        assert "Error loading run" in exec_no_runs.output
+        assert "Run 'forge architect' and 'forge planner' first." in exec_no_runs.output
+
+        # Reviewer fails if no runs exist at all (default to latest)
+        rev_no_runs = runner.invoke(main, ["review"])
+        assert rev_no_runs.exit_code == 1
+        assert "Error loading run" in rev_no_runs.output
+        assert "Run 'forge architect', 'forge planner', and 'forge execute' first." in rev_no_runs.output
+
+        # Create run-001 without architect output
+        from forge.storage.run_manager import RunManager
+        mgr = RunManager(Path.cwd())
+        mgr.create_run(task="Empty run")
+
+        plan_res2 = runner.invoke(main, ["planner", "--run", "run-001"])
+        assert plan_res2.exit_code == 1
+        assert "No Architect artifacts found" in plan_res2.output
+
+        plan_res3 = runner.invoke(main, ["planner"])
+        assert plan_res3.exit_code == 1
+        assert "No Architect artifacts found" in plan_res3.output
+
+
+
+
+

@@ -47,7 +47,7 @@ class AntigravityAdapter(BaseAdapter):
             )
 
         work_dir = cwd or Path.cwd()
-        cmd: List[str] = [bin_path, "-p", prompt, "--output-format", "text"]
+        cmd: List[str] = [bin_path, "-p", "--output-format", "text"]
 
         if self.model:
             cmd.extend(["--model", self.model])
@@ -61,6 +61,7 @@ class AntigravityAdapter(BaseAdapter):
         try:
             res = subprocess.run(
                 cmd,
+                input=prompt,
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
