@@ -168,6 +168,80 @@ def architect_cmd(task: str):
                 click.echo(f"  [{severity}] {issue}")
 
 
+@main.command(name="planner")
+@click.option("--run", "run_id", type=str, default=None, help="Run ID to execute Planner on (defaults to latest).")
+def planner_cmd(run_id: str):
+    """Run Planner role to break approved architecture into actionable tasks."""
+    root = Path.cwd()
+    config = Config.load(root)
+    git = GitService(root)
+    run_mgr = RunManager(root)
+
+    try:
+        run = run_mgr.resume(run_id)
+    except Exception as e:
+        click.secho(f"Error loading run: {e}", fg="red")
+        click.echo("Run 'forge architect \"<task>\"' first to create an architecture specification.")
+        sys.exit(1)
+
+    # Check that architect output exists for this run
+    arch_json = run_mgr.load_stage_json(run, "architect")
+    arch_md = run_mgr.load_stage_markdown(run, "architect")
+    if not arch_json and not arch_md:
+        click.secho(f"No Architect artifacts found in {run.run_id}.", fg="red")
+        click.echo("Planner requires prior Architect output. Run 'forge architect' first.")
+        sys.exit(1)
+
+    context = Context(run=run, project_root=root, config=config, git=git)
+
+    # Load Planner role and configured adapter
+    plan_cfg = config.stages.get("planner")
+    adapter_name = plan_cfg.adapter if plan_cfg else "opencode"
+    model = plan_cfg.model if plan_cfg else None
+
+    try:
+        adapter = AdapterRegistry.get(
+            name=adapter_name,
+            model=model,
+            effort=plan_cfg.effort if plan_cfg else None,
+            auto_approve=plan_cfg.auto_approve if plan_cfg else False,
+        )
+    except Exception as e:
+        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
+        sys.exit(1)
+
+    if not adapter.is_available():
+        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
+        click.echo("Run 'forge doctor' to inspect available tools.")
+        sys.exit(1)
+
+    role = Role.load("planner", project_root=root)
+    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
+
+    click.echo(f"\n📋 [Run: {run.run_id}] Invoking Planner ({adapter.name}) for task:")
+    click.secho(f"   \"{run.task}\"\n", bold=True)
+
+    result = stage.run(context)
+
+    click.echo("=" * 60)
+    click.echo(result.raw_markdown)
+    click.echo("=" * 60)
+
+    click.echo(f"\n📊 Planner Summary:")
+    click.echo(f"  • Status:       {result.status}")
+    click.echo(f"  • Handoff:      {result.handoff}")
+    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
+    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
+    click.echo(f"  • Exit Code:    {result.response.exit_code}")
+    click.echo(f"  • Artifacts:    .forge/runs/{run.run_id}/02_planner.md & .json\n")
+
+    if result.machine_report.issues:
+        click.echo("⚠️ Reported Issues:")
+        for severity, issues in result.machine_report.issues.items():
+            for issue in issues:
+                click.echo(f"  [{severity}] {issue}")
+
+
 @main.command(name="runs")
 def list_runs():
     """List all previous Forge runs."""
