@@ -242,9 +242,221 @@ def planner_cmd(run_id: str):
                 click.echo(f"  [{severity}] {issue}")
 
 
-@main.command(name="runs")
-def list_runs():
-    """List all previous Forge runs."""
+@main.command(name="execute")
+@click.option("--run", "run_id", type=str, default=None, help="Run ID to execute Executor on (defaults to latest).")
+def execute_cmd(run_id: str):
+    """Run Executor role (Antigravity) to implement the approved plan."""
+    root = Path.cwd()
+    config = Config.load(root)
+    git = GitService(root)
+    run_mgr = RunManager(root)
+
+    try:
+        run = run_mgr.resume(run_id)
+    except Exception as e:
+        click.secho(f"Error loading run: {e}", fg="red")
+        click.echo("Run 'forge architect' and 'forge planner' first.")
+        sys.exit(1)
+
+    # Check that planner output exists
+    plan_json = run_mgr.load_stage_json(run, "planner")
+    plan_md = run_mgr.load_stage_markdown(run, "planner")
+    if not plan_json and not plan_md:
+        click.secho(f"No Planner artifacts found in {run.run_id}.", fg="red")
+        click.echo("Executor requires prior Planner output. Run 'forge planner' first.")
+        sys.exit(1)
+
+    context = Context(run=run, project_root=root, config=config, git=git)
+
+    # Load Executor role and configured adapter
+    exec_cfg = config.stages.get("executor")
+    adapter_name = exec_cfg.adapter if exec_cfg else "antigravity"
+    model = exec_cfg.model if exec_cfg else "gemini-3.7-flash-high"
+    effort = exec_cfg.effort if exec_cfg else "high"
+    auto_approve = exec_cfg.auto_approve if exec_cfg else True
+
+    try:
+        adapter = AdapterRegistry.get(
+            name=adapter_name,
+            model=model,
+            effort=effort,
+            auto_approve=auto_approve,
+        )
+    except Exception as e:
+        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
+        sys.exit(1)
+
+    if not adapter.is_available():
+        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
+        click.echo("Run 'forge doctor' to inspect available tools.")
+        sys.exit(1)
+
+    role = Role.load("executor", project_root=root)
+    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
+
+    click.echo(f"\n⚡ [Run: {run.run_id}] Invoking Executor ({adapter.name}) for task:")
+    click.secho(f"   \"{run.task}\"\n", bold=True)
+
+    result = stage.run(context)
+
+    click.echo("=" * 60)
+    click.echo(result.raw_markdown)
+    click.echo("=" * 60)
+
+    click.echo(f"\n📊 Executor Summary:")
+    click.echo(f"  • Status:       {result.status}")
+    click.echo(f"  • Handoff:      {result.handoff}")
+    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
+    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
+    click.echo(f"  • Exit Code:    {result.response.exit_code}")
+    click.echo(f"  • Artifacts:    .forge/runs/{run.run_id}/03_executor.md & .json\n")
+
+    if result.machine_report.issues:
+        click.echo("⚠️ Reported Issues:")
+        for severity, issues in result.machine_report.issues.items():
+            for issue in issues:
+                click.echo(f"  [{severity}] {issue}")
+
+
+@main.command(name="review")
+@click.option("--run", "run_id", type=str, default=None, help="Run ID to execute Reviewer on (defaults to latest).")
+def review_cmd(run_id: str):
+    """Run Reviewer role to perform adversarial audit on implementation and diffs."""
+    root = Path.cwd()
+    config = Config.load(root)
+    git = GitService(root)
+    run_mgr = RunManager(root)
+
+    try:
+        run = run_mgr.resume(run_id)
+    except Exception as e:
+        click.secho(f"Error loading run: {e}", fg="red")
+        click.echo("Run 'forge architect', 'forge planner', and 'forge execute' first.")
+        sys.exit(1)
+
+    # Check that executor output exists
+    exec_json = run_mgr.load_stage_json(run, "executor")
+    exec_md = run_mgr.load_stage_markdown(run, "executor")
+    if not exec_json and not exec_md:
+        click.secho(f"No Executor artifacts found in {run.run_id}.", fg="red")
+        click.echo("Reviewer requires prior Executor output. Run 'forge execute' first.")
+        sys.exit(1)
+
+    context = Context(run=run, project_root=root, config=config, git=git)
+
+    # Load Reviewer role and configured adapter
+    rev_cfg = config.stages.get("reviewer")
+    adapter_name = rev_cfg.adapter if rev_cfg else "opencode"
+    model = rev_cfg.model if rev_cfg else None
+
+    try:
+        adapter = AdapterRegistry.get(
+            name=adapter_name,
+            model=model,
+            effort=rev_cfg.effort if rev_cfg else None,
+            auto_approve=rev_cfg.auto_approve if rev_cfg else False,
+        )
+    except Exception as e:
+        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
+        sys.exit(1)
+
+    if not adapter.is_available():
+        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
+        click.echo("Run 'forge doctor' to inspect available tools.")
+        sys.exit(1)
+
+    role = Role.load("reviewer", project_root=root)
+    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
+
+    click.echo(f"\n🔍 [Run: {run.run_id}] Invoking Reviewer ({adapter.name}) for task:")
+    click.secho(f"   \"{run.task}\"\n", bold=True)
+
+    result = stage.run(context)
+
+    click.echo("=" * 60)
+    click.echo(result.raw_markdown)
+    click.echo("=" * 60)
+
+    click.echo(f"\n📊 Reviewer Summary:")
+    click.echo(f"  • Status:       {result.status}")
+    click.echo(f"  • Handoff:      {result.handoff}")
+    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
+    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
+    click.echo(f"  • Exit Code:    {result.response.exit_code}")
+    click.echo(f"  • Artifacts:    .forge/runs/{run.run_id}/04_reviewer.md & .json\n")
+
+    if result.machine_report.issues:
+        click.echo("⚠️ Reported Issues:")
+        for severity, issues in result.machine_report.issues.items():
+            for issue in issues:
+                click.echo(f"  [{severity}] {issue}")
+
+
+@main.command(name="run")
+@click.argument("task", type=str)
+@click.option("--autonomous", "-a", is_flag=True, default=False, help="Run all stages autonomously without confirmation prompts.")
+def run_pipeline(task: str, autonomous: bool):
+    """Run full multi-agent pipeline: Architect -> Planner -> Executor -> Reviewer."""
+    root = Path.cwd()
+    config = Config.load(root)
+    git = GitService(root)
+    run_mgr = RunManager(root)
+
+    # 1. Create Run
+    run = run_mgr.create_run(task=task)
+    context = Context(run=run, project_root=root, config=config, git=git)
+
+    stages_to_run = ["architect", "planner", "executor", "reviewer"]
+    click.echo(f"\n🚀 [Run: {run.run_id}] Starting Forge Pipeline for task:")
+    click.secho(f"   \"{task}\"\n", bold=True)
+
+    for stage_name in stages_to_run:
+        stage_cfg = config.stages.get(stage_name)
+        adapter_name = stage_cfg.adapter if stage_cfg else "opencode"
+        model = stage_cfg.model if stage_cfg else None
+        effort = stage_cfg.effort if stage_cfg else None
+        auto_approve = stage_cfg.auto_approve if stage_cfg else (stage_name == "executor")
+
+        try:
+            adapter = AdapterRegistry.get(
+                name=adapter_name,
+                model=model,
+                effort=effort,
+                auto_approve=auto_approve,
+            )
+        except Exception as e:
+            click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
+            sys.exit(1)
+
+        if not adapter.is_available():
+            click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
+            sys.exit(1)
+
+        role = Role.load(stage_name, project_root=root)
+        stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
+
+        click.echo(f"\n▶ Executing Stage: {role.sequence_number:02d}_{role.name.upper()} ({adapter.name})...")
+        result = stage.run(context)
+
+        click.echo(f"  ✓ {role.name.capitalize()} completed | Status: {result.status} ({result.duration_seconds:.1f}s)")
+
+        if result.status in ("REJECTED", "BLOCKED", "FAILED"):
+            click.secho(f"\n⚠️ Pipeline halted at stage '{role.name}' due to status '{result.status}'.", fg="yellow")
+            run.status = result.status
+            run.save_metadata()
+            return
+
+        if not autonomous and stage_name != stages_to_run[-1]:
+            if not click.confirm(f"\nProceed to next stage ({stages_to_run[stages_to_run.index(stage_name) + 1].upper()})?", default=True):
+                click.echo("Pipeline paused by user.")
+                run.status = f"PAUSED_AFTER_{role.name.upper()}"
+                run.save_metadata()
+                return
+
+    run.status = "COMPLETED"
+    run.save_metadata()
+    click.secho(f"\n✨ Forge Pipeline completed successfully for {run.run_id}!", fg="green", bold=True)
+    click.echo(f"   Artifacts saved in .forge/runs/{run.run_id}/\n")
     run_mgr = RunManager()
     runs = run_mgr.list_runs()
     if not runs:
