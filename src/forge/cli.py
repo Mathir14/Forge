@@ -454,22 +454,43 @@ def review_cmd(run_id: str):
 
 
 @main.command(name="run")
-@click.argument("task", type=str)
+@click.argument("task", type=str, required=False, default=None)
+@click.option("--from-critic", "-c", is_flag=True, default=False, help="Automatically resume from the latest Critic audit report.")
+@click.option("--run", "run_id", type=str, default=None, help="Existing Run ID to resume from.")
 @click.option("--autonomous", "-a", is_flag=True, default=False, help="Run all stages autonomously without confirmation prompts.")
-def run_pipeline(task: str, autonomous: bool):
-    """Run full multi-agent pipeline: Architect -> Planner -> Executor -> Reviewer."""
+def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], autonomous: bool):
+    """Run full multi-agent pipeline: (Critic ->) Architect -> Planner -> Executor -> Reviewer."""
     root = Path.cwd()
     config = Config.load(root)
     git = GitService(root)
     run_mgr = RunManager(root)
 
-    # 1. Create Run
-    run = run_mgr.create_run(task=task)
+    # 1. Determine Run & Task
+    if from_critic or run_id:
+        try:
+            run = run_mgr.resume(run_id)
+        except Exception as e:
+            click.secho(f"Error loading run: {e}", fg="red")
+            sys.exit(1)
+
+        critic_md = run_mgr.load_stage_markdown(run, "critic")
+        if not critic_md:
+            click.secho(f"No Critic report found in {run.run_id}.", fg="red")
+            sys.exit(1)
+
+        task = task or f"Implement recommendations and fix issues identified in Critic report ({run.run_id})."
+        click.echo(f"\n🔗 Linking pipeline to Critic report in {run.run_id}!")
+    else:
+        if not task:
+            click.secho("Error: Missing TASK. Please provide a task or use --from-critic.", fg="red")
+            sys.exit(1)
+        run = run_mgr.create_run(task=task)
+
     context = Context(run=run, project_root=root, config=config, git=git)
 
     stages_to_run = ["architect", "planner", "executor", "reviewer"]
     click.echo(f"\n🚀 [Run: {run.run_id}] Starting Forge Pipeline for task:")
-    click.secho(f"   \"{task}\"\n", bold=True)
+    click.secho(f"   \"{run.task}\"\n", bold=True)
 
     for stage_name in stages_to_run:
         stage_cfg = config.stages.get(stage_name)

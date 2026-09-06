@@ -92,3 +92,43 @@ def test_full_four_stage_pipeline(tmp_path):
     assert (run_dir / "04_reviewer.md").exists()
     assert (run_dir / "04_reviewer.json").exists()
     assert (run_dir / "metadata.json").exists()
+
+
+def test_pipeline_resuming_from_critic_report(tmp_path):
+    run_mgr = RunManager(tmp_path)
+    run = run_mgr.create_run(task="Critique: Code smells in adapters")
+
+    # Save critic output
+    run_mgr.save_stage_artifacts(
+        run=run,
+        sequence_number=0,
+        role_name="critic",
+        markdown_content="# Critic Report\nFound subprocess deadlock risk in adapter execution.",
+        json_data={"ROLE": "CRITIC", "STATUS": "CRITIQUE_COMPLETE", "HANDOFF": "ARCHITECT"},
+        prompt_hash="critic_hash_999",
+        adapter_name="opencode",
+    )
+
+    context = Context(
+        run=run,
+        project_root=tmp_path,
+        config=Config.default(),
+        git=GitService(tmp_path),
+    )
+
+    # Architect stage consuming critic report
+    arch_role = Role.load("architect", project_root=tmp_path)
+    arch_stage = Stage(
+        role=arch_role,
+        adapter=MockStageAdapter("opencode", "ROLE: ARCHITECT\nSTATUS: APPROVED\nHANDOFF: PLANNER"),
+        run_manager=run_mgr,
+    )
+    res = arch_stage.run(context)
+    assert res.status == "APPROVED"
+
+    # Verify both 00_critic and 01_architect exist in the same run folder
+    run_dir = tmp_path / ".forge" / "runs" / "run-001"
+    assert (run_dir / "00_critic.md").exists()
+    assert (run_dir / "00_critic.json").exists()
+    assert (run_dir / "01_architect.md").exists()
+    assert (run_dir / "01_architect.json").exists()
