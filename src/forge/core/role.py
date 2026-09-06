@@ -34,6 +34,7 @@ class Role:
                 protocol_content = f.read()
 
         seq_map = {
+            "critic": 0,
             "architect": 1,
             "planner": 2,
             "executor": 3,

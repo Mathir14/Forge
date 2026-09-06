@@ -1,5 +1,8 @@
 version: "1.0"
 stages:
+  critic:
+    adapter: opencode
+    model: null
   architect:
     adapter: opencode
     model: null

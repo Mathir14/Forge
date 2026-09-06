@@ -6,6 +6,7 @@ from forge.protocol.report import MachineReport
 
 class MachineReportValidator:
     ALLOWED_STATUSES = {
+        "CRITIC": {"CRITIQUE_COMPLETE", "APPROVED", "BLOCKED", "READY"},
         "ARCHITECT": {"APPROVED", "REJECTED", "BLOCKED", "READY"},
         "PLANNER": {"READY", "BLOCKED", "APPROVED", "REJECTED"},
         "EXECUTOR": {"SUCCESS", "FAILED", "BLOCKED"},
@@ -13,6 +14,7 @@ class MachineReportValidator:
     }
 
     ALLOWED_HANDOFFS = {
+        "CRITIC": {"ARCHITECT", "PLANNER", "NONE"},
         "ARCHITECT": {"PLANNER", "NONE"},
         "PLANNER": {"EXECUTOR", "ARCHITECT", "NONE"},
         "EXECUTOR": {"REVIEWER", "PLANNER", "ARCHITECT", "NONE"},

@@ -32,6 +32,7 @@ class Config:
         return cls(
             version="1.0",
             stages={
+                "critic": StageConfig(adapter="opencode", model=None),
                 "architect": StageConfig(adapter="opencode", model=None),
                 "planner": StageConfig(adapter="opencode", model=None),
                 "executor": StageConfig(

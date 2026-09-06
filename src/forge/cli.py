@@ -107,6 +107,67 @@ execution:
     click.secho("\nInitialization complete! Run 'forge doctor' to verify.", fg="green")
 
 
+@main.command(name="critic")
+@click.argument("target", type=str, required=False, default="Audit and critique the codebase for architecture, security, code smells, and maintainability.")
+def critic_cmd(target: str):
+    """Run Critic role to audit and expose flaws, code smells, and tech debt in TARGET."""
+    root = Path.cwd()
+    config = Config.load(root)
+    git = GitService(root)
+    run_mgr = RunManager(root)
+
+    # Create a new run
+    run = run_mgr.create_run(task=f"Critique: {target}")
+    context = Context(run=run, project_root=root, config=config, git=git)
+
+    # Load Critic role and configured adapter
+    critic_cfg = config.stages.get("critic")
+    adapter_name = critic_cfg.adapter if critic_cfg else "opencode"
+    model = critic_cfg.model if critic_cfg else None
+
+    try:
+        adapter = AdapterRegistry.get(
+            name=adapter_name,
+            model=model,
+            effort=critic_cfg.effort if critic_cfg else None,
+            auto_approve=critic_cfg.auto_approve if critic_cfg else False,
+        )
+    except Exception as e:
+        click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")
+        sys.exit(1)
+
+    if not adapter.is_available():
+        click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
+        click.echo("Run 'forge doctor' to inspect available tools.")
+        sys.exit(1)
+
+    role = Role.load("critic", project_root=root)
+    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
+
+    click.echo(f"\n🧐 [Run: {run.run_id}] Invoking Codebase Critic ({adapter.name}) on:")
+    click.secho(f"   \"{target}\"\n", bold=True)
+
+    result = stage.run(context)
+
+    click.echo("=" * 60)
+    click.echo(result.raw_markdown)
+    click.echo("=" * 60)
+
+    click.echo(f"\n📊 Critic Summary:")
+    click.echo(f"  • Status:       {result.status}")
+    click.echo(f"  • Handoff:      {result.handoff}")
+    click.echo(f"  • Prompt Hash:  {result.prompt.prompt_hash}")
+    click.echo(f"  • Duration:     {result.duration_seconds:.2f}s")
+    click.echo(f"  • Exit Code:    {result.response.exit_code}")
+    click.echo(f"  • Artifacts:    .forge/runs/{run.run_id}/00_critic.md & .json\n")
+
+    if result.machine_report.issues:
+        click.echo("⚠️ Reported Issues:")
+        for severity, issues in result.machine_report.issues.items():
+            for issue in issues:
+                click.echo(f"  [{severity}] {issue}")
+
+
 @main.command(name="architect")
 @click.argument("task", type=str)
 def architect_cmd(task: str):
