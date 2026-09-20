@@ -43,6 +43,9 @@ Requirements:
 - Do NOT emit a second protocol block.
 - Do NOT repeat ROLE, STATUS or HANDOFF.
 - Additional role-specific information (ARCHITECTURE, MODULES, NEW_INTERFACES, etc.) must be additional YAML keys inside the SAME YAML document.
+- Any plain YAML scalar containing ':' must either:
+  - be quoted, or
+  - be represented as a structured YAML object (preferred where appropriate).
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
