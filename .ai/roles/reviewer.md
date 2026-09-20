@@ -56,6 +56,10 @@ Requirements:
 - Any plain YAML scalar containing ':' must either:
   - be quoted, or
   - be represented as a structured YAML object (preferred where appropriate).
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
+- Issue identifiers must never appear as unquoted inline bracket notation like `- [C1] ...` (unquoted `[` is parsed as a YAML flow sequence). Always quote issue strings containing brackets, e.g.:
+    CRITICAL:
+      - "[C1] Register route accepts client-supplied role."
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
@@ -72,17 +76,17 @@ DURATION: 300s
 STATUS: APPROVED
 EXIT_CODE: 0
 HANDOFF: NONE
-REASON: All claims verified against git diff and tests pass.
+REASON: "All claims verified against git diff and tests pass."
 INPUTS:
-  - git diff
+  - "git diff"
 OUTPUTS:
-  - review.md
+  - "review.md"
 ISSUES:
   CRITICAL: []
   MAJOR: []
   MINOR: []
 CONFIDENCE: HIGH
-NEXT_ACTION: Complete run
+NEXT_ACTION: "Complete run"
 SCORES:
   ARCHITECTURE: 10
   MAINTAINABILITY: 9

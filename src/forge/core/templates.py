@@ -16,6 +16,7 @@ Requirements:
 - Any plain YAML scalar containing ':' must either:
   - be quoted, or
   - be represented as a structured YAML object (preferred where appropriate).
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
 - The entire block must be parseable by yaml.safe_load().
 
 Base Protocol Schema:
@@ -31,7 +32,7 @@ DURATION:
 STATUS:
 EXIT_CODE:
 HANDOFF:
-REASON:
+REASON: "Concise single-line summary (max 100 chars)"
 
 INPUTS:
 OUTPUTS:
@@ -93,6 +94,7 @@ Requirements:
 - Any plain YAML scalar containing ':' must either:
   - be quoted, or
   - be represented as a structured YAML object (preferred where appropriate).
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
@@ -109,7 +111,7 @@ DURATION: 300s
 STATUS: APPROVED
 EXIT_CODE: 0
 HANDOFF: PLANNER
-REASON: Architecture is verified and sound.
+REASON: "Architecture is verified and sound."
 INPUTS:
   - spec.md
 OUTPUTS:
@@ -210,6 +212,7 @@ Requirements:
 - Additional role-specific information (TASK_COUNT, TASKS, DEPENDENCIES, ACCEPTANCE_CRITERIA, VALIDATION_REQUIRED) must be additional YAML keys inside the SAME YAML document.
 - TASKS should be a list of structured objects with `id`, `component`, and `description` (preferred format), or quoted strings. Never emit unquoted scalars containing colons.
 - Any scalar value containing ':' must be quoted.
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
@@ -226,7 +229,7 @@ DURATION: 300s
 STATUS: READY
 EXIT_CODE: 0
 HANDOFF: EXECUTOR
-REASON: Implementation plan is decomposed and ready.
+REASON: "Implementation plan is decomposed and ready."
 INPUTS:
   - architecture.md
 OUTPUTS:
@@ -301,6 +304,7 @@ Requirements:
 - Any plain YAML scalar containing ':' must either:
   - be quoted, or
   - be represented as a structured YAML object (preferred where appropriate).
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
@@ -317,7 +321,7 @@ DURATION: 900s
 STATUS: SUCCESS
 EXIT_CODE: 0
 HANDOFF: REVIEWER
-REASON: Implementation completed and validated.
+REASON: "Implementation completed and validated."
 INPUTS:
   - tasks.json
 OUTPUTS:
@@ -401,6 +405,10 @@ Requirements:
 - Any plain YAML scalar containing ':' must either:
   - be quoted, or
   - be represented as a structured YAML object (preferred where appropriate).
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
+- Issue identifiers must never appear as unquoted inline bracket notation like `- [C1] ...` (unquoted `[` is parsed as a YAML flow sequence). Always quote issue strings containing brackets, e.g.:
+    CRITICAL:
+      - "[C1] Register route accepts client-supplied role."
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
@@ -417,17 +425,17 @@ DURATION: 300s
 STATUS: APPROVED
 EXIT_CODE: 0
 HANDOFF: NONE
-REASON: All claims verified against git diff and tests pass.
+REASON: "All claims verified against git diff and tests pass."
 INPUTS:
-  - git diff
+  - "git diff"
 OUTPUTS:
-  - review.md
+  - "review.md"
 ISSUES:
   CRITICAL: []
   MAJOR: []
   MINOR: []
 CONFIDENCE: HIGH
-NEXT_ACTION: Complete run
+NEXT_ACTION: "Complete run"
 SCORES:
   ARCHITECTURE: 10
   MAINTAINABILITY: 9
@@ -486,6 +494,7 @@ Requirements:
 - Any plain YAML scalar containing ':' must either:
   - be quoted, or
   - be represented as a structured YAML object (preferred where appropriate).
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
@@ -502,7 +511,7 @@ DURATION: 300s
 STATUS: CRITIQUE_COMPLETE
 EXIT_CODE: 0
 HANDOFF: ARCHITECT
-REASON: Codebase audit completed, identified architectural priorities.
+REASON: "Codebase audit completed, identified architectural priorities."
 INPUTS:
   - codebase
 OUTPUTS:

@@ -14,6 +14,7 @@ Requirements:
 - Any plain YAML scalar containing ':' must either:
   - be quoted, or
   - be represented as a structured YAML object (preferred where appropriate).
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
 - The entire block must be parseable by yaml.safe_load().
 
 Base Protocol Schema:
@@ -29,7 +30,7 @@ DURATION:
 STATUS:
 EXIT_CODE:
 HANDOFF:
-REASON:
+REASON: "Concise single-line summary (max 100 chars)"
 
 INPUTS:
 OUTPUTS:

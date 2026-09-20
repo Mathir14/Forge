@@ -1,4 +1,5 @@
 from pathlib import Path
+import pytest
 import yaml
 from forge.protocol.parser import MachineReportParser
 from forge.protocol.validator import MachineReportValidator
@@ -251,17 +252,17 @@ DURATION: 300s
 STATUS: APPROVED
 EXIT_CODE: 0
 HANDOFF: NONE
-REASON: All claims verified against git diff and tests pass.
+REASON: "All claims verified against git diff and tests pass."
 INPUTS:
-  - git diff
+  - "git diff"
 OUTPUTS:
-  - review.md
+  - "review.md"
 ISSUES:
   CRITICAL: []
   MAJOR: []
   MINOR: []
 CONFIDENCE: HIGH
-NEXT_ACTION: Complete run
+NEXT_ACTION: "Complete run"
 SCORES:
   ARCHITECTURE: 10
   MAINTAINABILITY: 9
@@ -595,6 +596,283 @@ VALIDATION:
 """)
     assert valid["VALIDATION"]["LINT"]["status"] == "PASSED"
     assert valid["VALIDATION"]["LINT"]["details"] == "next lint: 0 warnings, 0 errors"
+
+
+def test_regression_reviewer_failure_a_bracket_syntax_error():
+    """Verify Reviewer unquoted bracket syntax fails YAML parsing and quoted remediation succeeds."""
+    # 1. Unquoted bracket list item causes yaml.parser.ParserError
+    failing_report = """```yaml
+ROLE: REVIEWER
+PROMPT_VERSION: 1.0
+TASK_ID: task-001
+START_TIME: 2026-09-20T10:25:00Z
+END_TIME: 2026-09-20T10:30:00Z
+DURATION: 300s
+STATUS: CHANGES_REQUIRED
+EXIT_CODE: 1
+HANDOFF: EXECUTOR
+REASON: "Issues identified during review."
+INPUTS:
+  - "git diff"
+OUTPUTS:
+  - "review.md"
+ISSUES:
+  CRITICAL:
+    - [C1] register route accepts client-supplied role
+  MAJOR: []
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: "Remediate findings"
+SCORES:
+  ARCHITECTURE: 5
+  MAINTAINABILITY: 6
+  READABILITY: 7
+  SECURITY: 3
+  PERFORMANCE: 8
+  TESTING: 6
+APPROVAL: NO
+```"""
+    with pytest.raises(yaml.YAMLError) as exc_info:
+        yaml.safe_load("""
+ISSUES:
+  CRITICAL:
+    - [C1] register route accepts client-supplied role
+""")
+    assert "expected ',' or ']'" in str(exc_info.value) or isinstance(exc_info.value, yaml.parser.ParserError)
+
+    # MachineReportParser must record diagnostic and return empty dict
+    data_failing, raw_failing = MachineReportParser.extract_yaml(failing_report, expected_role="REVIEWER")
+    assert data_failing == {}
+    assert MachineReportParser.last_error is not None
+
+    # MachineReportValidator must fail invalid report
+    report_failing = MachineReportValidator.validate(data_failing, expected_role="REVIEWER")
+    assert report_failing.is_valid is False
+
+    # 2. Hardened quoted string remediation succeeds across parser and validator
+    remediated_yaml = """
+ROLE: REVIEWER
+PROMPT_VERSION: 1.0
+TASK_ID: task-001
+START_TIME: 2026-09-20T10:25:00Z
+END_TIME: 2026-09-20T10:30:00Z
+DURATION: 300s
+STATUS: CHANGES_REQUIRED
+EXIT_CODE: 1
+HANDOFF: EXECUTOR
+REASON: "Issues identified during review."
+INPUTS:
+  - "git diff"
+OUTPUTS:
+  - "review.md"
+ISSUES:
+  CRITICAL:
+    - "[C1] Register route accepts client-supplied role."
+  MAJOR: []
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: "Remediate findings"
+SCORES:
+  ARCHITECTURE: 5
+  MAINTAINABILITY: 6
+  READABILITY: 7
+  SECURITY: 3
+  PERFORMANCE: 8
+  TESTING: 6
+APPROVAL: NO
+"""
+    loaded = yaml.safe_load(remediated_yaml)
+    assert isinstance(loaded, dict)
+    assert loaded["ISSUES"]["CRITICAL"] == ["[C1] Register route accepts client-supplied role."]
+
+    report_remediated = MachineReportValidator.validate(loaded, expected_role="REVIEWER", raw_yaml=remediated_yaml)
+    assert report_remediated.is_valid is True
+    assert report_remediated.role == "REVIEWER"
+    assert report_remediated.status == "CHANGES_REQUIRED"
+    assert report_remediated.handoff == "EXECUTOR"
+
+
+def test_regression_reviewer_failure_b_unquoted_colon_scalar_error():
+    """Verify Reviewer unquoted scalar containing colon fails YAML parsing and quoted remediation succeeds."""
+    # 1. Unquoted colon in plain scalar causes yaml.scanner.ScannerError
+    failing_report = """```yaml
+ROLE: REVIEWER
+PROMPT_VERSION: 1.0
+TASK_ID: task-001
+START_TIME: 2026-09-20T10:25:00Z
+END_TIME: 2026-09-20T10:30:00Z
+DURATION: 300s
+STATUS: CHANGES_REQUIRED
+EXIT_CODE: 1
+HANDOFF: EXECUTOR
+REASON: REQUIRED solely for convention debt: Zod mandated but unused in auth schema
+INPUTS:
+  - "git diff"
+OUTPUTS:
+  - "review.md"
+ISSUES:
+  CRITICAL: []
+  MAJOR: []
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: "Refactor auth schema"
+SCORES:
+  ARCHITECTURE: 7
+  MAINTAINABILITY: 7
+  READABILITY: 8
+  SECURITY: 9
+  PERFORMANCE: 8
+  TESTING: 8
+APPROVAL: NO
+```"""
+    with pytest.raises(yaml.YAMLError) as exc_info:
+        yaml.safe_load("""
+REASON: REQUIRED solely for convention debt: Zod mandated but unused in auth schema
+""")
+    assert "mapping values are not allowed here" in str(exc_info.value) or isinstance(exc_info.value, yaml.scanner.ScannerError)
+
+    # MachineReportParser must record diagnostic and return empty dict
+    data_failing, raw_failing = MachineReportParser.extract_yaml(failing_report, expected_role="REVIEWER")
+    assert data_failing == {}
+    assert MachineReportParser.last_error is not None
+
+    # MachineReportValidator must fail invalid report
+    report_failing = MachineReportValidator.validate(data_failing, expected_role="REVIEWER")
+    assert report_failing.is_valid is False
+
+    # 2. Hardened quoted string remediation succeeds across parser and validator
+    remediated_yaml = """
+ROLE: REVIEWER
+PROMPT_VERSION: 1.0
+TASK_ID: task-001
+START_TIME: 2026-09-20T10:25:00Z
+END_TIME: 2026-09-20T10:30:00Z
+DURATION: 300s
+STATUS: CHANGES_REQUIRED
+EXIT_CODE: 1
+HANDOFF: EXECUTOR
+REASON: "REQUIRED solely for convention debt: Zod mandated but unused in auth schema"
+INPUTS:
+  - "git diff"
+OUTPUTS:
+  - "review.md"
+ISSUES:
+  CRITICAL: []
+  MAJOR: []
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: "Refactor auth schema"
+SCORES:
+  ARCHITECTURE: 7
+  MAINTAINABILITY: 7
+  READABILITY: 8
+  SECURITY: 9
+  PERFORMANCE: 8
+  TESTING: 8
+APPROVAL: NO
+"""
+    loaded = yaml.safe_load(remediated_yaml)
+    assert isinstance(loaded, dict)
+    assert loaded["REASON"] == "REQUIRED solely for convention debt: Zod mandated but unused in auth schema"
+
+    report_remediated = MachineReportValidator.validate(loaded, expected_role="REVIEWER", raw_yaml=remediated_yaml)
+    assert report_remediated.is_valid is True
+    assert report_remediated.role == "REVIEWER"
+    assert report_remediated.status == "CHANGES_REQUIRED"
+    assert report_remediated.handoff == "EXECUTOR"
+
+
+def test_regression_reviewer_failure_c_multiline_prose_reason_error():
+    """Verify Reviewer unquoted multiline prose REASON with colons fails YAML parsing and short quoted remediation succeeds."""
+    # 1. Unquoted multiline prose containing colons causes yaml.scanner.ScannerError
+    failing_report = """```yaml
+ROLE: REVIEWER
+PROMPT_VERSION: 1.0
+TASK_ID: run-001
+START_TIME: 2026-09-20T19:05:00Z
+END_TIME: 2026-09-20T19:58:00Z
+DURATION: ~53m
+STATUS: CHANGES_REQUIRED
+EXIT_CODE: 1
+HANDOFF: EXECUTOR
+REASON: Re-verified all executor claims independently (tsc 0 errors, lint clean, build 18/18, 33/33 tests vs live Postgres, migrate up-to-date, seed idempotent x2, zero cross-imports, no scope violations). C1, M3, M4, M5 and minors substantively confirmed. However previous reviews missed a genuine stored XSS: user-controlled website and sourceLink rendered verbatim into anchor href on companies/[id]/page.tsx lines 44, 61, 236 with only a length>=3 check upstream; React 18.3.1 does not block javascript hrefs, and submissions are auto-APPROVED so payloads are immediately public. Also the prior reviewer CHANGES_REQUIRED items were not fully closed: Zod mandated but unused, as-any still present in 3 files, plus minor robustness gaps.
+INPUTS:
+  - "src/app/companies/[id]/page.tsx"
+OUTPUTS:
+  - "review.md"
+ISSUES:
+  CRITICAL: []
+  MAJOR:
+    - "[XSS] Stored javascript URL in href: company.website and company.sourceLink rendered verbatim into anchor href on src/app/companies/[id]/page.tsx."
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: "Remediate findings"
+SCORES:
+  ARCHITECTURE: 5
+  MAINTAINABILITY: 6
+  READABILITY: 7
+  SECURITY: 5
+  PERFORMANCE: 8
+  TESTING: 9
+APPROVAL: NO
+```"""
+    data_failing, raw_failing = MachineReportParser.extract_yaml(failing_report, expected_role="REVIEWER")
+    assert data_failing == {}
+    assert MachineReportParser.last_error is not None
+    assert "mapping values are not allowed here" in str(MachineReportParser.last_error)
+
+    report_failing = MachineReportValidator.validate(data_failing, expected_role="REVIEWER")
+    assert report_failing.is_valid is False
+
+    # 2. Remediated: short concise quoted REASON for machine signaling, detailed prose in Human Report
+    remediated_report = """# SENIOR REVIEWER
+## Human Report
+- Executive Summary: Re-verified all executor claims independently. Found stored XSS on company detail page.
+- Recommendation: CHANGES_REQUIRED to sanitize URLs with http/https allowlist.
+
+## Machine Report
+```yaml
+ROLE: REVIEWER
+PROMPT_VERSION: 1.0
+TASK_ID: run-001
+START_TIME: 2026-09-20T19:05:00Z
+END_TIME: 2026-09-20T19:58:00Z
+DURATION: 300s
+STATUS: CHANGES_REQUIRED
+EXIT_CODE: 1
+HANDOFF: EXECUTOR
+REASON: "Stored XSS detected on company page and convention debt unclosed."
+INPUTS:
+  - "src/app/companies/[id]/page.tsx"
+OUTPUTS:
+  - "review.md"
+ISSUES:
+  CRITICAL: []
+  MAJOR:
+    - "[XSS] Stored javascript URL in href: company.website and company.sourceLink rendered verbatim into anchor href on src/app/companies/[id]/page.tsx."
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: "Remediate findings"
+SCORES:
+  ARCHITECTURE: 5
+  MAINTAINABILITY: 6
+  READABILITY: 7
+  SECURITY: 5
+  PERFORMANCE: 8
+  TESTING: 9
+APPROVAL: NO
+```"""
+    data_remediated, raw_remediated = MachineReportParser.extract_yaml(remediated_report, expected_role="REVIEWER")
+    assert data_remediated != {}
+    assert data_remediated["REASON"] == "Stored XSS detected on company page and convention debt unclosed."
+    assert len(data_remediated["REASON"]) <= 100
+
+    report_remediated = MachineReportValidator.validate(data_remediated, expected_role="REVIEWER", raw_yaml=raw_remediated)
+    assert report_remediated.is_valid is True
+    assert report_remediated.status == "CHANGES_REQUIRED"
+    assert report_remediated.reason == "Stored XSS detected on company page and convention debt unclosed."
+
+
 
 
 

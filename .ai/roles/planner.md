@@ -39,6 +39,7 @@ Requirements:
 - Additional role-specific information (TASK_COUNT, TASKS, DEPENDENCIES, ACCEPTANCE_CRITERIA, VALIDATION_REQUIRED) must be additional YAML keys inside the SAME YAML document.
 - TASKS should be a list of structured objects with `id`, `component`, and `description` (preferred format), or quoted strings. Never emit unquoted scalars containing colons.
 - Any scalar value containing ':' must be quoted.
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
@@ -55,7 +56,7 @@ DURATION: 300s
 STATUS: READY
 EXIT_CODE: 0
 HANDOFF: EXECUTOR
-REASON: Implementation plan is decomposed and ready.
+REASON: "Implementation plan is decomposed and ready."
 INPUTS:
   - architecture.md
 OUTPUTS:
