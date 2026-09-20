@@ -43,6 +43,10 @@ Requirements:
 - Do NOT emit a second protocol block.
 - Do NOT repeat ROLE, STATUS or HANDOFF.
 - Additional role-specific information (ARCHITECTURE, MODULES, NEW_INTERFACES, etc.) must be additional YAML keys inside the SAME YAML document.
+- VALIDATION checks should be structured objects with `status` and `details` (preferred format), or quoted strings. Never emit unquoted scalars containing colons.
+- Any plain YAML scalar containing ':' must either:
+  - be quoted, or
+  - be represented as a structured YAML object (preferred where appropriate).
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
@@ -74,6 +78,9 @@ NEXT_ACTION: Proceed to review
 VALIDATION:
   COMMANDS:
     - pytest
+  LINT:
+    status: PASSED
+    details: "next lint: 0 warnings, 0 errors"
 ARTIFACTS:
   ARCHITECTURE_CHANGED: NO
   API_CHANGED: NO

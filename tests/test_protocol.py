@@ -207,6 +207,9 @@ NEXT_ACTION: Proceed to review
 VALIDATION:
   COMMANDS:
     - pytest
+  LINT:
+    status: PASSED
+    details: "next lint: 0 warnings, 0 errors"
 ARTIFACTS:
   ARCHITECTURE_CHANGED: NO
   API_CHANGED: NO
@@ -503,5 +506,95 @@ TASKS:
     assert loaded_nested["TASKS"][0]["description"] == "DB unique enforcement, soft-revoke..."
     report_nested = MachineReportValidator.validate(data_nested, expected_role="PLANNER", raw_yaml=raw_yaml_nested)
     assert report_nested.is_valid is True
+
+
+def test_regression_executor_unquoted_colon_failure_and_remediation():
+    """Reproduce exact Executor unquoted colon failure in VALIDATION, and verify structured remediation."""
+    # 1. Reproduce unquoted colon in VALIDATION scalar causing ScannerError
+    unquoted_validation = "PASSED (next lint: 0 warnings, 0 errors)"
+    failing_report = f"""
+```yaml
+ROLE: EXECUTOR
+PROMPT_VERSION: 1.0
+TASK_ID: task-003
+START_TIME: 2026-09-20T10:10:00Z
+END_TIME: 2026-09-20T10:25:00Z
+DURATION: 900s
+STATUS: SUCCESS
+EXIT_CODE: 0
+HANDOFF: REVIEWER
+REASON: Implementation completed and validated.
+INPUTS:
+  - tasks.json
+OUTPUTS:
+  - src/
+  - tests/
+ISSUES:
+  CRITICAL: []
+  MAJOR: []
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: Proceed to review
+VALIDATION:
+  LINT: {unquoted_validation}
+ARTIFACTS:
+  ARCHITECTURE_CHANGED: NO
+  API_CHANGED: NO
+  DATABASE_SCHEMA_CHANGED: NO
+  NEW_DEPENDENCIES: []
+  BREAKING_CHANGE: NO
+```
+"""
+    # yaml.safe_load() must fail on the unquoted colon scalar
+    import pytest
+    with pytest.raises(yaml.YAMLError) as exc_info:
+        yaml.safe_load(f"""
+VALIDATION:
+  LINT: {unquoted_validation}
+""")
+    assert "mapping values are not allowed here" in str(exc_info.value)
+
+    # MachineReportParser must record diagnostic and return empty dict
+    data_failing, raw_failing = MachineReportParser.extract_yaml(failing_report, expected_role="EXECUTOR")
+    assert data_failing == {}
+    assert MachineReportParser.last_error is not None
+    assert "mapping values are not allowed here" in str(MachineReportParser.last_error)
+
+    # MachineReportValidator must fail invalid report
+    report_failing = MachineReportValidator.validate(data_failing, expected_role="EXECUTOR")
+    assert report_failing.is_valid is False
+
+    # 2. Hardened structured remediation verifies:
+    # - yaml.safe_load() succeeds
+    # - MachineReportParser.extract_yaml() succeeds
+    # - MachineReportValidator.validate() succeeds
+    role_file = Path(__file__).resolve().parent.parent / ".ai" / "roles" / "executor.md"
+    content = role_file.read_text(encoding="utf-8")
+    data_structured, raw_yaml_structured = MachineReportParser.extract_yaml(content, expected_role="EXECUTOR")
+    assert raw_yaml_structured != ""
+    loaded = yaml.safe_load(raw_yaml_structured)
+    assert isinstance(loaded, dict)
+    assert loaded["VALIDATION"]["LINT"]["status"] == "PASSED"
+    assert loaded["VALIDATION"]["LINT"]["details"] == "next lint: 0 warnings, 0 errors"
+    assert loaded["VALIDATION"]["COMMANDS"] == ["pytest"]
+
+    report_structured = MachineReportValidator.validate(data_structured, expected_role="EXECUTOR", raw_yaml=raw_yaml_structured)
+    assert report_structured.is_valid is True
+    assert report_structured.role == "EXECUTOR"
+    assert report_structured.status == "SUCCESS"
+    assert report_structured.handoff == "REVIEWER"
+
+
+def test_protocol_structured_validation_format_is_valid_yaml():
+    """Verify preferred structured VALIDATION format parses independently of prompt templates."""
+    valid = yaml.safe_load("""
+VALIDATION:
+  LINT:
+    status: PASSED
+    details: "next lint: 0 warnings, 0 errors"
+""")
+    assert valid["VALIDATION"]["LINT"]["status"] == "PASSED"
+    assert valid["VALIDATION"]["LINT"]["details"] == "next lint: 0 warnings, 0 errors"
+
 
 
