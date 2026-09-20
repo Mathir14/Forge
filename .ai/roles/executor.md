@@ -47,6 +47,7 @@ Requirements:
 - Any plain YAML scalar containing ':' must either:
   - be quoted, or
   - be represented as a structured YAML object (preferred where appropriate).
+- REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
 - The entire block must be parseable by yaml.safe_load().
 
 Allowed Values:
@@ -63,7 +64,7 @@ DURATION: 900s
 STATUS: SUCCESS
 EXIT_CODE: 0
 HANDOFF: REVIEWER
-REASON: Implementation completed and validated.
+REASON: "Implementation completed and validated."
 INPUTS:
   - tasks.json
 OUTPUTS:
