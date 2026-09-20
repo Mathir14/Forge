@@ -28,16 +28,55 @@ Project documents + latest Architect output.
 - Recommendation
 
 ## Machine Report
-Use protocol.md and add:
+Requirements:
+- Emit EXACTLY ONE ```yaml fenced block.
+- Emit EXACTLY ONE YAML document.
+- Emit EXACTLY ONE ROLE field.
+- Emit EXACTLY ONE STATUS field.
+- Emit EXACTLY ONE HANDOFF field.
+- Do NOT emit a second protocol block.
+- Do NOT repeat ROLE, STATUS or HANDOFF.
+- Additional role-specific information (TASK_COUNT, TASKS, DEPENDENCIES, ACCEPTANCE_CRITERIA, VALIDATION_REQUIRED) must be additional YAML keys inside the SAME YAML document.
+- TASKS should be a list of structured objects with `id`, `component`, and `description` (preferred format), or quoted strings. Never emit unquoted scalars containing colons.
+- Any scalar value containing ':' must be quoted.
+- The entire block must be parseable by yaml.safe_load().
+
+Allowed Values:
+- STATUS: READY, BLOCKED
+- HANDOFF: EXECUTOR, ARCHITECT, NONE
 
 ```yaml
 ROLE: PLANNER
-STATUS: READY | BLOCKED
-HANDOFF: EXECUTOR | ARCHITECT
-
-TASK_COUNT:
+PROMPT_VERSION: 1.0
+TASK_ID: task-001
+START_TIME: 2026-09-20T10:05:00Z
+END_TIME: 2026-09-20T10:10:00Z
+DURATION: 300s
+STATUS: READY
+EXIT_CODE: 0
+HANDOFF: EXECUTOR
+REASON: Implementation plan is decomposed and ready.
+INPUTS:
+  - architecture.md
+OUTPUTS:
+  - tasks.json
+ISSUES:
+  CRITICAL: []
+  MAJOR: []
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: Proceed to execution
+TASK_COUNT: 2
 TASKS:
-DEPENDENCIES:
+  - id: T1
+    component: auth.service
+    description: Implement service layer logic
+  - id: T2
+    component: auth.test
+    description: Add unit tests and verify validation
+DEPENDENCIES: []
 ACCEPTANCE_CRITERIA:
+  - All unit tests pass
 VALIDATION_REQUIRED:
+  - pytest tests/
 ```

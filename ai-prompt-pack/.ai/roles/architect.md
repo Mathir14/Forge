@@ -32,16 +32,48 @@ Protect the long-term health of the repository.
 - Recommendation
 
 ## Machine Report
-Use protocol.md and add:
+Requirements:
+- Emit EXACTLY ONE ```yaml fenced block.
+- Emit EXACTLY ONE YAML document.
+- Emit EXACTLY ONE ROLE field.
+- Emit EXACTLY ONE STATUS field.
+- Emit EXACTLY ONE HANDOFF field.
+- Do NOT emit a second protocol block.
+- Do NOT repeat ROLE, STATUS or HANDOFF.
+- Additional role-specific information (ARCHITECTURE, MODULES, NEW_INTERFACES, etc.) must be additional YAML keys inside the SAME YAML document.
+- The entire block must be parseable by yaml.safe_load().
+
+Allowed Values:
+- STATUS: APPROVED, REJECTED, BLOCKED
+- HANDOFF: PLANNER, NONE
 
 ```yaml
 ROLE: ARCHITECT
-STATUS: APPROVED | REJECTED | BLOCKED
-HANDOFF: PLANNER | NONE
-
+PROMPT_VERSION: 1.0
+TASK_ID: task-001
+START_TIME: 2026-09-20T10:00:00Z
+END_TIME: 2026-09-20T10:05:00Z
+DURATION: 300s
+STATUS: APPROVED
+EXIT_CODE: 0
+HANDOFF: PLANNER
+REASON: Architecture is verified and sound.
+INPUTS:
+  - spec.md
+OUTPUTS:
+  - architecture.md
+ISSUES:
+  CRITICAL: []
+  MAJOR: []
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: Proceed to planning
 ARCHITECTURE:
-MODULES:
-NEW_INTERFACES:
-REFACTOR_REQUIRED: YES|NO
-BREAKING_ARCHITECTURE_CHANGE: YES|NO
+  MODULES:
+    - auth
+    - core
+  NEW_INTERFACES:
+    - TokenProvider
+  REFACTOR_REQUIRED: NO
+  BREAKING_ARCHITECTURE_CHANGE: NO
 ```

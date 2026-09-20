@@ -34,22 +34,43 @@ Assume defects, anti-patterns, and unhandled failure modes exist until proven ot
 - **Recommended Refactoring Targets**: Specific files/modules that should be redesigned next.
 
 ## Machine Report
-Use protocol.md and add:
+Requirements:
+- Emit EXACTLY ONE ```yaml fenced block.
+- Emit EXACTLY ONE YAML document.
+- Emit EXACTLY ONE ROLE field.
+- Emit EXACTLY ONE STATUS field.
+- Emit EXACTLY ONE HANDOFF field.
+- Do NOT emit a second protocol block.
+- Do NOT repeat ROLE, STATUS or HANDOFF.
+- Additional role-specific information (ARCHITECTURE, MODULES, NEW_INTERFACES, etc.) must be additional YAML keys inside the SAME YAML document.
+- The entire block must be parseable by yaml.safe_load().
+
+Allowed Values:
+- STATUS: CRITIQUE_COMPLETE, BLOCKED
+- HANDOFF: ARCHITECT, PLANNER, NONE
 
 ```yaml
 ROLE: CRITIC
-STATUS: CRITIQUE_COMPLETE | BLOCKED
-HANDOFF: ARCHITECT | NONE
-
-HEALTH_SCORE: 1-10
+PROMPT_VERSION: 1.0
+TASK_ID: task-001
+START_TIME: 2026-09-20T09:50:00Z
+END_TIME: 2026-09-20T09:55:00Z
+DURATION: 300s
+STATUS: CRITIQUE_COMPLETE
+EXIT_CODE: 0
+HANDOFF: ARCHITECT
+REASON: Codebase audit completed, identified architectural priorities.
+INPUTS:
+  - codebase
+OUTPUTS:
+  - critic_report.md
 ISSUES:
-  CRITICAL:
-    - ...
-  MAJOR:
-    - ...
-  MINOR:
-    - ...
-
+  CRITICAL: []
+  MAJOR: []
+  MINOR: []
+CONFIDENCE: HIGH
+NEXT_ACTION: Proceed to architecture
+HEALTH_SCORE: 8
 RECOMMENDED_ACTIONS:
-  - ...
+  - Review modular boundaries
 ```
