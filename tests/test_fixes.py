@@ -12,6 +12,7 @@ from forge.core.role import Role
 from forge.core.run import Run
 from forge.storage.run_manager import RunManager
 from forge.prompts.builder import InstructionBuilder
+from tests.conftest import configure_automated_execution_environment
 
 
 def test_base_adapter_default_timeout():
@@ -284,7 +285,7 @@ def test_cli_import_and_commands():
     assert "Forge Doctor" in doctor_result.output
 
 
-def test_antigravity_adapter_stdin_prompt():
+def test_antigravity_adapter_prompt_argument():
     from unittest.mock import patch, MagicMock
 
     with patch("shutil.which", return_value="/usr/bin/agy"):
@@ -296,9 +297,12 @@ def test_antigravity_adapter_stdin_prompt():
             cmd = mock_run.call_args[0][0]
             kwargs = mock_run.call_args[1]
             assert "-p" in cmd or "--print" in cmd
-            assert "hello world prompt" not in cmd
-            assert "--input-mode" not in cmd
-            assert kwargs.get("input") == "hello world prompt"
+            assert "hello world prompt" in cmd
+            flag_idx = cmd.index("-p") if "-p" in cmd else cmd.index("--print")
+            assert cmd[flag_idx + 1] == "hello world prompt"
+            # Verify -p does NOT take --output-format as its prompt value
+            assert cmd[flag_idx + 1] != "--output-format"
+            assert kwargs.get("input") is None
 
 
 def test_cli_run_stage_and_commands(tmp_path):
@@ -312,6 +316,7 @@ def test_cli_run_stage_and_commands(tmp_path):
         init_res = runner.invoke(main, ["init"])
         assert init_res.exit_code == 0
         assert (Path.cwd() / "forge.yaml").exists()
+        configure_automated_execution_environment()
 
         mock_resp = AdapterResponse(
             stdout="```yaml\nROLE: ARCHITECT\nSTATUS: APPROVED\nHANDOFF: PLANNER\n```",
@@ -433,6 +438,149 @@ def test_cli_prerequisite_failures(tmp_path):
         assert "No Architect artifacts found" in plan_res3.output
 
 
+def test_forge_runs_whitespace_task(tmp_path):
+    """Regression Finding 1: 'forge runs' must not crash with IndexError when run has whitespace-only task."""
+    from click.testing import CliRunner
+    from forge.cli import main
+    from forge.storage.run_manager import RunManager
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        runner.invoke(main, ["init"])
+        mgr = RunManager(Path.cwd())
+        mgr.create_run(task="   \n\n\t  \n")
+
+        res = runner.invoke(main, ["runs"])
+        assert res.exit_code == 0
+        assert "run-001" in res.output
 
 
+def test_forge_runs_empty_task(tmp_path):
+    """Regression Finding 1: 'forge runs' must not crash when run has empty or None task."""
+    from click.testing import CliRunner
+    from forge.cli import main
+    from forge.storage.run_manager import RunManager
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        runner.invoke(main, ["init"])
+        mgr = RunManager(Path.cwd())
+        mgr.create_run(task="")
+        r2 = mgr.create_run(task="placeholder")
+        r2.task = None
+        r2.save_metadata()
+
+        res = runner.invoke(main, ["runs"])
+        assert res.exit_code == 0
+        assert "run-001" in res.output
+        assert "run-002" in res.output
+
+
+def test_forge_auto_whitespace_spec(tmp_path):
+    """Regression Finding 2: 'forge auto --file' must not crash with IndexError when spec file is whitespace-only."""
+    from click.testing import CliRunner
+    from unittest.mock import patch
+    from forge.cli import main
+    from forge.adapters.base import AdapterResponse
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        runner.invoke(main, ["init"])
+        spec_file = Path.cwd() / "spec.md"
+        spec_file.write_text("   \n\n  \t\n", encoding="utf-8")
+
+        arch_resp = AdapterResponse(
+            stdout="```yaml\nROLE: ARCHITECT\nSTATUS: REJECTED\nHANDOFF: NONE\n```",
+            stderr="",
+            exit_code=0,
+            duration_seconds=0.1,
+            raw_output="```yaml\nROLE: ARCHITECT\nSTATUS: REJECTED\nHANDOFF: NONE\n```",
+        )
+        with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", return_value=arch_resp):
+            res = runner.invoke(main, ["auto", "--file", str(spec_file)])
+            assert res.exception is None or not isinstance(res.exception, IndexError)
+            assert "Starting Fully Autonomous Forge Loop:" in res.output
+
+
+def test_executor_configured_opencode_model_none():
+    """Regression Finding 3: executor configured as OpenCode with model=None must not inherit Antigravity default model."""
+    from unittest.mock import patch
+    from forge.cli import _get_adapter
+    from forge.core.config import Config, StageConfig
+    from forge.adapters.registry import AdapterRegistry
+
+    cfg = Config.default()
+    cfg.stages["executor"] = StageConfig(adapter="opencode", model=None)
+
+    with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True):
+        adapter = _get_adapter(cfg, "executor")
+        assert isinstance(adapter, OpenCodeAdapter)
+        assert adapter.model is None
+
+    cfg.stages["executor"] = StageConfig(adapter="antigravity", model=None)
+    with patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True):
+        adapter_agy = _get_adapter(cfg, "executor")
+        assert isinstance(adapter_agy, AntigravityAdapter)
+        assert adapter_agy.model == AntigravityAdapter.DEFAULT_MODEL
+
+    # Future adapter should not inherit Antigravity defaults
+    class CustomFutureAdapter(OpenCodeAdapter):
+        pass
+
+    with patch.dict(AdapterRegistry._ADAPTERS, {"future_agent": CustomFutureAdapter}):
+        cfg.stages["executor"] = StageConfig(adapter="future_agent", model=None)
+        with patch.object(CustomFutureAdapter, "is_available", return_value=True):
+            adapter_future = _get_adapter(cfg, "executor")
+            assert isinstance(adapter_future, CustomFutureAdapter)
+            assert adapter_future.model is None
+
+
+def test_opencode_windows_executable_resolution():
+    """Regression Finding 4: OpenCodeAdapter resolves executable via shutil.which() with fallback to 'opencode'."""
+    from unittest.mock import patch, MagicMock
+
+    adapter = OpenCodeAdapter()
+
+    # When shutil.which finds Windows .cmd file
+    windows_cmd_path = r"C:\Users\test\AppData\Roaming\npm\opencode.cmd"
+    with patch("shutil.which", return_value=windows_cmd_path):
+        assert adapter.is_available() is True
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            res = adapter.execute(prompt="hello")
+            mock_run.assert_called_once()
+            called_cmd = mock_run.call_args[0][0]
+            assert called_cmd[0] == windows_cmd_path
+            assert called_cmd[1] == "run"
+            assert res.exit_code == 0
+
+    # When shutil.which returns None (lookup fails), fall back to "opencode"
+    with patch("shutil.which", return_value=None):
+        assert adapter.is_available() is False
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            res = adapter.execute(prompt="hello")
+            mock_run.assert_called_once()
+            called_cmd = mock_run.call_args[0][0]
+            assert called_cmd[0] == "opencode"
+            assert called_cmd[1] == "run"
+            assert res.exit_code == 0
+
+
+def test_antigravity_adapter_passes_print_timeout():
+    """Regression: AntigravityAdapter must pass --print-timeout to synchronize agy's timeout with Forge."""
+    from unittest.mock import patch, MagicMock
+
+    with patch("shutil.which", return_value="/usr/bin/agy"):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            adapter = AntigravityAdapter()
+            res = adapter.execute(prompt="hello", timeout=600)
+            mock_run.assert_called_once()
+            called_cmd = mock_run.call_args[0][0]
+            assert "--print-timeout" in called_cmd
+            timeout_idx = called_cmd.index("--print-timeout")
+            assert called_cmd[timeout_idx + 1] == "600s"
+            assert res.exit_code == 0
 

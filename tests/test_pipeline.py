@@ -33,13 +33,16 @@ class MockStageAdapter(BaseAdapter):
         )
 
 
+from tests.conftest import make_automated_config
+
+
 def test_full_four_stage_pipeline(tmp_path):
     run_mgr = RunManager(tmp_path)
     run = run_mgr.create_run(task="Add OAuth2 Login")
     context = Context(
         run=run,
         project_root=tmp_path,
-        config=Config.default(),
+        config=make_automated_config(),
         git=GitService(tmp_path),
     )
 

@@ -23,8 +23,8 @@ share/python-wheels/
 .pytest_cache/
 
 # Forge runtime data
-.forge/runs/
-.forge/cache/
+.forge/
+
 
 # IDE
 .vscode/

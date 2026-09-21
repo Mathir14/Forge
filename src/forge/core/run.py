@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import json
+import tempfile
 
 
 @dataclass
@@ -17,6 +18,14 @@ class Run:
     prompt_hashes: Dict[str, str] = field(default_factory=dict)
     adapters_used: Dict[str, str] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    _initial_task: Optional[str] = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self._initial_task is None:
+            if "\n\n### Auto-Repair Feedback" in self.task:
+                self._initial_task = self.task.split("\n\n### Auto-Repair Feedback")[0]
+            else:
+                self._initial_task = self.task
 
     @property
     def metadata_file(self) -> Path:
@@ -26,30 +35,43 @@ class Run:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         data = {
             "run_id": self.run_id,
-            "task": self.task,
+            "task": self._initial_task or self.task,
             "created_at": self.created_at,
             "status": self.status,
             "prompt_hashes": self.prompt_hashes,
             "adapters_used": self.adapters_used,
             "metadata": self.metadata,
         }
-        with open(self.metadata_file, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            "w", dir=self.run_dir, prefix=".tmp_meta_", delete=False, encoding="utf-8"
+        ) as f:
             json.dump(data, f, indent=2)
+            tmp_path = Path(f.name)
+        tmp_path.replace(self.metadata_file)
 
     @classmethod
     def load(cls, run_dir: Path) -> "Run":
         meta_path = run_dir / "metadata.json"
         if not meta_path.exists():
             raise FileNotFoundError(f"No metadata.json found in {run_dir}")
-        with open(meta_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, ValueError) as e:
+            raise ValueError(f"Corrupted metadata in {meta_path}: {e}") from e
+        raw_task = data.get("task", "")
+        if "\n\n### Auto-Repair Feedback" in raw_task:
+            clean_task = raw_task.split("\n\n### Auto-Repair Feedback")[0]
+        else:
+            clean_task = raw_task
         return cls(
             run_id=data.get("run_id", run_dir.name),
-            task=data.get("task", ""),
+            task=clean_task,
             run_dir=run_dir,
             created_at=data.get("created_at", ""),
             status=data.get("status", "UNKNOWN"),
             prompt_hashes=data.get("prompt_hashes", {}),
             adapters_used=data.get("adapters_used", {}),
             metadata=data.get("metadata", {}),
+            _initial_task=clean_task,
         )

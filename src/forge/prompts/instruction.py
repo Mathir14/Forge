@@ -12,4 +12,10 @@ class Instruction:
     previous_stage_outputs: Dict[str, str] = field(default_factory=dict)
     git_diff: Optional[str] = None
     changed_files: List[str] = field(default_factory=list)
+    mixed_files: List[str] = field(default_factory=list)
+    git_status: Optional[str] = None
+    changed_file_summary: Optional[str] = None
+    executor_report: Optional[str] = None
     protocol_schema: str = ""
+    repair_feedback: Optional[str] = None
+

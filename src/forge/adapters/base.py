@@ -33,13 +33,18 @@ class AdapterResponse:
             raw_output=result.raw_output,
         )
 
-    def to_result(self) -> ExecutionResult:
+    def to_result(self, duration_seconds: Optional[float] = None) -> ExecutionResult:
         """Export this AdapterResponse to a transport-neutral ExecutionResult."""
+        final_duration = (
+            duration_seconds
+            if duration_seconds is not None
+            else self.duration_seconds
+        )
         return ExecutionResult(
             stdout=self.stdout,
             stderr=self.stderr,
             exit_code=self.exit_code,
-            duration_seconds=self.duration_seconds,
+            duration_seconds=final_duration,
             raw_output=self.raw_output,
         )
 
@@ -175,9 +180,8 @@ class BaseAdapter(ABC):
                 text=resp.stdout,
             )
 
-        exec_result = resp.to_result()
-        if not exec_result.duration_seconds:
-            exec_result.duration_seconds = duration
+        final_duration = resp.duration_seconds if resp.duration_seconds else duration
+        exec_result = resp.to_result(duration_seconds=final_duration)
 
         if resp.exit_code == 0:
             yield AgentEvent(
