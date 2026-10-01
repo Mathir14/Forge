@@ -541,3 +541,200 @@ def test_opencode_execute_backward_compatibility():
         assert res.stderr == ""
         assert res.exit_code == 0
         assert res.raw_output == "Standard stdout"
+
+
+# ---------------------------------------------------------------------------
+# 11. Context Compaction & Post-Compaction Continuation Handling
+# ---------------------------------------------------------------------------
+
+def test_opencode_compaction_step_finish_does_not_abort_stream():
+    """Verify that an intermediate step_finish with reason='stop' (e.g. from context compaction)
+    does not cause premature COMPLETE emission or abort stream consumption before process EOF.
+    Also verifies that intermediate compaction output is purged when a subsequent step starts.
+    """
+    adapter = OpenCodeAdapter()
+    stream = [
+        # Step 1: Tool call
+        json.dumps({"type": "step_start"}),
+        json.dumps({
+            "type": "tool_use",
+            "part": {"tool": "read", "state": {"status": "completed", "output": "file content"}},
+        }),
+        json.dumps({"type": "step_finish", "part": {"reason": "tool-calls"}}),
+
+        # Step 2: Intermediate context compaction step (emits compaction summary and reason='stop')
+        json.dumps({"type": "step_start"}),
+        json.dumps({
+            "type": "text",
+            "part": {
+                "text": "## Objective\n- Complete the CRITIC audit\n## Next Move\n1. Write report",
+            },
+        }),
+        json.dumps({
+            "type": "step_finish",
+            "part": {"reason": "stop", "tokens": {"total": 50000, "input": 45000, "output": 5000}},
+        }),
+
+        # Step 3: Post-compaction continuation step (emits final report)
+        json.dumps({"type": "step_start"}),
+        json.dumps({
+            "type": "text",
+            "part": {
+                "text": (
+                    "# Human Report — VerifyHire\n\n"
+                    "```yaml\n"
+                    "ROLE: CRITIC\n"
+                    "STATUS: CRITIQUE_COMPLETE\n"
+                    "HANDOFF: NONE\n"
+                    "```\n"
+                ),
+            },
+        }),
+        json.dumps({
+            "type": "step_finish",
+            "part": {"reason": "stop", "tokens": {"total": 52000, "input": 46000, "output": 6000}},
+        }),
+    ]
+
+    events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+
+    # Expected: TOOL_FINISH, CHUNK (compaction text), CHUNK (final report), COMPLETE
+    event_types = [e.event_type for e in events]
+    assert AgentEventType.TOOL_FINISH in event_types
+    assert AgentEventType.COMPLETE in event_types
+    assert event_types.count(AgentEventType.COMPLETE) == 1
+    assert event_types[-1] == AgentEventType.COMPLETE
+
+    complete_event = events[-1]
+    assert complete_event.result is not None
+    assert complete_event.result.exit_code == 0
+
+    # Assert that stdout contains the final deliverable, NOT the intermediate compaction text
+    assert "# Human Report — VerifyHire" in complete_event.result.stdout
+    assert "STATUS: CRITIQUE_COMPLETE" in complete_event.result.stdout
+    assert "## Objective" not in complete_event.result.stdout
+    assert "Intermediate compaction" not in complete_event.result.stdout
+
+
+def test_opencode_compaction_stage_raw_markdown_contains_final_output_not_compaction(tmp_path):
+    """Verify that end-to-end StageResult.raw_markdown contains the final assistant output
+    rather than an intermediate compaction artifact.
+    """
+    from forge.core.role import Role
+    from forge.core.context import Context
+    from forge.stages.stage import Stage
+    from forge.storage.run_manager import RunManager
+
+    stream_lines = [
+        # Step 1: Investigation tool call
+        json.dumps({"type": "step_start"}),
+        json.dumps({
+            "type": "tool_use",
+            "part": {"tool": "read", "state": {"status": "completed", "output": "code content"}},
+        }),
+        json.dumps({"type": "step_finish", "part": {"reason": "tool-calls"}}),
+
+        # Step 2: Context compaction (the run-013 incident scenario)
+        json.dumps({"type": "step_start"}),
+        json.dumps({
+            "type": "text",
+            "part": {
+                "text": (
+                    "## Objective\n"
+                    "- Complete the CRITIC audit of the VerifyHire codebase\n"
+                    "## Work State\n"
+                    "### Completed\n- Read project docs\n"
+                    "### Active\n- final Human Report + YAML Machine Report had NOT yet been written\n"
+                    "## Next Move\n1. Write the Human Report\n"
+                ),
+            },
+        }),
+        json.dumps({
+            "type": "step_finish",
+            "part": {"reason": "stop", "tokens": {"total": 51549, "input": 45539, "output": 6010}},
+        }),
+
+        # Step 3: Post-compaction continuation step (the true final response)
+        json.dumps({"type": "step_start"}),
+        json.dumps({
+            "type": "text",
+            "part": {
+                "text": (
+                    "# Human Report — VerifyHire Audit\n\n"
+                    "Executive Summary: Strong security baseline with modular separation.\n\n"
+                    "```yaml\n"
+                    "ROLE: CRITIC\n"
+                    "STATUS: CRITIQUE_COMPLETE\n"
+                    "HANDOFF: NONE\n"
+                    "EXIT_CODE: 0\n"
+                    "HEALTH_SCORE: 8\n"
+                    "REASON: \"Audit completed successfully with zero blockers.\"\n"
+                    "```\n"
+                ),
+            },
+        }),
+        json.dumps({
+            "type": "step_finish",
+            "part": {"reason": "stop", "tokens": {"total": 55000, "input": 47000, "output": 8000}},
+        }),
+    ]
+
+    adapter = OpenCodeAdapter()
+
+    # Create mock Popen process that streams stream_lines and then exits cleanly
+    mock_proc = MagicMock()
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdout = iter(stream_lines)
+    mock_proc.stderr = MagicMock()
+    mock_proc.stderr.read.return_value = ""
+    mock_proc.poll.return_value = 0
+    mock_proc.wait.return_value = 0
+
+    role = Role(
+        name="critic",
+        sequence_number=0,
+        template_content="Audit codebase.",
+        phase="pre_run",
+    )
+
+    from forge.core.config import Config
+    from forge.core.git import GitService
+
+    run_mgr = RunManager(tmp_path)
+    run = run_mgr.create_run(task="Audit codebase.")
+    context = Context(
+        run=run,
+        project_root=tmp_path,
+        config=Config.default(),
+        git=GitService(tmp_path),
+    )
+
+    stage = Stage(
+        role=role,
+        adapter=adapter,
+        run_manager=run_mgr,
+    )
+
+    with patch("shutil.which", return_value="/bin/opencode"), \
+         patch("subprocess.Popen", return_value=mock_proc), \
+         patch.object(adapter, "_kill_process_group"):
+
+        result = stage.run(context)
+
+    # 1. Assert Stage success and protocol validation
+    assert result.success is True
+    assert result.status == "CRITIQUE_COMPLETE"
+    assert result.machine_report.role == "CRITIC"
+    assert result.machine_report.status == "CRITIQUE_COMPLETE"
+    assert result.machine_report.is_valid is True
+
+    # 2. Assert raw_markdown contains the final assistant deliverable
+    assert "# Human Report — VerifyHire Audit" in result.raw_markdown
+    assert "Executive Summary: Strong security baseline" in result.raw_markdown
+    assert "STATUS: CRITIQUE_COMPLETE" in result.raw_markdown
+
+    # 3. Assert raw_markdown does NOT contain the intermediate compaction artifact
+    assert "## Objective" not in result.raw_markdown
+    assert "final Human Report + YAML Machine Report had NOT yet been written" not in result.raw_markdown
+    assert "## Next Move" not in result.raw_markdown
+

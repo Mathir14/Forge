@@ -14,12 +14,18 @@ DEFAULT_TIMEOUT: int = 300
 
 
 def _get_valid_stages() -> Set[str]:
+    stages = {"critic", "architect", "planner", "executor", "reviewer", "tester"}
     try:
         from forge.stages.definition import StageOrder
-        from forge.stages.requirements import StageRequirementsRegistry
-        return StageOrder.all_stage_names() | set(StageRequirementsRegistry.all_requirements().keys())
+        stages.update(StageOrder.all_stage_names())
     except Exception:
-        return {"critic", "architect", "planner", "executor", "reviewer", "tester"}
+        pass
+    try:
+        from forge.stages.requirements import StageRequirementsRegistry
+        stages.update(StageRequirementsRegistry.all_requirements().keys())
+    except Exception:
+        pass
+    return stages
 
 
 VALID_STAGES: Set[str] = _get_valid_stages()
@@ -187,6 +193,15 @@ class Config:
                 auto_approve=False,
                 extra_flags={},
                 _explicit_fields={"adapter", "model", "effort", "timeout", "auto_approve"},
+            ),
+            "tester": StageConfig(
+                adapter="opencode",
+                model=None,
+                effort="high",
+                timeout=None,
+                auto_approve=False,
+                extra_flags={},
+                _explicit_fields={"effort"},
             ),
             "reviewer": StageConfig(
                 adapter="opencode",
@@ -708,9 +723,10 @@ class Config:
             if not isinstance(stages, dict):
                 errors.append(f"'stages' must be a mapping/dictionary, got {type(stages).__name__}")
             else:
+                valid_stages = _get_valid_stages()
                 for stage_name, stage_data in stages.items():
-                    if stage_name.lower() not in VALID_STAGES:
-                        errors.append(f"Invalid stage name '{stage_name}' in stages. Valid stages: {sorted(VALID_STAGES)}")
+                    if stage_name.lower() not in valid_stages:
+                        errors.append(f"Invalid stage name '{stage_name}' in stages. Valid stages: {sorted(valid_stages)}")
                         continue
 
                     if not isinstance(stage_data, dict):

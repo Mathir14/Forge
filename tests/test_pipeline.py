@@ -72,25 +72,36 @@ def test_full_four_stage_pipeline(tmp_path):
     exec_role = Role.load("executor", project_root=tmp_path)
     exec_stage = Stage(
         role=exec_role,
-        adapter=MockStageAdapter("antigravity", "ROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER"),
+        adapter=MockStageAdapter("antigravity", "ROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER"),
         run_manager=run_mgr,
     )
     res3 = exec_stage.run(context)
     assert res3.status == "SUCCESS"
     assert (tmp_path / ".forge" / "runs" / "run-001" / "03_executor.json").exists()
 
-    # 4. Reviewer
+    # 4. Tester
+    tester_role = Role.load("tester", project_root=tmp_path)
+    tester_stage = Stage(
+        role=tester_role,
+        adapter=MockStageAdapter("opencode", "ROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER"),
+        run_manager=run_mgr,
+    )
+    res4 = tester_stage.run(context)
+    assert res4.status == "PASS"
+    assert (tmp_path / ".forge" / "runs" / "run-001" / "04_tester.json").exists()
+
+    # 5. Reviewer
     rev_role = Role.load("reviewer", project_root=tmp_path)
     rev_stage = Stage(
         role=rev_role,
         adapter=MockStageAdapter("opencode", "ROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE"),
         run_manager=run_mgr,
     )
-    res4 = rev_stage.run(context)
-    assert res4.status == "APPROVED"
-    assert (tmp_path / ".forge" / "runs" / "run-001" / "04_reviewer.json").exists()
+    res5 = rev_stage.run(context)
+    assert res5.status == "APPROVED"
+    assert (tmp_path / ".forge" / "runs" / "run-001" / "05_reviewer.json").exists()
 
-    # Verify all 4 stage artifacts exist in sequence
+    # Verify all stage artifacts exist in sequence
     run_dir = tmp_path / ".forge" / "runs" / "run-001"
     assert (run_dir / "01_architect.md").exists()
     assert (run_dir / "01_architect.json").exists()
@@ -98,8 +109,10 @@ def test_full_four_stage_pipeline(tmp_path):
     assert (run_dir / "02_planner.json").exists()
     assert (run_dir / "03_executor.md").exists()
     assert (run_dir / "03_executor.json").exists()
-    assert (run_dir / "04_reviewer.md").exists()
-    assert (run_dir / "04_reviewer.json").exists()
+    assert (run_dir / "04_tester.md").exists()
+    assert (run_dir / "04_tester.json").exists()
+    assert (run_dir / "05_reviewer.md").exists()
+    assert (run_dir / "05_reviewer.json").exists()
     assert (run_dir / "metadata.json").exists()
 
 

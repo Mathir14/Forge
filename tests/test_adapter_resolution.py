@@ -177,6 +177,11 @@ stages:
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="APPROVED",
         )
 
+        test_resp = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
+        )
+
         with patch("forge.cli._get_adapter", wraps=_get_adapter) as spy_adapter, \
              patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
@@ -192,7 +197,7 @@ stages:
         with patch("forge.cli._get_adapter", wraps=_get_adapter) as spy_adapter, \
              patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp, mock_resp]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp, mock_resp]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp):
 
             # 2. Auto pipeline closing critic: phase="post_run"
@@ -205,11 +210,11 @@ stages:
         with patch("forge.cli._get_adapter", wraps=_get_adapter) as spy_adapter, \
              patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp, mock_resp]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp, mock_resp]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp):
 
             # 3. Standard pipeline closing critic: phase="post_run"
-            res_run = runner.invoke(main, ["run", "Test Pipeline Task"], input="y\ny\ny\ny\n")
+            res_run = runner.invoke(main, ["run", "Test Pipeline Task"], input="y\ny\ny\ny\ny\n")
             assert res_run.exit_code == 0
             critic_calls = [call for call in spy_adapter.call_args_list if call.args[1] == "critic"]
             assert len(critic_calls) == 1
@@ -217,7 +222,7 @@ stages:
 
 
 def test_00_critic_and_05_critic_different_adapters_end_to_end(tmp_path):
-    """Verify 00_critic uses base adapter and 05_critic uses post_run_override adapter in artifacts."""
+    """Verify 00_critic uses base adapter and 06_critic uses post_run_override adapter in artifacts."""
     from pathlib import Path
     import json
     from click.testing import CliRunner
@@ -258,8 +263,12 @@ stages:
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="READY",
         )
         exec_resp = AdapterResponse(
-            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS",
+        )
+        test_resp = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
         )
         rev_resp = AdapterResponse(
             stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
@@ -281,10 +290,10 @@ stages:
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", side_effect=[exec_resp, critic_resp]) as mock_agy:
 
-            # Auto pipeline with post-run closing critic (05_critic)
+            # Auto pipeline with post-run closing critic (06_critic)
             res2 = runner.invoke(main, ["auto", "Full loop with closing critic"])
             assert res2.exit_code == 0
             # Executor called once, closing Critic called once on antigravity

@@ -49,3 +49,12 @@ def make_automated_config() -> Config:
 def enable_automated_env():
     """Pytest fixture providing a helper to enable executor.auto_approve in the working directory."""
     return configure_automated_execution_environment
+
+
+@pytest.fixture(autouse=True)
+def clean_validator_rules():
+    """Ensure custom validator rules do not leak across test boundaries."""
+    from forge.protocol.validator import MachineReportValidator
+    MachineReportValidator.reset_custom_rules()
+    yield
+    MachineReportValidator.reset_custom_rules()

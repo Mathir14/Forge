@@ -239,6 +239,11 @@ def test_auto_pipeline_retry_artifact_preservation_and_exit_code(tmp_path):
             stderr="", exit_code=0, duration_seconds=0.1,
             raw_output="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
         )
+        test_resp = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1,
+            raw_output="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+        )
         rev_reject = AdapterResponse(
             stdout="```yaml\nROLE: REVIEWER\nSTATUS: CHANGES_REQUIRED\nHANDOFF: EXECUTOR\nISSUES:\n  MAJOR:\n    - Missing unit tests\n```",
             stderr="", exit_code=0, duration_seconds=0.1,
@@ -247,7 +252,7 @@ def test_auto_pipeline_retry_artifact_preservation_and_exit_code(tmp_path):
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_reject, rev_reject]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_reject, test_resp, rev_reject]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp):
             res = runner.invoke(main, ["auto", "Build feature", "--max-retries", "2"])
             assert res.exit_code == 1
@@ -257,8 +262,10 @@ def test_auto_pipeline_retry_artifact_preservation_and_exit_code(tmp_path):
             run_dir = Path.cwd() / ".forge" / "runs" / "run-001"
             assert (run_dir / "03_executor_attempt_1.md").exists()
             assert (run_dir / "03_executor_attempt_2.md").exists()
-            assert (run_dir / "04_reviewer_attempt_1.md").exists()
-            assert (run_dir / "04_reviewer_attempt_2.md").exists()
+            assert (run_dir / "04_tester_attempt_1.md").exists()
+            assert (run_dir / "04_tester_attempt_2.md").exists()
+            assert (run_dir / "05_reviewer_attempt_1.md").exists()
+            assert (run_dir / "05_reviewer_attempt_2.md").exists()
 
 
 def test_changes_required_marks_stage_failed_and_halts_cli(tmp_path):
@@ -460,8 +467,12 @@ def test_auto_pipeline_critic_runs_before_commit(tmp_path):
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="READY",
         )
         exec_resp = AdapterResponse(
-            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS",
+        )
+        test_resp = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
         )
         rev_resp = AdapterResponse(
             stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
@@ -476,7 +487,7 @@ def test_auto_pipeline_critic_runs_before_commit(tmp_path):
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp, critic_blocked]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp, critic_blocked]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp), \
              patch("forge.core.git.GitService.is_git_repo", return_value=True), \
              patch("forge.core.git.GitService.commit", commit_mock):

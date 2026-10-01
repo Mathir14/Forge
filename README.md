@@ -8,19 +8,20 @@ Forge coordinates local AI coding agents into a structured, role-driven engineer
 
 ## Features
 
-- **Multi-Agent Pipeline**: Structured engineering lifecycle across specialized roles: **Critic** (`00`) → **Architect** (`01`) → **Planner** (`02`) → **Executor** (`03`) → **Reviewer** (`04`) → **Critic** (`05`). A single authoritative source of truth (`StageOrder`) drives both interactive and autonomous execution without magic sequence constants.
-- **Codebase Critic**: Relentlessly audits codebases or targeted modules for architectural decay, tight coupling, code smells, performance bottlenecks, and security vulnerabilities. Explicitly distinguishes between pre-run audit (`00_critic`, `phase: pre_run`) and closing post-execution audit (`05_critic`, `phase: post_run`).
+- **Multi-Agent Pipeline**: Structured engineering lifecycle across specialized roles: **Critic** (`00`) → **Architect** (`01`) → **Planner** (`02`) → **Executor** (`03`) → **Tester** (`04`) → **Reviewer** (`05`) → **Critic** (`06`). A single authoritative source of truth (`StageOrder`) drives both interactive and autonomous execution without magic sequence constants.
+- **Codebase Critic**: Relentlessly audits codebases or targeted modules for architectural decay, tight coupling, code smells, performance bottlenecks, and security vulnerabilities. Explicitly distinguishes between pre-run audit (`00_critic`, `phase: pre_run`) and closing post-execution audit (`06_critic`, `phase: post_run`).
 - **Software Architect**: Translates user requirements and audit findings into formal system designs, module boundaries, interfaces, refactoring mandates, and architectural decision records (ADRs) without touching implementation code.
 - **Project Planner**: Converts approved architecture specifications into dependency-ordered tasks, explicit acceptance criteria, and validation requirements without redesigning architecture or writing code.
 - **Software Executor**: Implements the approved plan directly within the codebase (powered by **Google Antigravity** / `agy` or **OpenAI Codex**), runs formatters, linters, builds, and automated test suites, and reports concrete execution evidence.
-- **Diff-First Adversarial Reviewer**: Change-centric quality gate where the Git diff is the primary review artifact. Receives a structured context: Original Requirements → Executor Report → Git Status → Changed Files → Git Diff → Repository Access. Directly verifies Executor claims (fixes, tests, features) against actual repository changes and rejects unsubstantiated claims.
-- **Autonomous Repair Loop**: In `forge auto`, automatically iterates between Executor and Reviewer up to `--max-retries` times. Reviewer feedback and test failures are fed back into subsequent Executor attempts until full approval is achieved or retries are exhausted.
+- **Empirical Black-Box Tester**: Operates running applications through native public interfaces (Headless Chromium via Playwright, REST/GraphQL APIs, CLI binaries, Library imports) under process group supervision (`RuntimeSupervisor`). Enforces strict resource budgets (`TestingBudget`), prioritizes modified features, detects dead interactions, unhandled console exceptions, and network errors, and collects forensic evidence (viewport screenshots, telemetry, and standalone executable reproduction scripts).
+- **Diff-First Adversarial Reviewer**: Change-centric quality gate where the Git diff is the primary review artifact. Receives the complete Tester report (`04_tester.md` and `04_tester.json`) as concrete behavioral evidence alongside Original Requirements → Executor Report → Git Status → Changed Files → Git Diff → Repository Access. Directly verifies Executor claims against actual repository changes and rejects unsubstantiated claims.
+- **Autonomous Repair Loop**: In `forge auto`, automatically iterates through the verification gate (Tester → Reviewer). If the Tester reports `FAIL` or the Reviewer requests changes (`CHANGES_REQUIRED`), structured feedback is fed back into subsequent Executor attempts until full approval is achieved or `--max-retries` is reached.
 - **Resume & Checkpoint Support**: Resumes previous runs seamlessly via `--run <run_id>`. Automatically detects and skips already completed or approved stages to enable idempotent recovery from transient failures or user pauses.
 - **Run History & Telemetry**: Every run is sequentially numbered (`run-001`, `run-002`, ...) and saved under `.forge/runs/`. Inspect historical runs, statuses, timestamps, and active adapters with `forge runs` (supports text table and JSON formats).
 - **Git Native Integration**: Captures unified diffs of staged, unstaged, and untracked files (diffed against `/dev/null`). Safely filters `.forge/` runtime data and `.env*` secrets from diffs, staging, and automated commits.
 - **Configurable CLI Adapters**: First-class support for `opencode`, `antigravity` (`agy`), and `codex` adapters with per-stage model selection, reasoning effort tiers (`effort: high`), tool auto-approval (`auto_approve`), and custom CLI flags (`extra_flags`). Supports phase-aware `post_run_override` for post-execution audits.
 - **Strict Protocol Validation**: Every agent must emit a standardized YAML machine report. Forge parses, validates allowed statuses and handoffs, captures structured issues, and halts execution immediately upon protocol violations or non-success statuses.
-- **Atomic Artifact Storage**: Paired human-readable (`.md`) and machine-readable (`.json`) artifacts are written atomically using temporary files and filesystem renames, preventing corrupt states if processes are interrupted. Every prompt is tagged with a SHA-256 hash.
+- **Atomic Artifact Storage & Exclusive Run Ownership**: Paired human-readable (`.md`) and machine-readable (`.json`) artifacts are written atomically using temporary files and filesystem renames. OS-level exclusive run locking (`RunLock`) backed by kernel `flock` prevents concurrent execution conflicts with automatic stale-lock recovery. Every prompt is tagged with a SHA-256 hash.
 
 ---
 
@@ -85,7 +86,7 @@ forge auto "Create REST API endpoints for user profiles" --auto-commit
 
 ## CLI Commands
 
-Forge exposes 10 dedicated commands. Every command and option is verified against `src/forge/cli.py`.
+Forge exposes 11 dedicated commands. Every command and option is verified against `src/forge/cli.py`.
 
 ### 1. `forge doctor`
 Diagnoses installed CLI binaries (`opencode`, `agy`/`antigravity`, `claude`, `aider`, `gemini`), git repository status, active branch, `.ai/` prompt template availability, and configured stages.
@@ -96,7 +97,7 @@ forge doctor
 
 ### 2. `forge init`
 Initializes Forge in the current directory:
-- Installs 5 default role templates in `.ai/roles/` (`architect.md`, `planner.md`, `executor.md`, `reviewer.md`, `critic.md`).
+- Installs 6 default role templates in `.ai/roles/` (`architect.md`, `planner.md`, `executor.md`, `tester.md`, `reviewer.md`, `critic.md`).
 - Installs the common agent machine protocol in `.ai/templates/protocol.md`.
 - Installs starter project documentation in `.ai/project/` (`architecture.md`, `conventions.md`, `decisions.md`, `roadmap.md`).
 - Creates or updates `.gitignore` to prevent tracking `.forge/runs/` and `.forge/cache/`.
@@ -174,8 +175,22 @@ forge execute
 forge execute --run run-019
 ```
 
-### 8. `forge review`
-Runs the **Reviewer** role (Sequence `04`) to perform a change-centric, diff-first adversarial audit. The Reviewer receives the original requirements, Executor report, Git status, changed-file summary, bounded Git diff, and repository access to verify all Executor claims against actual codebase changes.
+### 8. `forge test`
+Runs the **Tester** role (Sequence `04`) to evaluate observable software behavior through empirical black-box testing. Launches application processes, operates native interfaces (Web via Playwright, API, CLI, Library), captures screenshots and unhandled client exceptions, generates standalone reproduction scripts in `.forge/runs/<run_id>/evidence/`, and issues an empirical verdict (`PASS`, `FAIL`, `BLOCKED`, `NOT_TESTABLE`).
+
+**Options**:
+- `--run TEXT`: Existing Run ID to execute Tester on (defaults to the latest run).
+
+**Prerequisite**: The target run must contain an existing Executor artifact (`03_executor.md` or `.json`).
+
+**Examples**:
+```bash
+forge test
+forge test --run run-019
+```
+
+### 9. `forge review`
+Runs the **Reviewer** role (Sequence `05`) to perform a change-centric, diff-first adversarial audit. The Reviewer receives the complete Tester report (`04_tester.md` and `04_tester.json`), original requirements, Executor report, Git status, changed-file summary, bounded Git diff, and repository access to verify all claims against actual codebase changes.
 
 **Options**:
 - `--run TEXT`: Existing Run ID to execute Reviewer on (defaults to the latest run).
@@ -188,8 +203,8 @@ forge review
 forge review --run run-019
 ```
 
-### 9. `forge run`
-Runs the standard multi-agent pipeline with step-by-step confirmation checkpoints between stages (`Architect` → `Planner` → `Executor` → `Reviewer` [→ `Critic`]). Prompts `Proceed to next stage (NEXT)? [Y/n]` after each successful stage. If paused by the user, the run status is saved as `PAUSED_AFTER_<STAGE>`.
+### 10. `forge run`
+Runs the standard multi-agent pipeline with step-by-step confirmation checkpoints between stages (`Architect` → `Planner` → `Executor` → `Tester` → `Reviewer` [→ `Critic`]). Prompts `Proceed to next stage (NEXT)? [Y/n]` after each successful stage. If paused by the user, the run status is saved as `PAUSED_AFTER_<STAGE>`.
 
 **Arguments**:
 - `[TASK]`: Task description (required unless `-c/--from-critic` or `--run` is used).
@@ -207,8 +222,8 @@ forge run --run run-019
 forge run "Quick bugfix" --no-critic
 ```
 
-### 10. `forge auto`
-Runs the fully autonomous, unattended self-repair loop: `Architect` → `Planner` → `[Executor <-> Reviewer Self-Repair Loop]` → `Critic`. If the Reviewer requests changes (`CHANGES_REQUIRED`), structured issues are fed back into the Executor prompt for up to `--max-retries` iterations.
+### 11. `forge auto`
+Runs the fully autonomous, unattended self-repair loop: `Architect` → `Planner` → `[Executor <-> (Tester -> Reviewer) Self-Repair Loop]` → `Critic`. If the Tester reports `FAIL` or the Reviewer requests changes (`CHANGES_REQUIRED`), structured issues are fed back into the Executor prompt for up to `--max-retries` iterations.
 
 **Arguments**:
 - `[TASK]`: Task description (can be supplied as argument, via `-f`, or via `-c`).
@@ -217,7 +232,7 @@ Runs the fully autonomous, unattended self-repair loop: `Architect` → `Planner
 - `-f, --file FILE`: Path to markdown requirements or specification file.
 - `-c, --from-critic`: Automatically resume from the latest Critic audit report.
 - `--run TEXT`: Existing Run ID to resume from. Automatically skips approved stages.
-- `-r, --max-retries INTEGER RANGE`: Maximum auto-repair iterations between Executor and Reviewer (default: `3`, minimum: `1`).
+- `-r, --max-retries INTEGER RANGE`: Maximum auto-repair iterations between Executor and verifiers (default: `3`, minimum: `1`).
 - `--auto-commit`: Automatically commit changes to git (`feat: <task>`) upon approved review, executed after the closing Critic audit passes.
 - `--no-critic`: Skip the final post-execution codebase health audit.
 
@@ -251,7 +266,7 @@ stages:
     model: null             # Uses adapter default (or specify model alias)
     effort: null
     auto_approve: false
-    post_run_override:      # Phase-aware override for closing audit (05_critic)
+    post_run_override:      # Phase-aware override for closing audit (06_critic)
       adapter: opencode
       model: gemini-2.5-pro
 
@@ -274,6 +289,12 @@ stages:
     auto_approve: false     # Set true to grant permission to execute commands without prompt
     extra_flags:
       print-timeout: 600s
+
+  tester:
+    adapter: opencode
+    model: null
+    effort: null
+    auto_approve: false
 
   reviewer:
     adapter: opencode
@@ -303,7 +324,7 @@ execution:
 | | `idle_timeout` | `int/float?` | `null` | Per-stage idle progress timeout override |
 | | `auto_approve` | `bool` | `false` | Grants automatic permission (`--auto` for opencode, `--dangerously-skip-permissions` for antigravity) |
 | | `extra_flags` | `dict` | `{}` | Additional CLI flags rendered as `--<key> <value>` |
-| | `post_run_override` | `dict?` | `null` | Phase-aware override applied exclusively to post-execution Critic (Stage 05) |
+| | `post_run_override` | `dict?` | `null` | Phase-aware override applied exclusively to post-execution Critic (Stage 06) |
 
 > [!WARNING]
 > Setting `auto_approve: true` permits CLI agents to modify code, run arbitrary shell commands, and execute tests without human confirmation. Forge prints a visible security warning whenever `auto_approve` is active.
@@ -317,10 +338,12 @@ flowchart TD
     C0["00_CRITIC (Optional Audit)<br/><i>Codebase health check & debt analysis</i>"] --> A["01_ARCHITECT<br/><i>System architecture & module boundaries</i>"]
     A --> P["02_PLANNER<br/><i>Tasks, dependencies & acceptance criteria</i>"]
     P --> E["03_EXECUTOR (Antigravity)<br/><i>Implementation & test execution</i>"]
-    E --> R{"04_REVIEWER<br/><i>Adversarial audit & diff verification</i>"}
+    E --> T{"04_TESTER<br/><i>Observable behavior & UX verification</i>"}
+    T -- "FAIL<br/>(Attempt < max_retries)" --> E
+    T -- "PASS / NOT_TESTABLE" --> R{"05_REVIEWER<br/><i>Adversarial audit & diff verification</i>"}
     R -- "CHANGES_REQUIRED<br/>(Attempt < max_retries)" --> E
-    R -- "APPROVED" --> C5["05_CRITIC (Closing Audit)<br/><i>Final sanity audit on uncommitted diffs</i>"]
-    C5 --> AC{"Auto-Commit?<br/><i>--auto-commit or config</i>"}
+    R -- "APPROVED" --> C6["06_CRITIC (Closing Audit)<br/><i>Final sanity audit on uncommitted diffs</i>"]
+    C6 --> AC{"Auto-Commit?<br/><i>--auto-commit or config</i>"}
     AC -- Yes --> GC["Git Commit<br/><i>feat: &lt;task&gt;</i>"]
     AC -- No --> Done["Completed Run<br/><i>Artifacts saved in .forge/runs/</i>"]
     GC --> Done
@@ -331,11 +354,15 @@ flowchart TD
 1. **Critic (Sequence 00)**: Pre-run audit. Emits `CRITIQUE_COMPLETE` with handoff `ARCHITECT`.
 2. **Architect (Sequence 01)**: Reviews requirements, conventions, and project docs. Emits `APPROVED` with handoff `PLANNER`.
 3. **Planner (Sequence 02)**: Converts architecture into task breakdown. Emits `READY` with handoff `EXECUTOR`.
-4. **Executor (Sequence 03)**: Implements code changes and runs tests. Emits `SUCCESS` with handoff `REVIEWER`.
-5. **Reviewer (Sequence 04)**: Scrutinizes diffs and evidence.
-   - If issues are detected and retries remain: Emits `CHANGES_REQUIRED` with handoff `EXECUTOR`.
+4. **Executor (Sequence 03)**: Implements code changes and runs tests. Emits `SUCCESS` with handoff `TESTER`.
+5. **Tester (Sequence 04)**: Evaluates runtime behavior, interactive states, and user journeys.
+   - If behavioral defects found and retries remain: Emits `FAIL` with handoff `EXECUTOR`.
+   - If acceptable: Emits `PASS` with handoff `REVIEWER`.
+   - If non-runnable/docs change: Emits `NOT_TESTABLE` with handoff `REVIEWER`.
+6. **Reviewer (Sequence 05)**: Scrutinizes diffs and concrete behavioral evidence from the Tester report.
+   - If implementation defects detected and retries remain: Emits `CHANGES_REQUIRED` with handoff `EXECUTOR`.
    - If acceptable: Emits `APPROVED` with handoff `NONE`.
-6. **Closing Critic (Sequence 05)**: Final verification of the modified codebase before commits are finalized. Emits `CRITIQUE_COMPLETE`.
+7. **Closing Critic (Sequence 06)**: Final verification of the modified codebase before commits are finalized. Emits `CRITIQUE_COMPLETE`.
 
 ### Protocol Validation
 

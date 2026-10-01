@@ -21,4 +21,5 @@ class Context:
     current_role: Optional[Role] = None
     baseline: Optional["GitBaseline"] = None
     repair_feedback: Optional[str] = None
+    event_listener: Optional[Any] = None
 

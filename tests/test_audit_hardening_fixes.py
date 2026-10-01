@@ -233,18 +233,18 @@ def test_git_status_rename_direction_in_real_repo(tmp_path):
 # ==============================================================================
 
 def test_from_critic_prefers_closing_critic_over_pre_critic(tmp_path):
-    """Verify --from-critic selects closing critic (05_critic.md) over pre-run critic (00_critic.md)."""
+    """Verify --from-critic selects closing critic (06_critic.md) over pre-run critic (00_critic.md)."""
     rm = RunManager(tmp_path)
     run = rm.create_run("From critic test")
 
-    # Create both 00_critic.md (pre-run audit) and 05_critic.md (closing audit)
+    # Create both 00_critic.md (pre-run audit) and 06_critic.md (closing audit)
     pre_critic = run.run_dir / "00_critic.md"
     pre_critic.write_text("# 00 Pre-run Critic Audit\nPreliminary findings before execution.", encoding="utf-8")
     (run.run_dir / "00_critic.json").write_text('{"ROLE": "CRITIC", "STATUS": "APPROVED"}', encoding="utf-8")
 
-    closing_critic = run.run_dir / "05_critic.md"
-    closing_critic.write_text("# 05 Closing Critic Audit\nPost-execution codebase health audit.", encoding="utf-8")
-    (run.run_dir / "05_critic.json").write_text('{"ROLE": "CRITIC", "STATUS": "APPROVED"}', encoding="utf-8")
+    closing_critic = run.run_dir / "06_critic.md"
+    closing_critic.write_text("# 06 Closing Critic Audit\nPost-execution codebase health audit.", encoding="utf-8")
+    (run.run_dir / "06_critic.json").write_text('{"ROLE": "CRITIC", "STATUS": "APPROVED"}', encoding="utf-8")
 
     new_run, is_resumed = _resolve_pipeline_run(
         run_mgr=rm,
@@ -253,8 +253,8 @@ def test_from_critic_prefers_closing_critic_over_pre_critic(tmp_path):
         run_id=run.run_id,
     )
 
-    # Must link to closing critic (05_critic)
-    assert "05_critic" in new_run.adapters_used.get("critic", "")
+    # Must link to closing critic (06_critic)
+    assert "06_critic" in new_run.adapters_used.get("critic", "")
     new_run_critic_md = rm.load_stage_markdown(new_run, "critic")
     assert "Post-execution codebase health audit" in new_run_critic_md
 

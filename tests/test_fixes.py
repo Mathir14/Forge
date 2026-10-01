@@ -376,7 +376,7 @@ def test_cli_run_stage_and_commands(tmp_path):
                 rev_res = runner.invoke(main, ["review"])
                 assert rev_res.exit_code == 0
                 assert "Invoking Reviewer (opencode) for task:" in rev_res.output
-                assert (Path.cwd() / ".forge" / "runs" / "run-001" / "04_reviewer.json").exists()
+                assert (Path.cwd() / ".forge" / "runs" / "run-001" / "05_reviewer.json").exists()
 
             # Critic command
             critic_mock = AdapterResponse(
@@ -422,7 +422,7 @@ def test_cli_prerequisite_failures(tmp_path):
         rev_no_runs = runner.invoke(main, ["review"])
         assert rev_no_runs.exit_code == 1
         assert "Error loading run" in rev_no_runs.output
-        assert "Run 'forge architect', 'forge planner', and 'forge execute' first." in rev_no_runs.output
+        assert "Run 'forge architect', 'forge planner', 'forge execute', and 'forge test' first." in rev_no_runs.output
 
         # Create run-001 without architect output
         from forge.storage.run_manager import RunManager

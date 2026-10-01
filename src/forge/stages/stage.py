@@ -1,3 +1,4 @@
+import json
 import logging
 import queue
 import sys
@@ -35,12 +36,14 @@ class Stage:
         run_manager: Optional[RunManager] = None,
         timeout: Optional[int] = None,
         idle_timeout: Optional[Union[int, float]] = None,
+        event_listener: Optional[Any] = None,
     ):
         self.role = role
         self.adapter = adapter
         self.run_manager = run_manager or RunManager()
         self.timeout = timeout
         self.idle_timeout = idle_timeout
+        self.event_listener = event_listener
 
     @classmethod
     def get_required_capabilities(cls, stage_name: str) -> Set[str]:
@@ -73,6 +76,23 @@ class Stage:
                 provided_capabilities=provided,
                 missing_capabilities=missing,
             )
+
+    @staticmethod
+    def _is_ndjson(text: str) -> bool:
+        """Check if text appears to be raw NDJSON / JSON-lines stream rather than markdown."""
+        if not text:
+            return False
+        stripped = text.lstrip()
+        if not stripped.startswith("{"):
+            return False
+        first_line = stripped.splitlines()[0].strip()
+        if first_line.startswith("{") and first_line.endswith("}"):
+            try:
+                val = json.loads(first_line)
+                return isinstance(val, dict)
+            except Exception:
+                return False
+        return False
 
     def _validate_execution_environment(self, context: Context) -> None:
         """Validate execution environment before running stage.
@@ -310,6 +330,17 @@ class Stage:
                         )
                         continue
 
+                    # Dispatch event to listener with failure isolation
+                    if self.event_listener is not None:
+                        try:
+                            if "stage_name" not in event.data:
+                                event.data["stage_name"] = self.role.name
+                            if "sequence_number" not in event.data:
+                                event.data["sequence_number"] = self.role.sequence_number
+                            self.event_listener(event)
+                        except Exception:
+                            pass
+
                     # Handle events incrementally
                     if event.event_type == AgentEventType.CHUNK:
                         # Progress observed: reset idle timer
@@ -427,9 +458,25 @@ class Stage:
 
     def run(self, context: Context) -> StageResult:
         """Execute full stage lifecycle: validate -> prepare -> execute -> validate -> save."""
+        if self.event_listener is None and getattr(context, "event_listener", None) is not None:
+            self.event_listener = context.event_listener
+
         # 0. Validate compatibility and execution environment before any execution
         self.validate_compatibility()
         self._validate_execution_environment(context)
+
+        # 0.1 Tester v2: empirical black-box testing engine
+        if self.role.name == "tester":
+            from unittest.mock import Mock
+            is_mock = (
+                isinstance(getattr(self.adapter, "execute", None), Mock)
+                or getattr(self.adapter, "is_mock", False)
+                or self.adapter.__class__.__name__.startswith("Mock")
+            )
+            if not is_mock:
+                from forge.testing.engine import TesterEngine
+                engine = TesterEngine(context=context, run_manager=self.run_manager)
+                return engine.run()
 
         # 1. Prepare
         instruction = InstructionBuilder.build(context, self.role)
@@ -469,10 +516,15 @@ class Stage:
         # 4. Validate / Parse protocol
         # Parse the machine report ONLY after a COMPLETE event.
         if terminal_event.event_type == AgentEventType.COMPLETE:
-            raw_text = response.raw_output or response.stdout
+            raw_text = response.stdout or (response.raw_output if not self._is_ndjson(response.raw_output) else "")
             raw_dict, raw_yaml = MachineReportParser.extract_yaml(raw_text, expected_role=self.role.name)
-            if not raw_dict and response.stdout and response.stdout != raw_text:
-                raw_dict, raw_yaml = MachineReportParser.extract_yaml(response.stdout, expected_role=self.role.name)
+            if (
+                not raw_dict
+                and response.raw_output
+                and response.raw_output != raw_text
+                and not self._is_ndjson(response.raw_output)
+            ):
+                raw_dict, raw_yaml = MachineReportParser.extract_yaml(response.raw_output, expected_role=self.role.name)
             report = MachineReportValidator.validate(
                 data=raw_dict,
                 expected_role=self.role.name,
@@ -486,7 +538,7 @@ class Stage:
             )
         else:
             # ERROR terminates the stage immediately while preserving ExecutionResult
-            err_reason = response.stderr or response.raw_output or (terminal_event.text or "Stage execution failed with ERROR event.")
+            err_reason = response.stderr or response.stdout or response.raw_output or (terminal_event.text or "Stage execution failed with ERROR event.")
             report = MachineReport(
                 role=self.role.name.upper(),
                 status="FAILED",
@@ -498,26 +550,61 @@ class Stage:
             )
             success = False
 
+        raw_markdown = response.stdout or response.raw_output
         result = StageResult(
             role=self.role,
             prompt=rendered_prompt,
             response=response,
             machine_report=report,
-            raw_markdown=response.raw_output,
+            raw_markdown=raw_markdown,
             duration_seconds=response.duration_seconds,
             success=success,
         )
 
-        # 5. Save artifacts (.md + .json)
+        # 5. Save debug files and artifacts (.md + .json)
+        if hasattr(context, "run") and hasattr(context.run, "run_dir") and context.run.run_dir:
+            debug_dir = context.run.run_dir / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            (debug_dir / f"{self.role.name.lower()}_stdout.txt").write_text(
+                response.stdout or "",
+                encoding="utf-8",
+            )
+            (debug_dir / f"{self.role.name.lower()}_stderr.txt").write_text(
+                response.stderr or "",
+                encoding="utf-8",
+            )
+            (debug_dir / f"{self.role.name.lower()}_raw.txt").write_text(
+                response.raw_output or "",
+                encoding="utf-8",
+            )
+
         self.run_manager.save_stage_artifacts(
             run=context.run,
             sequence_number=self.role.sequence_number,
             role_name=self.role.name,
-            markdown_content=response.raw_output,
+            markdown_content=raw_markdown,
             json_data=result.to_dict(),
             prompt_hash=rendered_prompt.prompt_hash,
             adapter_name=self.adapter.name,
         )
+
+        # Stage PKB knowledge proposals if emitted
+        if report and getattr(report, "proposals", None) and hasattr(context, "run") and hasattr(context.run, "run_dir") and context.run.run_dir:
+            proposals_dir = context.run.run_dir / "knowledge_proposals"
+            proposals_dir.mkdir(parents=True, exist_ok=True)
+            seq_prefix = f"{self.role.sequence_number:02d}_" if self.role.sequence_number is not None else ""
+            proposal_file = proposals_dir / f"{seq_prefix}{self.role.name.lower()}_proposals.yaml"
+            try:
+                import yaml
+                proposal_data = {
+                    "role": self.role.name.lower(),
+                    "sequence_number": self.role.sequence_number,
+                    "proposals": [p.to_dict() for p in report.proposals],
+                }
+                with open(proposal_file, "w", encoding="utf-8") as pf:
+                    yaml.safe_dump(proposal_data, pf, sort_keys=False, indent=2)
+            except Exception as e:
+                logging.warning("Failed to save knowledge proposals to %s: %s", proposal_file, e)
 
         return result
 

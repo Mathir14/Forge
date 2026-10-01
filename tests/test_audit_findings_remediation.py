@@ -253,25 +253,26 @@ def test_f06_stage_order_pipeline_stages_structure():
     assert pre[1].name == "planner"
 
     loop = StageOrder.implementation_loop_stages()
-    assert len(loop) == 2
+    assert len(loop) == 3
     assert loop[0].name == "executor"
-    assert loop[1].name == "reviewer"
+    assert loop[1].name == "tester"
+    assert loop[2].name == "reviewer"
 
     post_with_critic = StageOrder.post_loop_stages(no_critic=False)
     assert len(post_with_critic) == 1
     assert post_with_critic[0].name == "critic"
-    assert post_with_critic[0].sequence_number == 5
+    assert post_with_critic[0].sequence_number == 6
 
     post_no_critic = StageOrder.post_loop_stages(no_critic=True)
     assert len(post_no_critic) == 0
 
     all_auto = StageOrder.autonomous_loop_stages(no_critic=False)
-    assert len(all_auto) == 5
-    assert [s.name for s in all_auto] == ["architect", "planner", "executor", "reviewer", "critic"]
+    assert len(all_auto) == 6
+    assert [s.name for s in all_auto] == ["architect", "planner", "executor", "tester", "reviewer", "critic"]
 
 
 # ===========================================================================
-# F-07: Auto resume skips completed closing Critic (Stage 5)
+# F-07: Auto resume skips completed closing Critic (Stage 6)
 # ===========================================================================
 
 def test_f07_auto_resume_skips_completed_closing_critic(tmp_path):
@@ -282,7 +283,7 @@ def test_f07_auto_resume_skips_completed_closing_critic(tmp_path):
         mgr = RunManager(Path.cwd())
         run = mgr.create_run("Implement full pipeline")
 
-        # Set up completed artifacts for ALL stages 1 to 5
+        # Set up completed artifacts for ALL stages 1 to 6
         mgr.save_stage_artifacts(
             run=run, sequence_number=1, role_name="architect",
             markdown_content="# Arch", json_data={"status": "APPROVED", "is_valid": True},
@@ -296,11 +297,15 @@ def test_f07_auto_resume_skips_completed_closing_critic(tmp_path):
             markdown_content="# Exec", json_data={"status": "SUCCESS", "is_valid": True},
         )
         mgr.save_stage_artifacts(
-            run=run, sequence_number=4, role_name="reviewer",
+            run=run, sequence_number=4, role_name="tester",
+            markdown_content="# Test", json_data={"status": "PASS", "is_valid": True},
+        )
+        mgr.save_stage_artifacts(
+            run=run, sequence_number=5, role_name="reviewer",
             markdown_content="# Rev", json_data={"status": "APPROVED", "is_valid": True},
         )
         mgr.save_stage_artifacts(
-            run=run, sequence_number=5, role_name="critic",
+            run=run, sequence_number=6, role_name="critic",
             markdown_content="# Critic", json_data={"status": "CRITIQUE_COMPLETE", "is_valid": True},
         )
 
@@ -338,12 +343,16 @@ def test_f07_auto_resume_reruns_failed_closing_critic(tmp_path):
             markdown_content="# Exec", json_data={"status": "SUCCESS", "is_valid": True},
         )
         mgr.save_stage_artifacts(
-            run=run, sequence_number=4, role_name="reviewer",
+            run=run, sequence_number=4, role_name="tester",
+            markdown_content="# Test", json_data={"status": "PASS", "is_valid": True},
+        )
+        mgr.save_stage_artifacts(
+            run=run, sequence_number=5, role_name="reviewer",
             markdown_content="# Rev", json_data={"status": "APPROVED", "is_valid": True},
         )
         # Critic previously had FAILED status
         mgr.save_stage_artifacts(
-            run=run, sequence_number=5, role_name="critic",
+            run=run, sequence_number=6, role_name="critic",
             markdown_content="# Critic Failed", json_data={"status": "FAILED", "is_valid": False},
         )
 
@@ -438,16 +447,17 @@ def test_f09_forge_run_sets_approved_status_on_success(tmp_path):
 
         arch_resp = AdapterResponse(stdout="```yaml\nROLE: ARCHITECT\nSTATUS: APPROVED\nHANDOFF: PLANNER\n```", stderr="", exit_code=0, duration_seconds=0.1, raw_output="APPROVED")
         plan_resp = AdapterResponse(stdout="```yaml\nROLE: PLANNER\nSTATUS: READY\nHANDOFF: EXECUTOR\n```", stderr="", exit_code=0, duration_seconds=0.1, raw_output="READY")
-        exec_resp = AdapterResponse(stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```", stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS")
+        exec_resp = AdapterResponse(stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```", stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS")
+        test_resp = AdapterResponse(stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```", stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS")
         rev_resp = AdapterResponse(stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```", stderr="", exit_code=0, duration_seconds=0.1, raw_output="APPROVED")
         critic_resp = AdapterResponse(stdout="```yaml\nROLE: CRITIC\nSTATUS: CRITIQUE_COMPLETE\nHANDOFF: NONE\n```", stderr="", exit_code=0, duration_seconds=0.1, raw_output="CRITIQUE_COMPLETE")
 
         # Provide answers 'y' to continue prompts between stages
-        user_inputs = "y\ny\ny\ny\n"
+        user_inputs = "y\ny\ny\ny\ny\n"
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp, critic_resp]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp, critic_resp]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp):
 
             res = runner.invoke(main, ["run", "Pipeline test"], input=user_inputs)

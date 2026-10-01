@@ -15,7 +15,7 @@ class Role:
 
     @property
     def is_closing_critic(self) -> bool:
-        return self.name == "critic" and (self.phase == "post_run" or self.sequence_number == 5)
+        return self.name == "critic" and (self.phase == "post_run" or self.sequence_number in (5, 6))
 
     @property
     def is_pre_run_critic(self) -> bool:

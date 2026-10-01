@@ -18,17 +18,18 @@ from tests.conftest import configure_automated_execution_environment
 
 
 def test_stage_order_authoritative_definitions():
-    """Verify StageOrder provides exactly the 6 ordered stages with explicit pre-run and closing Critic definitions."""
+    """Verify StageOrder provides exactly the 7 ordered stages with explicit pre-run and closing Critic definitions."""
     stages = StageOrder.all_stages()
-    assert len(stages) == 6
+    assert len(stages) == 7
 
     expected = [
         ("critic", 0, "pre_run", True, False),
         ("architect", 1, "pre_run", False, False),
         ("planner", 2, "pre_run", False, False),
         ("executor", 3, "pre_run", False, False),
-        ("reviewer", 4, "pre_run", False, False),
-        ("critic", 5, "post_run", False, True),
+        ("tester", 4, "pre_run", False, False),
+        ("reviewer", 5, "pre_run", False, False),
+        ("critic", 6, "post_run", False, True),
     ]
 
     for stage_def, (exp_name, exp_seq, exp_phase, exp_pre_crit, exp_close_crit) in zip(stages, expected):
@@ -52,7 +53,7 @@ def test_critic_semantics_explicit_without_magic_numbers():
     assert closing_critic_def.is_pre_run_critic is False
     assert closing_critic_def.is_closing_critic is True
     assert closing_critic_def.phase == "post_run"
-    assert closing_critic_def.sequence_number == 5
+    assert closing_critic_def.sequence_number == 6
 
     # Role.load with phase
     role_pre = Role.load("critic", phase="pre_run")
@@ -63,7 +64,7 @@ def test_critic_semantics_explicit_without_magic_numbers():
     role_post = Role.load("critic", phase="post_run")
     assert role_post.is_pre_run_critic is False
     assert role_post.is_closing_critic is True
-    assert role_post.sequence_number == 5
+    assert role_post.sequence_number == 6
 
     # Non-critic roles
     role_arch = Role.load("architect")
@@ -83,8 +84,8 @@ def test_stage_order_drives_both_standard_and_auto_pipelines():
     std_stages = StageOrder.standard_pipeline_stages(no_critic=False)
     auto_stages = StageOrder.autonomous_loop_stages(no_critic=False)
 
-    assert len(std_stages) == 5
-    assert len(auto_stages) == 5
+    assert len(std_stages) == 6
+    assert len(auto_stages) == 6
 
     for std_s, auto_s in zip(std_stages, auto_stages):
         assert std_s.name == auto_s.name
@@ -95,8 +96,8 @@ def test_stage_order_drives_both_standard_and_auto_pipelines():
     # With no_critic=True
     std_no_crit = StageOrder.standard_pipeline_stages(no_critic=True)
     auto_no_crit = StageOrder.autonomous_loop_stages(no_critic=True)
-    assert len(std_no_crit) == 4
-    assert len(auto_no_crit) == 4
+    assert len(std_no_crit) == 5
+    assert len(auto_no_crit) == 5
     assert all(not s.is_closing_critic for s in std_no_crit)
     assert all(not s.is_closing_critic for s in auto_no_crit)
 
@@ -125,7 +126,7 @@ def test_is_stage_completed_status_distinctions(tmp_path):
 
     # Save Reviewer with CHANGES_REQUIRED -> NOT completed (must not count as successful)
     run_mgr.save_stage_artifacts(
-        run=run, sequence_number=4, role_name="reviewer",
+        run=run, sequence_number=5, role_name="reviewer",
         markdown_content="# Review", json_data={"status": "CHANGES_REQUIRED"},
     )
     done, status = is_stage_completed(run, rev_def, run_mgr)
@@ -134,7 +135,7 @@ def test_is_stage_completed_status_distinctions(tmp_path):
 
     # Save Reviewer with FAILED -> NOT completed
     run_mgr.save_stage_artifacts(
-        run=run, sequence_number=4, role_name="reviewer",
+        run=run, sequence_number=5, role_name="reviewer",
         markdown_content="# Review", json_data={"status": "FAILED"},
     )
     done, status = is_stage_completed(run, rev_def, run_mgr)
@@ -143,7 +144,7 @@ def test_is_stage_completed_status_distinctions(tmp_path):
 
     # Save Reviewer with APPROVED -> completed
     run_mgr.save_stage_artifacts(
-        run=run, sequence_number=4, role_name="reviewer",
+        run=run, sequence_number=5, role_name="reviewer",
         markdown_content="# Review", json_data={"status": "APPROVED"},
     )
     done, status = is_stage_completed(run, rev_def, run_mgr)
@@ -172,8 +173,12 @@ def test_resume_preserves_completed_stages_without_reexecution(tmp_path):
         )
 
         exec_resp = AdapterResponse(
-            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS",
+        )
+        test_resp = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
         )
         rev_resp = AdapterResponse(
             stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
@@ -186,20 +191,21 @@ def test_resume_preserves_completed_stages_without_reexecution(tmp_path):
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[rev_resp, critic_resp]) as mock_oc, \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[test_resp, rev_resp, critic_resp]) as mock_oc, \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp) as mock_agy:
 
-            res = runner.invoke(main, ["run", "--run", run.run_id], input="y\ny\ny\n")
+            res = runner.invoke(main, ["run", "--run", run.run_id], input="y\ny\ny\ny\n")
             assert res.exit_code == 0
 
             # Architect and Planner skipped
             assert "Skipping Stage: Architect" in res.output
             assert "Skipping Stage: Planner" in res.output
 
-            # Executor, Reviewer, and closing Critic executed
+            # Executor, Tester, Reviewer, and closing Critic executed
             assert "Executing Stage: 03_EXECUTOR" in res.output
-            assert "Executing Stage: 04_REVIEWER" in res.output
-            assert "Executing Stage: 05_CRITIC" in res.output
+            assert "Executing Stage: 04_TESTER" in res.output
+            assert "Executing Stage: 05_REVIEWER" in res.output
+            assert "Executing Stage: 06_CRITIC" in res.output
 
 
 def test_run_pipeline_halts_on_reviewer_changes_required(tmp_path):
@@ -218,8 +224,12 @@ def test_run_pipeline_halts_on_reviewer_changes_required(tmp_path):
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="READY",
         )
         exec_resp = AdapterResponse(
-            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS",
+        )
+        test_resp = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
         )
         rev_changes = AdapterResponse(
             stdout="```yaml\nROLE: REVIEWER\nSTATUS: CHANGES_REQUIRED\nHANDOFF: EXECUTOR\nISSUES:\n  CRITICAL:\n    - Security vulnerability in auth check\n```",
@@ -228,10 +238,10 @@ def test_run_pipeline_halts_on_reviewer_changes_required(tmp_path):
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_changes]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_changes]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp):
 
-            res = runner.invoke(main, ["run", "Implement auth"], input="y\ny\ny\n")
+            res = runner.invoke(main, ["run", "Implement auth"], input="y\ny\ny\ny\n")
             assert res.exit_code == 1
             assert "Pipeline halted at stage 'reviewer'" in res.output
 
@@ -256,8 +266,12 @@ def test_closing_critic_rejection_prevents_approval(tmp_path):
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="READY",
         )
         exec_resp = AdapterResponse(
-            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS",
+        )
+        test_resp = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
         )
         rev_resp = AdapterResponse(
             stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
@@ -270,7 +284,7 @@ def test_closing_critic_rejection_prevents_approval(tmp_path):
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp, critic_blocked]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp, critic_blocked]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp), \
              patch("forge.core.git.GitService.commit") as mock_commit:
 
@@ -302,12 +316,20 @@ def test_auto_pipeline_retry_on_changes_required_then_approved(tmp_path):
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="READY",
         )
         exec_resp1 = AdapterResponse(
-            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="First attempt code",
         )
         exec_resp2 = AdapterResponse(
-            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="Repaired code with tests",
+        )
+        test_resp1 = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
+        )
+        test_resp2 = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
         )
         rev_reject = AdapterResponse(
             stdout="```yaml\nROLE: REVIEWER\nSTATUS: CHANGES_REQUIRED\nHANDOFF: EXECUTOR\nISSUES:\n  MAJOR:\n    - Missing timeout handling\n```",
@@ -324,13 +346,13 @@ def test_auto_pipeline_retry_on_changes_required_then_approved(tmp_path):
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_reject, rev_approve, critic_resp]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp1, rev_reject, test_resp2, rev_approve, critic_resp]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", side_effect=[exec_resp1, exec_resp2]) as mock_exec:
 
             res = runner.invoke(main, ["auto", "Implement robust client", "--max-retries", "3"])
             assert res.exit_code == 0
             assert "Reviewer requested changes. Launching auto-repair iteration 2" in res.output
-            assert "Implementation APPROVED by Reviewer on attempt 2" in res.output
+            assert "Implementation APPROVED by Tester & Reviewer on attempt 2" in res.output
             assert mock_exec.call_count == 2
 
             rm = RunManager(Path.cwd())
@@ -339,8 +361,10 @@ def test_auto_pipeline_retry_on_changes_required_then_approved(tmp_path):
             # Attempt artifacts preserved
             assert (run.run_dir / "03_executor_attempt_1.md").exists()
             assert (run.run_dir / "03_executor_attempt_2.md").exists()
-            assert (run.run_dir / "04_reviewer_attempt_1.md").exists()
-            assert (run.run_dir / "04_reviewer_attempt_2.md").exists()
+            assert (run.run_dir / "04_tester_attempt_1.md").exists()
+            assert (run.run_dir / "04_tester_attempt_2.md").exists()
+            assert (run.run_dir / "05_reviewer_attempt_1.md").exists()
+            assert (run.run_dir / "05_reviewer_attempt_2.md").exists()
 
 
 def test_run_pipeline_halts_on_unknown_status(tmp_path):
@@ -380,7 +404,7 @@ def test_stage_order_deduplication_consistency():
 
     # Closing critic
     closing_crit = StageOrder.get_closing_critic()
-    assert closing_crit == all_stages[5]
+    assert closing_crit == all_stages[6]
     assert closing_crit.phase == "post_run"
     assert closing_crit.is_closing_critic is True
 
@@ -389,7 +413,7 @@ def test_stage_order_deduplication_consistency():
     assert auto_stages[-1] == closing_crit
 
     # Middle stages are identical
-    for i in range(4):
+    for i in range(5):
         assert std_stages[i] == auto_stages[i]
         assert std_stages[i] == all_stages[i + 1]
 

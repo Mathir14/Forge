@@ -15,6 +15,7 @@ Welcome to the definitive user manual and technical reference for **Forge**, the
    - [Architect](#architect)
    - [Planner](#planner)
    - [Executor](#executor)
+   - [Tester](#tester)
    - [Reviewer](#reviewer)
 3. [Common Agent Protocol v1.0](#3-common-agent-protocol-v10)
    - [Machine Report Schema](#machine-report-schema)
@@ -34,6 +35,7 @@ Welcome to the definitive user manual and technical reference for **Forge**, the
    - [`forge architect`](#forge-architect)
    - [`forge planner`](#forge-planner)
    - [`forge execute`](#forge-execute)
+   - [`forge test`](#forge-test)
    - [`forge review`](#forge-review)
    - [`forge run`](#forge-run)
    - [`forge auto`](#forge-auto)
@@ -42,6 +44,8 @@ Welcome to the definitive user manual and technical reference for **Forge**, the
    - [Metadata Schema (`metadata.json`)](#metadata-schema-metadatajson)
    - [Stage Artifact Schema (`XX_role.json`)](#stage-artifact-schema-xx_rolejson)
    - [Attempt Artifacts](#attempt-artifacts)
+   - [Empirical Test Evidence Bundle (`evidence/`)](#empirical-test-evidence-bundle-evidence)
+   - [Exclusive Run Ownership (`run.lock` & `RunLock`)](#exclusive-run-ownership-runlock--runlock)
    - [Atomic Storage Guarantees & Cleanup](#atomic-storage-guarantees--cleanup)
 7. [Autonomous Self-Repair & Retry Semantics](#7-autonomous-self-repair--retry-semantics)
    - [Iterative Repair Loop Mechanics](#iterative-repair-loop-mechanics)
@@ -116,8 +120,20 @@ src/forge/
 ├── stages/
 │   ├── stage.py            # Generic Stage execution engine (prepare -> execute -> validate -> save)
 │   └── result.py           # StageResult container
-└── storage/
-    └── run_manager.py      # Sequential run-XXX directory management, atomic artifact storage
+├── storage/
+│   ├── run_manager.py      # Sequential run-XXX directory management, atomic artifact storage
+│   └── run_lock.py         # Kernel-backed exclusive run ownership (flock), re-entrancy, stale recovery
+└── testing/                # Tester v2 empirical verification engine
+    ├── archetypes.py       # Project archetype auto-detection (Web, API, CLI, Library)
+    ├── browser.py          # BrowserDriver ABC, Playwright and Mock implementations
+    ├── budget.py           # TestingBudget and BudgetTracker resource caps
+    ├── engine.py           # TesterEngine orchestrator and stage lifecycle coordinator
+    ├── evidence.py         # EvidenceCollector (screenshots, telemetry, repro scripts)
+    ├── models.py           # Typed models (Defect, Journey, CoverageReport, Telemetry)
+    ├── planner.py          # JourneyPlanner (4-tier prioritizer with diff route extraction)
+    ├── report.py           # TesterReportGenerator (04_tester.md & 04_tester.json)
+    ├── supervisor.py       # RuntimeSupervisor (process group isolation, health polling, teardown)
+    └── drivers/            # Web, API, CLI, and Library interaction drivers
 ```
 
 ### Context Budgeting & Prompt Compilation
@@ -208,7 +224,7 @@ The resulting prompt is converted into a `RenderedPrompt`, which calculates:
 
 ## 2. Role Responsibilities
 
-Forge defines 5 distinct engineering roles. Each role is configured with its own mission, concrete responsibilities, explicit prohibitions, and output expectations.
+Forge defines 6 distinct engineering roles across 7 pipeline stages. Each role is configured with its own mission, concrete responsibilities, explicit prohibitions, and output expectations.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -236,19 +252,25 @@ Forge defines 5 distinct engineering roles. Each role is configured with its own
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                         04_REVIEWER (Quality)                          │
-│  Adversarially scrutinizes diffs, catches defects, and rejects code.   │
+│                         04_TESTER (Verification)                       │
+│  Empirically verifies runtime behavior, journeys, and accessibility.   │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                       05_CRITIC (Closing Audit)                        │
+│                         05_REVIEWER (Quality)                          │
+│  Cross-examines diffs & Tester evidence; catches code defects.         │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                       06_CRITIC (Closing Audit)                        │
 │  Verifies fresh codebase state before auto-commit or pipeline close.   │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Critic (Auditor)
-- **Sequence Number**: `00` (pre-run / standalone) or `05` (post-run closing audit).
+- **Sequence Number**: `00` (pre-run / standalone) or `06` (post-run closing audit).
 - **Mission**: Relentlessly audit, critique, and expose flaws, code smells, technical debt, security vulnerabilities, performance bottlenecks, and architectural violations.
 - **Responsibilities**:
   - Audit existing code structure, maintainability, and readability.
@@ -299,13 +321,46 @@ Forge defines 5 distinct engineering roles. Each role is configured with its own
 - **Human Report Output**: Summary, Files Changed, Commands Executed, Validation Evidence, Test Results, Tradeoffs, Remaining Issues.
 - **Machine Report Additions**: `VALIDATION`, `ARTIFACTS` (`ARCHITECTURE_CHANGED`, `API_CHANGED`, `DATABASE_SCHEMA_CHANGED`, `NEW_DEPENDENCIES`, `BREAKING_CHANGE`).
 
-### Reviewer
+### Tester
 - **Sequence Number**: `04`.
-- **Mission**: Act as an adversarial quality gate. Assume the implementation is defective until proven otherwise.
-- **Diff-First Architecture**: The Reviewer does not rediscover the repository from scratch; the Git diff is the primary review artifact. The Reviewer receives the original requirements, Executor report, Git status, changed-file summary, bounded Git diff, and repository access.
-- **Executor Claim Verification**: Treat the Executor as a change producer and the Reviewer as a verifier. Compare every claim in the Executor report (e.g. bug fixes, added features, new tests, test execution passes) directly against the actual Git diff and repository state. Reject any claim that is not supported by implementation evidence (e.g. ignored timeout arguments, dummy assertions).
+- **Mission**: Act as an empirical black-box QA / product tester and end-user advocate. Operate running software through its native public interfaces to uncover user-observable defects—dead buttons, broken navigation, unhandled console exceptions, 500 errors, layout collapse, and CLI crashes—that unit tests and static code reviews fail to detect.
+- **Empirical Black-Box Verification Model**: The Tester is **not** another Reviewer (it never comments on architectural elegance, code cleanliness, or refactoring) and **not** another Executor (it never reruns existing pytest or npm test suites). Instead, it operates running software as an empirical human surrogate:
+  - **Archetype Auto-Detection**: [`ArchetypeDetector`](file:///home/mathir14/forge/src/forge/testing/archetypes.py) automatically identifies the project archetype (`WEB_SPA`, `API`, `CLI`, `LIBRARY`) by inspecting package manifests, build files, and source layouts.
+  - **Runtime Supervision**: [`RuntimeSupervisor`](file:///home/mathir14/forge/src/forge/testing/supervisor.py) launches local servers and background processes in isolated process groups (`os.setsid`), performs exponential backoff readiness polling against ports and HTTP endpoints, captures stdout/stderr telemetry, and guarantees leak-free process tree teardown (`SIGTERM` → `SIGKILL`).
+  - **Pluggable Driver Architecture**: Built upon an abstract [`BrowserDriver`](file:///home/mathir14/forge/src/forge/testing/browser.py) interface. Uses [`PlaywrightBrowserDriver`](file:///home/mathir14/forge/src/forge/testing/browser.py) for headless browser automation and [`MockBrowserDriver`](file:///home/mathir14/forge/src/forge/testing/browser.py) for fast, isolated in-memory unit testing. Specialized interaction drivers operate native surfaces:
+    - [`WebInteractionDriver`](file:///home/mathir14/forge/src/forge/testing/drivers/web.py): Navigates web apps, interacts with buttons and inputs, detects dead interactions via DOM and URL delta tracking, captures unhandled browser console errors (`console.error`, unhandled rejections), and captures screenshots.
+    - [`ApiInteractionDriver`](file:///home/mathir14/forge/src/forge/testing/drivers/api.py): Probes REST/GraphQL endpoints, chains session cookies and Bearer tokens across requests, asserts status codes, and detects unhandled 5xx server exceptions.
+    - [`CliInteractionDriver`](file:///home/mathir14/forge/src/forge/testing/drivers/cli.py): Executes commands with flags and stdin payloads, asserts exit codes, and flags tracebacks or unexpected error streams.
+    - [`LibraryInteractionDriver`](file:///home/mathir14/forge/src/forge/testing/drivers/library.py): Imports library packages inside sandbox environments, exercises public APIs, and verifies export contracts.
+  - **Deterministic Execution Budgets**: [`TestingBudget`](file:///home/mathir14/forge/src/forge/testing/budget.py) and [`BudgetTracker`](file:///home/mathir14/forge/src/forge/testing/budget.py) strictly enforce resource caps: `max_runtime_seconds` (default: 300s), `max_journeys` (default: 10), `max_interactions_per_journey` (default: 25), `max_screenshots` (default: 30), and `max_navigation_depth` (default: 5).
+  - **Intelligent 4-Tier Prioritization**: [`JourneyPlanner`](file:///home/mathir14/forge/src/forge/testing/planner.py) extracts modified routes from git diffs and prioritizes journeys in strict sequence:
+    1. *Modified Features*: Direct user journeys touching code changed in the current task/diff.
+    2. *Adjacent Workflows*: Secondary journeys and dependent integration paths.
+    3. *Global Smoke Test*: Core landing, authentication, and navigation flows.
+    4. *Exploratory & Responsive Testing*: Viewport boundary testing (mobile, tablet, desktop) and edge-case inputs.
+  - **Forensic Evidence Collection**: [`EvidenceCollector`](file:///home/mathir14/forge/src/forge/testing/evidence.py) organizes empirical artifacts into `.forge/runs/<run_id>/evidence/`:
+    - `evidence/screenshots/`: Full-page and viewport PNG snapshots of interactions and UI defects.
+    - `evidence/telemetry/`: Raw console error logs and network failure captures (`.json`).
+    - `evidence/repro/`: Standalone, executable Python reproduction scripts (e.g. `repro_def_xxx.py`) that can be executed independently outside Forge to reproduce the exact failure.
+  - **Explicit Coverage & Confidence**: Emits coverage metrics (`HIGH`, `MEDIUM`, `LOW`) based on planned vs. executed vs. blocked journeys, route coverage, and viewport permutations.
 - **Responsibilities**:
-  - Verify Executor claims against actual Git diff and repository changes.
+  - Supervise runtime application processes with clean teardown.
+  - Execute prioritized end-to-end user journeys through public interfaces.
+  - Detect dead clicks, uncaught client exceptions, network 4xx/5xx failures, and CLI tracebacks.
+  - Capture viewport screenshots and generate standalone executable reproduction scripts.
+  - Produce an explicit coverage and confidence report alongside structured defect findings.
+  - Issue an empirical verdict: `PASS`, `FAIL`, `BLOCKED`, or `NOT_TESTABLE`.
+- **Never**: Critique code architecture, evaluate style or elegance, write implementation code, invent subjective numeric scores, or duplicate Executor unit test runs.
+- **Human Report Output**: Executive Summary, Coverage & Confidence (Planned, Executed, Blocked, Overall Confidence), Verification Matrix (Journeys, Steps, Outcomes), Defect Cards (Category, Severity, Evidence links, Repro script paths, Expected vs Actual), High-Confidence Accessibility Observations, Empirical Verdict.
+- **Machine Report Additions**: `STATUS` (`PASS`, `FAIL`, `BLOCKED`, `NOT_TESTABLE`), `COVERAGE` (`planned`, `executed`, `blocked`, `confidence`), `ISSUES` (strictly score-free structured defect records containing `ID`, `CATEGORY`, `SEVERITY`, `DESCRIPTION`, `STEPS_TO_REPRODUCE`, `EXPECTED`, `ACTUAL`, `EVIDENCE`).
+
+### Reviewer
+- **Sequence Number**: `05`.
+- **Mission**: Act as an adversarial quality gate. Assume the implementation is defective until proven otherwise.
+- **Diff-First & Behavioral Evidence Architecture**: The Reviewer does not rediscover the repository from scratch; the Git diff is the primary review artifact. The Reviewer receives the original requirements, Executor report, complete Tester report (`04_tester.md` and `04_tester.json`), Git status, changed-file summary, bounded Git diff, and repository access.
+- **Behavioral Evidence Cross-Examination**: Treat the Executor as a change producer, the Tester as an empirical behavioral verifier, and the Reviewer as an implementation quality gate. Cross-examine Executor claims against empirical behavioral evidence provided by the Tester (across all statuses: `PASS`, `FAIL`, `BLOCKED`, or `NOT_TESTABLE`). Reject any claim contradicted by runtime evidence.
+- **Responsibilities**:
+  - Cross-examine Executor claims and Tester behavioral evidence against actual Git diffs.
   - Reject weak, broken, or unsubstantiated implementations.
   - Verify complete compliance with the approved architecture and plan.
   - Scrutinize unified git diffs for subtle logic bugs, race conditions, and regressions.
@@ -313,7 +368,7 @@ Forge defines 5 distinct engineering roles. Each role is configured with its own
   - Verify comprehensive test coverage for edge cases and failure modes.
   - Score the implementation across 6 quality axes (1–10).
   - Issue an unambiguous verdict: `APPROVED` or `CHANGES_REQUIRED`.
-- **Never**: Trust Executor claims without verifying against actual Git changes, rewrite implementation code, silently patch issues, or accept unvalidated code.
+- **Never**: Trust Executor claims without verifying against actual Git changes and Tester evidence, rewrite implementation code, silently patch issues, or accept unvalidated code.
 - **Human Report Output**: Executive Summary, Critical Issues, Major Issues, Minor Issues, Strengths, Review Scores, Approval Decision.
 - **Machine Report Additions**: `SCORES` (`ARCHITECTURE`, `MAINTAINABILITY`, `READABILITY`, `SECURITY`, `PERFORMANCE`, `TESTING`), `APPROVAL` (`YES|NO`).
 
@@ -327,7 +382,7 @@ Every agent executing within Forge must conclude its response with a standardize
 
 ```yaml
 ```yaml
-ROLE: ARCHITECT               # Stage name (CRITIC, ARCHITECT, PLANNER, EXECUTOR, REVIEWER)
+ROLE: ARCHITECT               # Stage name (CRITIC, ARCHITECT, PLANNER, EXECUTOR, TESTER, REVIEWER)
 PROMPT_VERSION: 1.0           # Protocol version
 TASK_ID: run-019              # Active Run ID
 
@@ -365,7 +420,8 @@ Forge strictly enforces permitted statuses and handoff transitions per role via 
 | **`CRITIC`** | `CRITIQUE_COMPLETE`, `COMPLETED`, `PASSED`, `APPROVED`, `BLOCKED`, `READY` | `ARCHITECT`, `PLANNER`, `NONE` |
 | **`ARCHITECT`** | `APPROVED`, `REJECTED`, `BLOCKED`, `READY` | `PLANNER`, `NONE` |
 | **`PLANNER`** | `READY`, `BLOCKED`, `APPROVED`, `REJECTED` | `EXECUTOR`, `ARCHITECT`, `NONE` |
-| **`EXECUTOR`** | `SUCCESS`, `FAILED`, `BLOCKED` | `REVIEWER`, `PLANNER`, `ARCHITECT`, `NONE` |
+| **`EXECUTOR`** | `SUCCESS`, `FAILED`, `BLOCKED` | `TESTER`, `REVIEWER`, `PLANNER`, `ARCHITECT`, `NONE` |
+| **`TESTER`** | `PASS`, `FAIL`, `BLOCKED`, `NOT_TESTABLE`, `APPROVED`, `CHANGES_REQUIRED`, `REJECTED`, `PASSED`, `FAILED` | `REVIEWER`, `EXECUTOR`, `NONE` |
 | **`REVIEWER`** | `APPROVED`, `CHANGES_REQUIRED`, `BLOCKED`, `REJECTED` | `NONE`, `EXECUTOR`, `ARCHITECT` |
 
 #### Non-Success Status Handling
@@ -437,6 +493,13 @@ stages:
     auto_approve: false
     extra_flags: {}
 
+  tester:
+    adapter: opencode
+    model: null
+    effort: null
+    auto_approve: false
+    extra_flags: {}
+
   reviewer:
     adapter: opencode
     model: null
@@ -500,7 +563,7 @@ stages:
 
 ## 5. Complete CLI Command & Flag Reference
 
-Forge provides 10 dedicated CLI commands. Every command and flag is implemented in [`src/forge/cli.py`](file:///home/mathir14/forge/src/forge/cli.py).
+Forge provides 11 dedicated CLI commands. Every command and flag is implemented in [`src/forge/cli.py`](file:///home/mathir14/forge/src/forge/cli.py).
 
 | Command | Purpose | Modifies Code? | Input Source |
 | :--- | :--- | :---: | :--- |
@@ -511,7 +574,8 @@ Forge provides 10 dedicated CLI commands. Every command and flag is implemented 
 | **`forge architect`**| Design system architecture (Seq 01) | ❌ No | Required task arg |
 | **`forge planner`**  | Decompose architecture into tasks (Seq 02) | ❌ No | Prior run artifact |
 | **`forge execute`**  | Implement plan with Antigravity (Seq 03) | ✅ Yes | Prior run artifact |
-| **`forge review`**   | Adversarially audit diffs (Seq 04) | ❌ No | Prior run artifact |
+| **`forge test`**     | Verify runtime behavior & QA (Seq 04) | ❌ No | Prior run artifact |
+| **`forge review`**   | Adversarially audit diffs (Seq 05) | ❌ No | Prior run artifact |
 | **`forge run`**      | Run standard pipeline with checkpoints | ✅ Yes | Task arg / `--from-critic` |
 | **`forge auto`**     | Run autonomous self-repair loop | ✅ Yes | Task arg / `-f` / `-c` |
 
@@ -663,9 +727,33 @@ forge execute --run run-019
 
 ---
 
+### `forge test`
+
+Runs the **Tester** role (Sequence `04`) to empirically verify runtime behavior, user journeys, CLI interactions, and accessibility.
+
+```bash
+forge test [OPTIONS]
+```
+
+**Options**:
+- `--run TEXT`: Run ID to execute Tester on (defaults to the latest run).
+
+**Prerequisite**: The run must contain an existing Executor artifact (`03_executor.md` or `.json`). If missing, Forge exits with code `1`.
+
+**Examples**:
+```bash
+# Test latest run
+forge test
+
+# Test specific run
+forge test --run run-019
+```
+
+---
+
 ### `forge review`
 
-Runs the **Reviewer** role (Sequence `04`) to perform an adversarial audit on the implementation and git diffs.
+Runs the **Reviewer** role (Sequence `05`) to perform an adversarial audit on the implementation, git diffs, and Tester behavioral evidence.
 
 ```bash
 forge review [OPTIONS]
@@ -674,7 +762,7 @@ forge review [OPTIONS]
 **Options**:
 - `--run TEXT`: Run ID to execute Reviewer on (defaults to the latest run).
 
-**Prerequisite**: The run must contain an existing Executor artifact (`03_executor.md` or `.json`).
+**Prerequisite**: The run must contain an existing Executor artifact (`03_executor.md` or `.json`). If a Tester report (`04_tester.md` / `04_tester.json`) is present in the run directory, Forge automatically injects it into the Reviewer prompt under `## Tester Report & Behavioral Evidence`.
 
 **Examples**:
 ```bash
@@ -690,11 +778,11 @@ forge review --run run-019
 ### `forge run`
 
 Runs the standard multi-agent pipeline with step-by-step confirmation checkpoints:
-$$\text{Architect} \longrightarrow \text{Planner} \longrightarrow \text{Executor} \longrightarrow \text{Reviewer} \longrightarrow \text{Critic}$$
+$$\text{Architect} \longrightarrow \text{Planner} \longrightarrow \text{Executor} \longrightarrow \text{Tester} \longrightarrow \text{Reviewer} \longrightarrow \text{Critic}$$
 
 After each stage completes, Forge prompts:
 ```text
-Proceed to next stage (PLANNER)? [Y/n]:
+Proceed to next stage (TESTER)? [Y/n]:
 ```
 If the user declines, the run is saved with status `PAUSED_AFTER_<STAGE>` and execution terminates cleanly.
 
@@ -708,7 +796,7 @@ forge run [OPTIONS] [TASK]
 **Options**:
 - `-c, --from-critic`: Automatically resume from the latest Critic audit report.
 - `--run TEXT`: Existing Run ID to resume from. Skips stages that already succeeded.
-- `--no-critic`: Skip the closing post-execution Critic health audit (Stage `05`).
+- `--no-critic`: Skip the closing post-execution Critic health audit (Stage `06`).
 
 **Examples**:
 ```bash
@@ -730,7 +818,7 @@ forge run "Fix typo in docstring" --no-critic
 ### `forge auto`
 
 Runs the fully autonomous, unattended self-repair loop:
-$$\text{Architect} \longrightarrow \text{Planner} \longrightarrow \left[ \text{Executor} \longleftrightarrow \text{Reviewer} \right] \longrightarrow \text{Critic} \longrightarrow \text{Git Commit}$$
+$$\text{Architect} \longrightarrow \text{Planner} \longrightarrow \left[ \text{Executor} \longleftrightarrow \text{Tester} \longleftrightarrow \text{Reviewer} \right] \longrightarrow \text{Critic} \longrightarrow \text{Git Commit}$$
 
 ```bash
 forge auto [OPTIONS] [TASK]
@@ -774,6 +862,7 @@ Every task execution creates a sequentially numbered directory under `.forge/run
 .forge/
 ├── runs/
 │   ├── run-001/
+│   │   ├── run.lock                       # Kernel-backed exclusive run ownership lock
 │   │   ├── metadata.json
 │   │   ├── 00_critic.md
 │   │   ├── 00_critic.json
@@ -785,12 +874,20 @@ Every task execution creates a sequentially numbered directory under `.forge/run
 │   │   ├── 03_executor.json
 │   │   ├── 03_executor_attempt_1.md       # Preserved attempt history
 │   │   ├── 03_executor_attempt_1.json
-│   │   ├── 04_reviewer.md
-│   │   ├── 04_reviewer.json
-│   │   ├── 04_reviewer_attempt_1.md       # Preserved attempt history
-│   │   ├── 04_reviewer_attempt_1.json
-│   │   ├── 05_critic.md
-│   │   └── 05_critic.json
+│   │   ├── 04_tester.md
+│   │   ├── 04_tester.json
+│   │   ├── 04_tester_attempt_1.md         # Preserved attempt history
+│   │   ├── 04_tester_attempt_1.json
+│   │   ├── 05_reviewer.md
+│   │   ├── 05_reviewer.json
+│   │   ├── 05_reviewer_attempt_1.md       # Preserved attempt history
+│   │   ├── 05_reviewer_attempt_1.json
+│   │   ├── 06_critic.md
+│   │   ├── 06_critic.json
+│   │   └── evidence/                      # Empirical test evidence bundle
+│   │       ├── screenshots/               # Viewport & interaction snapshots (.png)
+│   │       ├── telemetry/                 # Console logs, network failures (.json)
+│   │       └── repro/                     # Standalone executable reproduction scripts (.py, .sh)
 │   ├── run-002/
 │   └── ...
 └── cache/                                 # Runtime cache (ignored by git)
@@ -810,12 +907,14 @@ Stored at the root of every run directory:
     "architect": "230cff66c510ed4e",
     "planner": "4a1b02c89f2134de",
     "executor": "9d8e7f6a5b4c3d2e",
+    "tester": "5e4d3c2b1a098765",
     "reviewer": "1f2e3d4c5b6a7890"
   },
   "adapters_used": {
     "architect": "opencode",
     "planner": "opencode",
     "executor": "antigravity",
+    "tester": "opencode",
     "reviewer": "opencode"
   },
   "metadata": {}
@@ -865,9 +964,49 @@ Paired with `XX_role.md`, the JSON artifact stores the machine verdict:
 
 During autonomous repair loops (`forge auto`), every retry iteration persists historical snapshot files:
 - `03_executor_attempt_<N>.md` & `03_executor_attempt_<N>.json`
-- `04_reviewer_attempt_<N>.md` & `04_reviewer_attempt_<N>.json`
+- `04_tester_attempt_<N>.md` & `04_tester_attempt_<N>.json`
+- `05_reviewer_attempt_<N>.md` & `05_reviewer_attempt_<N>.json`
 
 These files record the evolution of the code across iterations. Forge's prompt compiler explicitly skips `_attempt_` files when compiling subsequent prompts to avoid prompt bloat.
+
+### Empirical Test Evidence Bundle (`evidence/`)
+
+During the **Tester** stage (`04_tester`), all runtime artifacts and behavioral anomaly traces are recorded inside `.forge/runs/<run_id>/evidence/` managed by [`EvidenceCollector`](file:///home/mathir14/forge/src/forge/testing/evidence.py):
+
+- **Screenshots (`evidence/screenshots/`)**:
+  PNG snapshots captured automatically during user journeys, viewport responsiveness checks, and visual defect detections. Files are named deterministically:
+  - `j01_step01_initial_landing.png`
+  - `j01_step03_viewport_375x667.png`
+  - `def_j_01_dead_2_dead_click.png`
+- **Telemetry (`evidence/telemetry/`)**:
+  Structured JSON records capturing client-side runtime anomalies:
+  - `console_errors.json`: Timestamped array of unhandled browser exceptions, `console.error` calls, and unhandled promise rejections.
+  - `network_failures.json`: Array of failed network requests (HTTP 4xx/5xx responses, CORS errors, connection refusals).
+- **Reproduction Scripts (`evidence/repro/`)**:
+  Standalone executable Python or Shell reproduction scripts (e.g. `repro_def_j_01_dead_2.py`) generated for discovered defects. These scripts use public drivers directly (e.g. `playwright` or `curl`) to reproduce the defect independently without needing Forge installed or running.
+
+### Exclusive Run Ownership (`run.lock` & `RunLock`)
+
+To prevent catastrophic data corruption caused by concurrent Forge processes operating on the same run directory (e.g., simultaneous `forge execute` or `forge auto` instances), Forge enforces OS-level exclusive run locking via [`RunLock`](file:///home/mathir14/forge/src/forge/storage/run_lock.py):
+
+- **Atomic Kernel-Backed Lock**: Uses `fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)` on `.forge/runs/<run_id>/run.lock`. Lock acquisition is an atomic OS system call with zero check-then-create race windows.
+- **Diagnostic Ownership Metadata**: When acquired, the lock file records JSON metadata about the active owner:
+  ```json
+  {
+    "pid": 42109,
+    "hostname": "workstation-01",
+    "username": "developer",
+    "tty": "/dev/pts/2",
+    "cmdline": "forge auto 'Add OAuth2 login'",
+    "cwd": "/home/developer/project",
+    "acquired_at": "2026-09-23T08:15:30.123456+00:00",
+    "forge_version": "0.1.0"
+  }
+  ```
+- **Actionable Failure Diagnostics**: If a run is already locked by another live process, Forge immediately halts with `RunLockError`, printing the active owner's PID, user, host, command line, and duration of ownership.
+- **Automatic Stale-Lock Recovery**: If a previous process terminates abnormally (e.g., `SIGKILL`, power failure, or kernel panic), the operating system automatically releases the kernel `flock` file descriptor. When a new Forge process inspects the lock, it detects that the lock is unheld, safely recovers ownership, logs a recovery notice, and rewrites the diagnostic metadata.
+- **Re-Entrant Safety**: Within the same process or thread, nested `RunLock` acquisitions increment an internal depth counter (`self.depth`), releasing the underlying OS lock only when the outermost context exits (`depth == 0`).
+- **Signal-Safe Teardown**: Localized signal handlers in the CLI boundary catch `SIGTERM` and `SIGINT` to ensure `run.lock` is cleanly released and unlinked upon interruption.
 
 ### Atomic Storage Guarantees & Cleanup
 
@@ -882,7 +1021,7 @@ These files record the evolution of the code across iterations. Forge's prompt c
 
 ## 7. Autonomous Self-Repair & Retry Semantics
 
-In `forge auto`, Forge runs an autonomous self-repair loop between the Executor and Reviewer.
+In `forge auto`, Forge runs an autonomous self-repair loop between the Executor, Tester, and Reviewer.
 
 ```mermaid
 sequenceDiagram
@@ -890,22 +1029,32 @@ sequenceDiagram
     actor User
     participant CLI as Forge Auto Loop
     participant Exec as 03_Executor (Antigravity)
-    participant Rev as 04_Reviewer (OpenCode)
-    participant Critic as 05_Critic (Closing Audit)
+    participant Test as 04_Tester (Verification)
+    participant Rev as 05_Reviewer (Quality)
+    participant Critic as 06_Critic (Closing Audit)
     participant Git as GitService
 
-    CLI->>Exec: Run attempt 1
+    CLI->>Exec: Run attempt N
     Exec-->>CLI: StageResult (SUCCESS or FAILED)
     alt Executor FAILED & attempt < max_retries
         CLI->>Exec: Retry with execution failure feedback
     else Executor BLOCKED
         CLI-->>User: Halt immediately (Exit 1)
     end
-    CLI->>Rev: Run attempt 1
+    CLI->>Test: Run attempt N
+    Test-->>CLI: StageResult (PASS, FAIL, BLOCKED, NOT_TESTABLE)
+    alt Tester FAIL & attempt < max_retries
+        CLI->>CLI: Format structured reproduction steps into Feedback
+        CLI->>Exec: Run attempt N+1 (Reviewer skipped on this attempt)
+    else Tester BLOCKED
+        CLI-->>User: Halt immediately (Exit 1)
+    end
+    Note over CLI,Rev: Runs Reviewer if Tester PASS or NOT_TESTABLE
+    CLI->>Rev: Run attempt N (with full Tester report & evidence)
     Rev-->>CLI: StageResult (APPROVED or CHANGES_REQUIRED)
     alt CHANGES_REQUIRED & attempt < max_retries
         CLI->>CLI: Format issues into Auto-Repair Feedback
-        CLI->>Exec: Run attempt 2 with feedback
+        CLI->>Exec: Run attempt N+1 with feedback
     else APPROVED
         CLI->>Critic: Run closing codebase audit
         Critic-->>CLI: Audit passed
@@ -928,18 +1077,24 @@ sequenceDiagram
      <truncated error output>
      Fix all failures and complete implementation.
      ```
-     Forge immediately retries the Executor without invoking the Reviewer.
+     Forge immediately retries the Executor without invoking Tester or Reviewer.
    - If `iteration >= max_retries`: Forge halts with exit code `1`.
-4. **Review**: If execution succeeds, the Reviewer inspects git diffs.
-5. **Reviewer Artifact Preservation**: Forge writes `04_reviewer_attempt_<iteration>.md` and `.json`.
-6. **Verdict Evaluation**:
-   - **`APPROVED`**: The repair loop terminates successfully.
+4. **Behavioral Testing**: If execution succeeds, the Tester empirically tests runtime behavior and user journeys.
+5. **Tester Artifact Preservation**: Forge writes `04_tester_attempt_<iteration>.md` and `.json`.
+6. **Tester Verdict Evaluation**:
+   - **`FAIL`**: If `iteration < max_retries`, Forge extracts structured reproduction steps from `machine_report.issues` (`ID`, `DESCRIPTION`, `STEPS_TO_REPRODUCE`, `EXPECTED`, `ACTUAL`, `EVIDENCE`), formats them into an auto-repair feedback block, updates `context.run.task`, and launches iteration $N+1$ directly back to the Executor. The Reviewer is skipped on this attempt to avoid evaluating broken implementations.
+   - **`BLOCKED`**: Forge halts immediately with exit code `1`.
+   - **`PASS` or `NOT_TESTABLE`**: Proceeds immediately to the Reviewer.
+7. **Review**: The Reviewer inspects git diffs and cross-examines the implementation against the complete Tester report.
+8. **Reviewer Artifact Preservation**: Forge writes `05_reviewer_attempt_<iteration>.md` and `.json`.
+9. **Reviewer Verdict Evaluation**:
+   - **`APPROVED`**: The repair loop terminates successfully and advances to the closing Critic audit.
    - **`CHANGES_REQUIRED`**: If `iteration < max_retries`, Forge extracts all reported issues from `machine_report.issues` (`CRITICAL`, `MAJOR`, `MINOR`), formats them into a feedback markdown block, updates `context.run.task`, and launches iteration $N+1$.
    - **Unapproved on Final Attempt**: If the Reviewer does not approve on the final attempt, Forge sets `run.status = rev_res.status`, saves metadata, and halts with exit code `1`.
 
 ### Halting Conditions
-- **Blocked State**: If the Executor or Reviewer reports `STATUS: BLOCKED`, Forge halts immediately. It never wastes agent attempts when an external dependency or requirement is blocked.
-- **Closing Critic Failure**: If the post-execution Critic (Stage `05`) reports a non-success status (`BLOCKED`, `FAILED`, `REJECTED`, `UNKNOWN`), Forge halts immediately, marks `run.status`, and aborts any configured auto-commit.
+- **Blocked State**: If the Executor, Tester, or Reviewer reports `STATUS: BLOCKED`, Forge halts immediately. It never wastes agent attempts when an external dependency or requirement is blocked.
+- **Closing Critic Failure**: If the post-execution Critic (Stage `06`) reports a non-success status (`BLOCKED`, `FAILED`, `REJECTED`, `UNKNOWN`), Forge halts immediately, marks `run.status`, and aborts any configured auto-commit.
 
 ---
 
@@ -1290,18 +1445,18 @@ stages:
 
 ### Defining Custom Roles & Stages
 
-To add a new specialized role (such as a `tester` or `security` role):
+To add a new specialized role (such as a `security` or `benchmarker` role):
 
-1. **Create Role Markdown**: Add `.ai/roles/tester.md`:
+1. **Create Role Markdown**: Add `.ai/roles/security.md`:
    ```markdown
-   # QA TESTER ROLE
+   # SECURITY AUDITOR ROLE
    ## Mission
-   Write comprehensive end-to-end and regression tests.
+   Conduct automated SAST and dependency vulnerability audits.
    ## Machine Report
    Use protocol.md and add:
    ```yaml
-   ROLE: TESTER
-   STATUS: SUCCESS | FAILED
+   ROLE: SECURITY
+   STATUS: PASSED | FAILED
    HANDOFF: REVIEWER
    ```
    ```
@@ -1314,12 +1469,13 @@ To add a new specialized role (such as a `tester` or `security` role):
        "executor": 3,
        "tester": 4,
        "reviewer": 5,
+       "security": 6,
    }
    ```
 3. **Register Protocol Statuses**: In [`MachineReportValidator`](file:///home/mathir14/forge/src/forge/protocol/validator.py):
    ```python
-   ALLOWED_STATUSES["TESTER"] = {"SUCCESS", "FAILED", "BLOCKED"}
-   ALLOWED_HANDOFFS["TESTER"] = {"REVIEWER", "NONE"}
+   ALLOWED_STATUSES["SECURITY"] = {"PASSED", "FAILED", "BLOCKED"}
+   ALLOWED_HANDOFFS["SECURITY"] = {"REVIEWER", "NONE"}
    ```
 4. **Insert into Pipeline Runner**: In [`src/forge/cli.py`](file:///home/mathir14/forge/src/forge/cli.py), add the new stage into `stages_to_run` and `STAGE_FORMATS`.
 

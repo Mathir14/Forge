@@ -31,3 +31,7 @@ share/python-wheels/
 .idea/
 *.swp
 *~
+
+# Forge runtime data
+.forge/runs/
+.forge/cache/

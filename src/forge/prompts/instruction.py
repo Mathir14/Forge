@@ -16,6 +16,9 @@ class Instruction:
     git_status: Optional[str] = None
     changed_file_summary: Optional[str] = None
     executor_report: Optional[str] = None
+    tester_report: Optional[str] = None
+    tester_machine_report: Optional[str] = None
     protocol_schema: str = ""
     repair_feedback: Optional[str] = None
+    knowledge_context: str = ""
 

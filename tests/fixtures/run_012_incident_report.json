@@ -1,0 +1,45 @@
+{
+  "ROLE": "ARCHITECT",
+  "PROMPT_VERSION": "1.0",
+  "TASK_ID": "task-001",
+  "START_TIME": "2026-09-23T15:41:00Z",
+  "END_TIME": "2026-09-23T15:43:00Z",
+  "DURATION": "120s",
+  "STATUS": "BLOCKED",
+  "EXIT_CODE": 0,
+  "HANDOFF": "PLANNER",
+  "REASON": "Critical auth + CI issues block production readiness.",
+  "CONFIDENCE": "HIGH",
+  "NEXT_ACTION": "Remediate Critical #1-#3 (typecheck + demo gate + per-IP signin limit) before planning.",
+  "ISSUES": {
+    "CRITICAL": [
+      "npm run typecheck fails (5 TS2741 in tests/thread-lifecycle.test.ts) — CI gate red.",
+      "Unconditional client demo sign-in (password123) + seeded privileged accounts enable one-click ADMIN/MODERATOR takeover.",
+      "No per-IP sign-in rate limit enables bcrypt CPU-exhaustion via rotating emails."
+    ],
+    "MAJOR": [
+      "JWT fail-open: tokens missing sessionToken bypass DB revocation (M6 violation).",
+      "Moderation resolution non-idempotent with unchecked updateMany counts and silent no-ops.",
+      "ADR-008 boundary enforcement excludes src/app/** (pages/routes) — false assurance."
+    ],
+    "MINOR": [
+      "APPROVED vs not-REJECTED read filter inconsistency across listing/profile.",
+      "Hardcoded fallback AES/session secret; dev fallback per-process restart."
+    ]
+  },
+  "ARCHITECTURE": {
+    "MODULES": [
+      "shared-kernel/auth",
+      "shared-kernel/contracts/visibility",
+      "features/trust-safety",
+      "features/community",
+      "features/interview-intelligence"
+    ],
+    "NEW_INTERFACES": [
+      "VisibilityHelper",
+      "IdempotentModerationResolver"
+    ],
+    "REFACTOR_REQUIRED": true,
+    "BREAKING_ARCHITECTURE_CHANGE": false
+  }
+}

@@ -188,12 +188,18 @@ class AntigravityAdapter(BaseAdapter):
         session_id: Optional[str],
     ) -> Optional[AgentEvent]:
         """Decode tool invocation payloads from Antigravity stream."""
-        tool_info = payload.get("tool_info") if isinstance(payload.get("tool_info"), dict) else {}
+        step_update = payload.get("step_update") if isinstance(payload.get("step_update"), dict) else {}
+        tool_info = (
+            step_update.get("tool_info")
+            if isinstance(step_update.get("tool_info"), dict)
+            else (payload.get("tool_info") if isinstance(payload.get("tool_info"), dict) else {})
+        )
         part = payload.get("part") if isinstance(payload.get("part"), dict) else {}
         state = part.get("state") if isinstance(part.get("state"), dict) else {}
 
         tool_name = (
-            tool_info.get("tool_name")
+            step_update.get("tool_name")
+            or tool_info.get("tool_name")
             or tool_info.get("tool")
             or tool_info.get("name")
             or payload.get("tool_name")
@@ -204,7 +210,10 @@ class AntigravityAdapter(BaseAdapter):
             or "tool"
         )
         call_id = (
-            tool_info.get("call_id")
+            step_update.get("call_id")
+            or step_update.get("callID")
+            or step_update.get("id")
+            or tool_info.get("call_id")
             or tool_info.get("callID")
             or tool_info.get("id")
             or payload.get("call_id")
@@ -212,12 +221,15 @@ class AntigravityAdapter(BaseAdapter):
             or payload.get("id")
             or part.get("callID")
             or part.get("call_id")
-            or ""
+            or (str(step_update.get("step_index")) if step_update.get("step_index") is not None else "")
         )
         tool_input = (
             tool_info.get("parameters")
             or tool_info.get("input")
             or tool_info.get("args")
+            or step_update.get("parameters")
+            or step_update.get("input")
+            or step_update.get("args")
             or payload.get("input")
             or payload.get("parameters")
             or payload.get("args")
@@ -227,22 +239,32 @@ class AntigravityAdapter(BaseAdapter):
         tool_output = (
             tool_info.get("output")
             or tool_info.get("result")
+            or step_update.get("output")
+            or step_update.get("result")
             or payload.get("output")
             or payload.get("result")
             or state.get("output")
         )
-        status = tool_info.get("status") or payload.get("status") or state.get("status")
+        raw_status = (
+            tool_info.get("status")
+            or step_update.get("state")
+            or step_update.get("status")
+            or payload.get("status")
+            or state.get("status")
+        )
+        status_str = str(raw_status).lower() if raw_status is not None else ""
         is_err = bool(
             tool_info.get("error")
+            or step_update.get("error")
             or payload.get("error")
             or part.get("error")
-            or status in ("error", "failed")
+            or status_str in ("error", "failed")
         )
 
         is_start = (
             event_type in ("tool_start", "tool_call")
-            or status == "running"
-            or (status is None and tool_output is None and event_type not in ("tool_finish", "tool_result"))
+            or status_str in ("running", "active", "start")
+            or (raw_status is None and tool_output is None and event_type not in ("tool_finish", "tool_result"))
         )
 
         if is_start:
@@ -258,6 +280,9 @@ class AntigravityAdapter(BaseAdapter):
                 },
             )
         else:
+            norm_status = "completed" if status_str in ("done", "completed") else (raw_status or ("error" if is_err else "completed"))
+            if is_err:
+                norm_status = "error"
             return AgentEvent(
                 event_type=AgentEventType.TOOL_FINISH,
                 timestamp=ts,
@@ -265,7 +290,7 @@ class AntigravityAdapter(BaseAdapter):
                 data={
                     "tool": tool_name,
                     "call_id": call_id,
-                    "status": status or ("error" if is_err else "completed"),
+                    "status": norm_status,
                     "output": tool_output,
                     "input": tool_input,
                     "error": is_err,
@@ -355,8 +380,11 @@ class AntigravityAdapter(BaseAdapter):
         accumulated_stdout = ""
         accumulated_raw = ""
         token_usage: Dict[str, int] = {}
-        terminal_event_emitted = False
         session_id: Optional[str] = None
+        has_stopped_step = False
+        terminal_status: Optional[str] = None
+        terminal_error_msg: Optional[str] = None
+        terminal_event_emitted = False
 
         for raw_line in stream:
             accumulated_raw += raw_line
@@ -375,14 +403,29 @@ class AntigravityAdapter(BaseAdapter):
                 continue
 
             event_type = payload.get("event") or payload.get("type")
-            if not session_id:
-                session_id = payload.get("session_id") or payload.get("sessionID") or payload.get("conversation_id")
+            step_update_data = payload.get("step_update") if isinstance(payload.get("step_update"), dict) else {}
+            part_data = payload.get("part") if isinstance(payload.get("part"), dict) else {}
 
-            raw_ts = payload.get("timestamp")
+            if not session_id:
+                session_id = (
+                    payload.get("session_id")
+                    or payload.get("sessionID")
+                    or payload.get("conversation_id")
+                    or step_update_data.get("conversation_id")
+                )
+
+            raw_ts = payload.get("timestamp") or step_update_data.get("timestamp")
             if isinstance(raw_ts, (int, float)):
                 ts = raw_ts / 1000.0 if raw_ts > 1e11 else float(raw_ts)
             else:
                 ts = time.time()
+
+            # Track intermediate token usage if provided in step metadata
+            step_usage = step_update_data.get("usage") or payload.get("usage")
+            if isinstance(step_usage, dict):
+                for k, v in step_usage.items():
+                    if isinstance(v, int):
+                        token_usage[k] = v
 
             if terminal_event_emitted:
                 if event_type in ("result", "complete", "error", "fatal", "step_finish"):
@@ -397,12 +440,18 @@ class AntigravityAdapter(BaseAdapter):
                     continue
 
             # 1. Text chunks
-            if event_type in ("step_update", "text", "text_delta") and (
-                "text_delta" in payload
-                or "text" in payload
-                or (isinstance(payload.get("step_update"), dict) and ("text_delta" in payload["step_update"] or "text" in payload["step_update"]))
-                or (isinstance(payload.get("part"), dict) and ("text" in payload["part"] or "text_delta" in payload["part"]))
-            ):
+            has_text = bool(
+                payload.get("text_delta")
+                or payload.get("text")
+                or step_update_data.get("text_delta")
+                or step_update_data.get("text")
+                or part_data.get("text")
+                or part_data.get("text_delta")
+            )
+            if event_type in ("step_update", "text", "text_delta") and has_text:
+                if has_stopped_step:
+                    accumulated_stdout = ""
+                    has_stopped_step = False
                 res = self._decode_text_chunk(payload, ts, session_id)
                 if res:
                     chunk_event, chunk_text = res
@@ -411,12 +460,22 @@ class AntigravityAdapter(BaseAdapter):
                 continue
 
             # 2. Tool events (either tool_info in step_update or explicit tool event types)
+            has_tool_info = (
+                "tool_info" in payload
+                or "tool_info" in step_update_data
+                or step_update_data.get("step_type") == "tool"
+            )
             if (
                 event_type in ("tool_call", "tool_start", "tool_finish", "tool_result", "tool_use")
-                or (event_type == "step_update" and "tool_info" in payload)
+                or (event_type == "step_update" and has_tool_info)
             ):
                 tool_evt = self._decode_tool_event(str(event_type), payload, ts, session_id)
                 if tool_evt:
+                    if tool_evt.event_type == AgentEventType.TOOL_START:
+                        if accumulated_stdout and not has_stopped_step:
+                            # Pre-tool conversational preface; purge
+                            accumulated_stdout = ""
+                        has_stopped_step = False
                     yield tool_evt
                 continue
 
@@ -429,46 +488,40 @@ class AntigravityAdapter(BaseAdapter):
                 )
                 continue
 
-            # 4. Result / Complete
+            # 4. Result / Complete (informational only under ADR-017)
             if event_type in ("result", "complete"):
                 terminal_event_emitted = True
-                duration = time.time() - start_time
-                stderr_out = get_stderr() if get_stderr else ""
-                proc_code = get_returncode() if get_returncode else None
+                has_stopped_step = True
 
-                raw_tokens = payload.get("usage") or payload.get("token_usage")
+                res_dict = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                raw_tokens = payload.get("usage") or payload.get("token_usage") or res_dict.get("usage") or res_dict.get("token_usage")
                 if isinstance(raw_tokens, dict):
                     for k, v in raw_tokens.items():
                         if isinstance(v, int):
                             token_usage[k] = v
 
-                status = payload.get("status")
-                if status in ("failed", "error"):
-                    err_msg = payload.get("error") or payload.get("message") or f"Execution failed with status: {status}"
+                # Extract canonical full response if emitted in result event
+                final_response = res_dict.get("response") or payload.get("response")
+                if final_response and isinstance(final_response, str) and not accumulated_stdout:
+                    accumulated_stdout = final_response
+
+                status = payload.get("status") or res_dict.get("status")
+                status_lower = str(status).lower() if status is not None else ""
+                terminal_status = status_lower
+                if not session_id:
+                    session_id = res_dict.get("conversation_id") or res_dict.get("session_id")
+
+                if status_lower in ("failed", "error"):
+                    err_msg = (
+                        payload.get("error")
+                        or payload.get("message")
+                        or res_dict.get("error")
+                        or res_dict.get("message")
+                        or f"Execution failed with status: {status}"
+                    )
                     if isinstance(err_msg, dict):
                         err_msg = err_msg.get("message") or str(err_msg)
-                    yield self._build_error_event(
-                        ts=ts,
-                        duration=duration,
-                        error_msg=str(err_msg),
-                        stdout=accumulated_stdout,
-                        stderr=stderr_out,
-                        raw_output=accumulated_raw,
-                        token_usage=token_usage,
-                        metadata={"error": str(err_msg), "status": status},
-                    )
-                else:
-                    exit_code = proc_code if proc_code is not None else 0
-                    yield self._build_complete_event(
-                        ts=ts,
-                        duration=duration,
-                        stdout=accumulated_stdout,
-                        stderr=stderr_out,
-                        raw_output=accumulated_raw,
-                        token_usage=token_usage,
-                        metadata={"session_id": session_id} if session_id else {},
-                        exit_code=exit_code,
-                    )
+                    terminal_error_msg = str(err_msg)
                 continue
 
             # 5. Step finish (compatibility with general NDJSON streams)
@@ -485,55 +538,31 @@ class AntigravityAdapter(BaseAdapter):
                     continue
                 elif reason in ("error", "failed", "aborted", "cancelled"):
                     terminal_event_emitted = True
-                    duration = time.time() - start_time
-                    stderr_out = get_stderr() if get_stderr else ""
+                    terminal_status = "error"
                     err_msg = part.get("error") or payload.get("error") or f"Step finished with error: {reason}"
-                    yield self._build_error_event(
-                        ts=ts,
-                        duration=duration,
-                        error_msg=str(err_msg),
-                        stdout=accumulated_stdout,
-                        stderr=stderr_out,
-                        raw_output=accumulated_raw,
-                        token_usage=token_usage,
-                        metadata={"error": str(err_msg)},
-                    )
+                    terminal_error_msg = str(err_msg)
+                    continue
                 else:
-                    terminal_event_emitted = True
-                    duration = time.time() - start_time
-                    stderr_out = get_stderr() if get_stderr else ""
-                    yield self._build_complete_event(
-                        ts=ts,
-                        duration=duration,
-                        stdout=accumulated_stdout,
-                        stderr=stderr_out,
-                        raw_output=accumulated_raw,
-                        token_usage=token_usage,
-                        metadata={"session_id": session_id} if session_id else {},
-                    )
-                continue
+                    if has_stopped_step:
+                        logger.warning(
+                            "Duplicate terminal event received from Antigravity stream; ignoring",
+                            extra={"adapter": self.name, "raw_event": payload},
+                        )
+                        continue
+                    has_stopped_step = True
+                    continue
 
             # 6. Error / Fatal
             if event_type in ("error", "fatal"):
                 terminal_event_emitted = True
-                duration = time.time() - start_time
-                stderr_out = get_stderr() if get_stderr else ""
+                terminal_status = "error"
                 err_data = payload.get("error") or payload.get("message") or "Antigravity error event"
                 err_msg = err_data.get("message") if isinstance(err_data, dict) else str(err_data)
-                yield self._build_error_event(
-                    ts=ts,
-                    duration=duration,
-                    error_msg=str(err_msg),
-                    stdout=accumulated_stdout,
-                    stderr=stderr_out,
-                    raw_output=accumulated_raw,
-                    token_usage=token_usage,
-                    metadata={"error": str(err_msg)},
-                )
+                terminal_error_msg = str(err_msg)
                 continue
 
             # 7. Normal lifecycle chatter
-            if event_type in ("init", "step_start"):
+            if event_type in ("init", "step_start") or event_type == "step_update":
                 logger.debug("Antigravity lifecycle event received: %s", event_type)
                 continue
 
@@ -545,20 +574,57 @@ class AntigravityAdapter(BaseAdapter):
             )
             continue
 
-        # Post-stream check: Unexpected EOF
-        if not terminal_event_emitted:
-            duration = time.time() - start_time
-            proc_code = get_returncode() if get_returncode else None
-            stderr_out = get_stderr() if get_stderr else ""
+        # Post-mortem completion evaluation (ADR-017)
+        duration = time.time() - start_time
+        proc_code = get_returncode() if get_returncode else None
+        stderr_out = get_stderr() if get_stderr else ""
+
+        if proc_code is not None and proc_code != 0:
+            err_msg = stderr_out or terminal_error_msg or f"Antigravity process exited with non-zero exit code: {proc_code}"
+            yield self._build_error_event(
+                ts=time.time(),
+                duration=duration,
+                error_msg=err_msg,
+                stdout=accumulated_stdout,
+                stderr=stderr_out or err_msg,
+                raw_output=accumulated_raw,
+                token_usage=token_usage,
+                metadata={"diagnostic": f"Process exited with code {proc_code}"},
+                exit_code=proc_code,
+            )
+        elif terminal_status in ("failed", "error") or terminal_error_msg is not None:
+            err_msg = terminal_error_msg or f"Execution failed with status: {terminal_status}"
+            yield self._build_error_event(
+                ts=time.time(),
+                duration=duration,
+                error_msg=err_msg,
+                stdout=accumulated_stdout,
+                stderr=stderr_out or err_msg,
+                raw_output=accumulated_raw,
+                token_usage=token_usage,
+                metadata={"error": err_msg, "status": terminal_status},
+                exit_code=1,
+            )
+        elif (has_stopped_step or terminal_status in ("success", "completed", "done")) and (proc_code is None or proc_code == 0):
+            yield self._build_complete_event(
+                ts=time.time(),
+                duration=duration,
+                stdout=accumulated_stdout,
+                stderr=stderr_out,
+                raw_output=accumulated_raw,
+                token_usage=token_usage,
+                metadata={"session_id": session_id} if session_id else {},
+                exit_code=0,
+            )
+        else:
             exit_code = proc_code if (proc_code is not None and proc_code != 0) else 1
             diag_msg = "Unexpected EOF before terminal event."
-            terminal_event_emitted = True
             yield self._build_error_event(
                 ts=time.time(),
                 duration=duration,
                 error_msg=diag_msg,
                 stdout=accumulated_stdout,
-                stderr=stderr_out,
+                stderr=stderr_out or diag_msg,
                 raw_output=accumulated_raw,
                 token_usage=token_usage,
                 metadata={"diagnostic": "Provider stream terminated prematurely without emitting COMPLETE or ERROR."},
@@ -742,6 +808,7 @@ class AntigravityAdapter(BaseAdapter):
             )
         finally:
             if proc is not None:
+                self._safe_cleanup_subprocess(proc)
                 self._kill_process_group(proc)
                 try:
                     proc.wait(timeout=1.0)

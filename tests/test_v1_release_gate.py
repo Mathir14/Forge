@@ -87,8 +87,12 @@ def test_closing_critic_failure_halts_auto_pipeline(tmp_path):
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="READY",
         )
         exec_resp = AdapterResponse(
-            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS",
+        )
+        test_resp = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
         )
         rev_resp = AdapterResponse(
             stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
@@ -104,7 +108,7 @@ def test_closing_critic_failure_halts_auto_pipeline(tmp_path):
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp, critic_failed]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp, critic_failed]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp), \
              patch("forge.core.git.GitService.is_git_repo", return_value=True), \
              patch("forge.core.git.GitService.commit", commit_mock):
@@ -137,8 +141,12 @@ def test_auto_pipeline_resume_preserves_task_in_repair_loop(tmp_path):
             stderr="", exit_code=1, duration_seconds=0.1, raw_output="Syntax error in auth.py",
         )
         exec_ok = AdapterResponse(
-            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+            stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
             stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS",
+        )
+        test_resp = AdapterResponse(
+            stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+            stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
         )
         rev_resp = AdapterResponse(
             stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
@@ -151,7 +159,7 @@ def test_auto_pipeline_resume_preserves_task_in_repair_loop(tmp_path):
 
         with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
              patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp, critic_resp]), \
+             patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp, critic_resp]), \
              patch("forge.adapters.antigravity.AntigravityAdapter.execute", side_effect=[exec_fail, exec_ok]):
             
             res = runner.invoke(main, ["auto", "--run", run.run_id, "--max-retries", "2"])

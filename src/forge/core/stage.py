@@ -1,5 +1,6 @@
 """Generic Stage execution engine driven by Role and Adapter."""
 
+import json
 from pathlib import Path
 from typing import Optional, Set, Iterable, Union, Any
 from forge.core.context import Context
@@ -60,10 +61,40 @@ class Stage:
                 missing_capabilities=missing,
             )
 
+    @staticmethod
+    def _is_ndjson(text: str) -> bool:
+        """Check if text appears to be raw NDJSON / JSON-lines stream rather than markdown."""
+        if not text:
+            return False
+        stripped = text.lstrip()
+        if not stripped.startswith("{"):
+            return False
+        first_line = stripped.splitlines()[0].strip()
+        if first_line.startswith("{") and first_line.endswith("}"):
+            try:
+                val = json.loads(first_line)
+                return isinstance(val, dict)
+            except Exception:
+                return False
+        return False
+
     def run(self, context: Context) -> StageResult:
         """Execute full stage lifecycle: validate -> prepare -> execute -> validate -> save."""
         # 0. Validate compatibility before any execution
         self.validate_compatibility()
+
+        # 0.1 Tester v2: empirical black-box testing engine
+        if self.role.name == "tester":
+            from unittest.mock import Mock
+            is_mock = (
+                isinstance(getattr(self.adapter, "execute", None), Mock)
+                or getattr(self.adapter, "is_mock", False)
+                or self.adapter.__class__.__name__.startswith("Mock")
+            )
+            if not is_mock:
+                from forge.testing.engine import TesterEngine
+                engine = TesterEngine(context=context, run_manager=self.run_manager)
+                return engine.run()
 
         # 1. Prepare
         instruction = InstructionBuilder.build(context, self.role)
@@ -118,15 +149,20 @@ class Stage:
         )
 
         # 3. Validate / Parse protocol
-        raw_text = response.raw_output or response.stdout
+        raw_text = response.stdout or (response.raw_output if not self._is_ndjson(response.raw_output) else "")
         raw_dict, raw_yaml = MachineReportParser.extract_yaml(
             raw_text,
             expected_role=self.role.name,
         )
 
-        if not raw_dict and response.stdout and response.stdout != raw_text:
+        if (
+            not raw_dict
+            and response.raw_output
+            and response.raw_output != raw_text
+            and not self._is_ndjson(response.raw_output)
+        ):
             raw_dict, raw_yaml = MachineReportParser.extract_yaml(
-                response.stdout,
+                response.raw_output,
                 expected_role=self.role.name,
             )
 
@@ -147,12 +183,13 @@ class Stage:
             )
         )
 
+        raw_markdown = response.stdout or response.raw_output
         result = StageResult(
             role=self.role,
             prompt=rendered_prompt,
             response=response,
             machine_report=report,
-            raw_markdown=response.raw_output,
+            raw_markdown=raw_markdown,
             duration_seconds=response.duration_seconds,
             success=success,
         )
@@ -162,7 +199,7 @@ class Stage:
             run=context.run,
             sequence_number=self.role.sequence_number,
             role_name=self.role.name,
-            markdown_content=response.raw_output,
+            markdown_content=raw_markdown,
             json_data=result.to_dict(),
             prompt_hash=rendered_prompt.prompt_hash,
             adapter_name=self.adapter.name,

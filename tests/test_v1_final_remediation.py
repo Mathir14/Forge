@@ -126,7 +126,7 @@ def test_auto_pipeline_resume_skips_approved_executor_and_reviewer(tmp_path):
         rm = RunManager(Path.cwd())
         run = rm.create_run(task="Implement Feature X")
 
-        # Save approved artifacts for architect, planner, executor, and reviewer
+        # Save approved artifacts for architect, planner, executor, tester, and reviewer
         rm.save_stage_artifacts(
             run=run, sequence_number=1, role_name="architect",
             markdown_content="# Architect Report", json_data={"role": "architect", "status": "APPROVED"},
@@ -140,7 +140,11 @@ def test_auto_pipeline_resume_skips_approved_executor_and_reviewer(tmp_path):
             markdown_content="# Executor Report", json_data={"role": "executor", "status": "SUCCESS"},
         )
         rm.save_stage_artifacts(
-            run=run, sequence_number=4, role_name="reviewer",
+            run=run, sequence_number=4, role_name="tester",
+            markdown_content="# Tester Report", json_data={"role": "tester", "status": "PASS"},
+        )
+        rm.save_stage_artifacts(
+            run=run, sequence_number=5, role_name="reviewer",
             markdown_content="# Reviewer Report", json_data={"role": "reviewer", "status": "APPROVED"},
         )
 
@@ -155,10 +159,10 @@ def test_auto_pipeline_resume_skips_approved_executor_and_reviewer(tmp_path):
              patch("forge.adapters.opencode.OpenCodeAdapter.execute", return_value=critic_resp) as mock_critic:
             res = runner.invoke(main, ["auto", "--run", run.run_id])
             assert res.exit_code == 0
-            assert "Skipping Executor & Reviewer" in res.output
-            # Executor should NOT have been called because reviewer was already approved
+            assert "Skipping Executor & Tester & Reviewer" in res.output
+            # Executor should NOT have been called because verifiers were already approved
             assert mock_exec.call_count == 0
-            # Critic should have been called for stage 5
+            # Critic should have been called for stage 6
             assert mock_critic.call_count == 1
 
 

@@ -177,17 +177,28 @@ def test_all_first_party_adapters_satisfy_standard_lifecycle_stages():
             stage.validate_compatibility()
 
 
-def test_all_first_party_adapters_rejected_for_tester_stage():
-    """Verify OpenCode, Antigravity, and Codex are all rejected for the tester stage due to missing playwright/screenshots."""
+def test_all_first_party_adapters_rejected_for_synthetic_browser_stage():
+    """Verify OpenCode, Antigravity, and Codex are all rejected for synthetic_browser_stage due to missing playwright/screenshots."""
     for adapter_name in ("opencode", "antigravity", "codex"):
         adapter = AdapterRegistry.get(adapter_name)
-        role = Role(name="tester", sequence_number=99, template_content="", protocol_content="")
+        role = Role(name="synthetic_browser_stage", sequence_number=99, template_content="", protocol_content="")
         stage = Stage(role=role, adapter=adapter)
         with pytest.raises(CapabilityValidationError) as exc_info:
             stage.validate_compatibility()
         err = exc_info.value
         assert "playwright" in err.missing_capabilities
         assert "screenshots" in err.missing_capabilities
+
+
+def test_all_first_party_adapters_satisfy_tester_stage():
+    """Verify OpenCode, Antigravity, and Codex all satisfy the real Tester stage requirements (code_read, shell)."""
+    for adapter_name in ("opencode", "antigravity", "codex"):
+        adapter = AdapterRegistry.get(adapter_name)
+        role = Role(name="tester", sequence_number=4, template_content="", protocol_content="")
+        stage = Stage(role=role, adapter=adapter)
+        # Must pass capability compatibility check
+        stage.validate_compatibility()
+
 
 
 
@@ -326,14 +337,16 @@ def test_default_stage_requirements():
     assert StageRequirementsRegistry.get("planner") == {"code_read"}
     assert StageRequirementsRegistry.get("executor") == {"code_edit", "shell"}
     assert StageRequirementsRegistry.get("reviewer") == {"code_read"}
-    assert StageRequirementsRegistry.get("tester") == {"shell", "playwright", "screenshots"}
+    assert StageRequirementsRegistry.get("tester") == {"code_read", "shell"}
+    assert StageRequirementsRegistry.get("synthetic_browser_stage") == {"shell", "playwright", "screenshots"}
 
 
 def test_stage_class_delegates_to_requirements_registry():
     """Verify Stage.get_required_capabilities matches registry."""
     assert Stage.get_required_capabilities("executor") == {"code_edit", "shell"}
     assert Stage.get_required_capabilities("critic") == {"code_read"}
-    assert Stage.get_required_capabilities("tester") == {"shell", "playwright", "screenshots"}
+    assert Stage.get_required_capabilities("tester") == {"code_read", "shell"}
+    assert Stage.get_required_capabilities("synthetic_browser_stage") == {"shell", "playwright", "screenshots"}
 
 
 def test_role_required_capabilities_property():
@@ -344,8 +357,11 @@ def test_role_required_capabilities_property():
     role_critic = Role(name="critic", sequence_number=0, template_content="", protocol_content="")
     assert role_critic.required_capabilities == {"code_read"}
 
-    role_tester = Role(name="tester", sequence_number=99, template_content="", protocol_content="")
-    assert role_tester.required_capabilities == {"shell", "playwright", "screenshots"}
+    role_tester = Role(name="tester", sequence_number=4, template_content="", protocol_content="")
+    assert role_tester.required_capabilities == {"code_read", "shell"}
+
+    role_browser = Role(name="synthetic_browser_stage", sequence_number=99, template_content="", protocol_content="")
+    assert role_browser.required_capabilities == {"shell", "playwright", "screenshots"}
 
 
 def test_custom_stage_requirement_registration():

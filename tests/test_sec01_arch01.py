@@ -386,6 +386,10 @@ def test_production_auto_pipeline_commit_isolation_exact_path(isolated_git_repo,
             stderr="", exit_code=0, duration_seconds=0.2, raw_output="SUCCESS",
         )
 
+    test_resp = AdapterResponse(
+        stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+        stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
+    )
     rev_resp = AdapterResponse(
         stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
         stderr="", exit_code=0, duration_seconds=0.1, raw_output="APPROVED",
@@ -401,7 +405,7 @@ def test_production_auto_pipeline_commit_isolation_exact_path(isolated_git_repo,
 
     with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
          patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-         patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp, critic_resp]), \
+         patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp, critic_resp]), \
          patch("forge.adapters.antigravity.AntigravityAdapter.execute", side_effect=mock_executor_execute):
 
         result = runner.invoke(
@@ -445,9 +449,9 @@ def test_stage_order_metadata_and_dynamic_counts():
     assert any(v.name == "reviewer" for v in verifiers)
     assert all(v.is_verifier for v in verifiers)
 
-    # 5 stages without pre-critic (architect, planner, executor, reviewer, closing critic)
-    assert StageOrder.total_stages_count(no_critic=False) == 5
-    assert StageOrder.total_stages_count(no_critic=True) == 4
+    # 6 stages without pre-critic (architect, planner, executor, tester, reviewer, closing critic)
+    assert StageOrder.total_stages_count(no_critic=False) == 6
+    assert StageOrder.total_stages_count(no_critic=True) == 5
 
 
 def test_custom_verifier_role_registration_in_validator():
@@ -457,14 +461,14 @@ def test_custom_verifier_role_registration_in_validator():
 
     # Register custom role
     MachineReportValidator.register_role_rules(
-        role="TESTER",
+        role="CUSTOM_AUDITOR",
         allowed_statuses={"PASSED", "FAILED", "CHANGES_REQUIRED", "BLOCKED"},
         allowed_handoffs={"REVIEWER", "EXECUTOR", "NONE"},
     )
 
     report = MachineReportValidator.validate(
-        data={"ROLE": "TESTER", "STATUS": "PASSED", "HANDOFF": "REVIEWER"},
-        expected_role="TESTER",
+        data={"ROLE": "CUSTOM_AUDITOR", "STATUS": "PASSED", "HANDOFF": "REVIEWER"},
+        expected_role="CUSTOM_AUDITOR",
     )
     assert report.is_valid is True
     assert report.status == "PASSED"
@@ -542,8 +546,12 @@ def test_banner_derivation_from_stage_definitions(isolated_git_repo, monkeypatch
         stderr="", exit_code=0, duration_seconds=0.1, raw_output="READY",
     )
     exec_resp = AdapterResponse(
-        stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```",
+        stdout="```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: TESTER\n```",
         stderr="", exit_code=0, duration_seconds=0.1, raw_output="SUCCESS",
+    )
+    test_resp = AdapterResponse(
+        stdout="```yaml\nROLE: TESTER\nSTATUS: PASS\nHANDOFF: REVIEWER\n```",
+        stderr="", exit_code=0, duration_seconds=0.1, raw_output="PASS",
     )
     rev_resp = AdapterResponse(
         stdout="```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```",
@@ -556,17 +564,18 @@ def test_banner_derivation_from_stage_definitions(isolated_git_repo, monkeypatch
 
     with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
          patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True), \
-         patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, rev_resp, critic_resp]), \
+         patch("forge.adapters.opencode.OpenCodeAdapter.execute", side_effect=[arch_resp, plan_resp, test_resp, rev_resp, critic_resp]), \
          patch("forge.adapters.antigravity.AntigravityAdapter.execute", return_value=exec_resp):
 
         res = runner.invoke(main, ["auto", "Test dynamic banner"])
         assert res.exit_code == 0
-        # Check that banners show [1/5], [2/5], [3/5] (Attempt 1/3), [4/5] (Attempt 1/3), [5/5]
-        assert "[1/5] ▶ Executing Stage: 01_ARCHITECT" in res.output
-        assert "[2/5] ▶ Executing Stage: 02_PLANNER" in res.output
-        assert "[3/5] (Attempt 1/3) ▶ Executing Stage: 03_EXECUTOR" in res.output
-        assert "[4/5] (Attempt 1/3) ▶ Executing Stage: 04_REVIEWER" in res.output
-        assert "[5/5] ▶ Executing Stage: 05_CRITIC" in res.output
+        # Check that banners show [1/6], [2/6], [3/6] (Attempt 1/3), [4/6] (Attempt 1/3), [5/6] (Attempt 1/3), [6/6]
+        assert "[1/6] ▶ Executing Stage: 01_ARCHITECT" in res.output
+        assert "[2/6] ▶ Executing Stage: 02_PLANNER" in res.output
+        assert "[3/6] (Attempt 1/3) ▶ Executing Stage: 03_EXECUTOR" in res.output
+        assert "[4/6] (Attempt 1/3) ▶ Executing Stage: 04_TESTER" in res.output
+        assert "[5/6] (Attempt 1/3) ▶ Executing Stage: 05_REVIEWER" in res.output
+        assert "[6/6] ▶ Executing Stage: 06_CRITIC" in res.output
 
 
 def test_resume_preserves_run_baseline(isolated_git_repo):

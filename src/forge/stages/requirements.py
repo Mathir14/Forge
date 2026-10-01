@@ -44,7 +44,8 @@ class StageRequirementsRegistry:
             "planner": {Capability.CODE_READ},
             "executor": {Capability.CODE_EDIT, Capability.SHELL},
             "reviewer": {Capability.CODE_READ},
-            "tester": {Capability.SHELL, Capability.PLAYWRIGHT, Capability.SCREENSHOTS},
+            "tester": {Capability.CODE_READ, Capability.SHELL},
+            "synthetic_browser_stage": {Capability.SHELL, Capability.PLAYWRIGHT, Capability.SCREENSHOTS},
         }
         for stage, caps in defaults.items():
             cls.register(stage, caps)

@@ -526,3 +526,269 @@ def test_antigravity_execute_backward_compatibility():
         cmd = mock_run_sub.call_args[0][0]
         assert "--output-format" in cmd
         assert cmd[cmd.index("--output-format") + 1] == "text"
+
+
+# ---------------------------------------------------------------------------
+# 9. Regression: step_update Stream Event Decoding & Warning Elimination
+# ---------------------------------------------------------------------------
+
+def test_antigravity_step_update_raw_tool_events_decoded():
+    """Regression: Verify captured raw step_update tool events emit TOOL_START and TOOL_FINISH."""
+    adapter = AntigravityAdapter()
+    stream = [
+        # Captured raw tool invocation start (state: ACTIVE)
+        json.dumps({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3",
+                "step_index": 2,
+                "state": "ACTIVE",
+                "step_type": "tool",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "name": "run_command",
+                    "parameters": {"CommandLine": "ls pyproject.toml"},
+                },
+            },
+        }),
+        # Captured raw tool invocation completion (state: DONE)
+        json.dumps({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3",
+                "step_index": 2,
+                "state": "DONE",
+                "step_type": "tool",
+                "tool_name": "run_command",
+                "duration_seconds": 0.019409763,
+                "tool_info": {
+                    "name": "run_command",
+                    "parameters": {"CommandLine": "ls pyproject.toml"},
+                    "output": "ls: cannot access 'pyproject.toml': No such file or directory\r\n",
+                },
+            },
+        }),
+        json.dumps({"event": "result", "result": {"status": "SUCCESS"}}),
+    ]
+
+    events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+    assert len(events) == 3
+
+    # TOOL_START
+    assert events[0].event_type == AgentEventType.TOOL_START
+    assert events[0].text == "run_command"
+    assert events[0].data["tool"] == "run_command"
+    assert events[0].data["call_id"] == "2"
+    assert events[0].data["input"] == {"CommandLine": "ls pyproject.toml"}
+    assert events[0].data["session_id"] == "7a98c766-55be-46ff-a8f3-8dda8f6d57d3"
+
+    # TOOL_FINISH
+    assert events[1].event_type == AgentEventType.TOOL_FINISH
+    assert events[1].text == "run_command"
+    assert events[1].data["tool"] == "run_command"
+    assert events[1].data["call_id"] == "2"
+    assert events[1].data["status"] == "completed"
+    assert events[1].data["output"] == "ls: cannot access 'pyproject.toml': No such file or directory\r\n"
+    assert events[1].data["error"] is False
+    assert events[1].data["session_id"] == "7a98c766-55be-46ff-a8f3-8dda8f6d57d3"
+
+    # COMPLETE
+    assert events[2].event_type == AgentEventType.COMPLETE
+
+
+def test_antigravity_step_update_lifecycle_and_metadata_silent(caplog):
+    """Regression: Verify non-progress step_update events (user_input, agent_response without text) are handled silently without warning spam."""
+    adapter = AntigravityAdapter()
+    stream = [
+        # Captured raw user_input acknowledgment
+        json.dumps({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3",
+                "step_index": 0,
+                "state": "DONE",
+                "step_type": "user_input",
+            },
+        }),
+        # Captured raw agent_response step completion without text delta (tool generation turn)
+        json.dumps({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3",
+                "step_index": 1,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "duration_seconds": 5.15233363,
+                "usage": {
+                    "input_tokens": 11833,
+                    "output_tokens": 545,
+                    "thinking_tokens": 479,
+                    "cache_read_tokens": 0,
+                    "total_tokens": 12378,
+                },
+            },
+        }),
+        json.dumps({"event": "result", "result": {"status": "SUCCESS"}}),
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+
+    # WARNING spam must NOT occur
+    assert not any("Unrecognized provider event ignored: step_update" in r.message for r in caplog.records)
+    # Only COMPLETE event produced (lifecycle events do not emit AgentEvents)
+    assert len(events) == 1
+    assert events[0].event_type == AgentEventType.COMPLETE
+    # Intermediate token usage from step_update was preserved
+    assert events[0].result.token_usage == {
+        "input_tokens": 11833,
+        "output_tokens": 545,
+        "thinking_tokens": 479,
+        "cache_read_tokens": 0,
+        "total_tokens": 12378,
+    }
+
+
+def test_antigravity_step_update_tool_error_decoded():
+    """Regression: Verify tool step_update with error emits TOOL_FINISH with error=True."""
+    adapter = AntigravityAdapter()
+    stream = [
+        json.dumps({
+            "event": "step_update",
+            "step_update": {
+                "step_index": 3,
+                "state": "DONE",
+                "step_type": "tool",
+                "tool_name": "replace_file_content",
+                "tool_info": {
+                    "name": "replace_file_content",
+                    "error": "FileNotFoundError: /path/to/missing.py",
+                },
+            },
+        }),
+        json.dumps({"event": "result", "status": "success"}),
+    ]
+
+    events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+    assert len(events) == 2
+    assert events[0].event_type == AgentEventType.TOOL_FINISH
+    assert events[0].data["tool"] == "replace_file_content"
+    assert events[0].data["error"] is True
+    assert events[0].data["status"] == "error"
+    assert events[1].event_type == AgentEventType.COMPLETE
+
+
+def test_antigravity_full_captured_stream_decoding(caplog):
+    """Regression: End-to-end decode of real captured Antigravity stream verifying zero warning spam and complete lifecycle."""
+    adapter = AntigravityAdapter()
+    stream = [
+        json.dumps({"event": "init", "conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3"}),
+        json.dumps({"event": "step_update", "step_update": {"conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3", "step_index": 0, "state": "DONE", "step_type": "user_input"}}),
+        json.dumps({"event": "step_update", "step_update": {"conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3", "step_index": 1, "state": "DONE", "step_type": "agent_response", "duration_seconds": 5.15, "usage": {"input_tokens": 11833, "output_tokens": 545, "total_tokens": 12378}}}),
+        json.dumps({"event": "step_update", "step_update": {"conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3", "step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "run_command", "tool_info": {"name": "run_command", "parameters": {"CommandLine": "ls pyproject.toml"}}}}),
+        json.dumps({"event": "step_update", "step_update": {"conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3", "step_index": 2, "state": "DONE", "step_type": "tool", "tool_name": "run_command", "duration_seconds": 0.02, "tool_info": {"name": "run_command", "parameters": {"CommandLine": "ls pyproject.toml"}, "output": "ls: cannot access 'pyproject.toml'"}}}),
+        json.dumps({"event": "step_update", "step_update": {"conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3", "step_index": 3, "state": "ACTIVE", "step_type": "agent_response", "text_delta": "Command finished."}}),
+        json.dumps({"event": "result", "result": {"conversation_id": "7a98c766-55be-46ff-a8f3-8dda8f6d57d3", "status": "SUCCESS", "response": "Command finished.", "usage": {"input_tokens": 46736, "output_tokens": 1071, "total_tokens": 47807}}}),
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+
+    assert not any("Unrecognized provider event ignored: step_update" in r.message for r in caplog.records)
+    assert len(events) == 4
+    assert events[0].event_type == AgentEventType.TOOL_START
+    assert events[0].data["tool"] == "run_command"
+    assert events[1].event_type == AgentEventType.TOOL_FINISH
+    assert events[1].data["tool"] == "run_command"
+    assert events[2].event_type == AgentEventType.CHUNK
+    assert events[2].text == "Command finished."
+    assert events[3].event_type == AgentEventType.COMPLETE
+    assert events[3].result.stdout == "Command finished."
+    assert events[3].result.token_usage == {"input_tokens": 46736, "output_tokens": 1071, "total_tokens": 47807}
+    assert events[3].result.metadata["session_id"] == "7a98c766-55be-46ff-a8f3-8dda8f6d57d3"
+
+
+def test_antigravity_step_update_idle_timeout_contract(tmp_path):
+    """Regression: Verify silent step_update does NOT reset Stage idle timer, preserving timeout detection."""
+    from forge.core.config import Config
+    from forge.core.context import Context
+    from forge.core.git import GitService
+    from forge.core.role import Role
+    from forge.stages.stage import Stage
+    from forge.storage.run_manager import RunManager
+
+    run_mgr = RunManager(tmp_path)
+    run = run_mgr.create_run(task="Test stage event task")
+    adapter = AntigravityAdapter()
+
+    def stream_gen():
+        yield json.dumps({"event": "step_update", "step_update": {"text_delta": "Working...\n"}})
+        time.sleep(0.05)
+        # silent step_update (metadata) must NOT reset idle timer
+        yield json.dumps({"event": "step_update", "step_update": {"step_index": 0, "state": "DONE", "step_type": "user_input"}})
+        time.sleep(0.2)
+        yield json.dumps({"event": "result", "status": "success"})
+
+    def gen(**kwargs):
+        yield from adapter._decode_stream_events(stream_gen(), start_time=time.time())
+
+    with patch.object(adapter, "iter_events", side_effect=gen):
+        role = Role(name="planner", sequence_number=2, template_content="You are planner.", protocol_content="Emit machine report.")
+        stage = Stage(role, adapter, run_mgr, timeout=5, idle_timeout=0.15)
+        ctx = Context(run=run, project_root=tmp_path, config=Config.default(), git=GitService(tmp_path))
+        res = stage.run(ctx)
+
+    assert res.success is False
+    assert res.response.exit_code == 124
+    assert "idle timeout" in res.response.stderr.lower()
+
+
+def test_antigravity_stream_decoding_preserves_clean_stdout_and_raw_transport():
+    """Verify AntigravityAdapter ExecutionResult.stdout contains human-readable report while raw_output preserves wire transport."""
+    adapter = AntigravityAdapter()
+    human_report = "# Human Report\n\n### Summary\nAddressed all reviewer feedback.\n\n### Validation\nAll tests passed.\n\n"
+    machine_report = "```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\nREASON: All tests passed\n```\n"
+    combined_report = human_report + machine_report
+
+    stream = [
+        json.dumps({"event": "init", "conversation_id": "conv-123"}),
+        json.dumps({"event": "step_update", "step_update": {"step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": human_report}}),
+        json.dumps({"event": "step_update", "step_update": {"step_index": 2, "state": "DONE", "step_type": "agent_response", "text_delta": machine_report}}),
+        json.dumps({"event": "result", "result": {"conversation_id": "conv-123", "status": "SUCCESS", "response": combined_report}}),
+    ]
+
+    events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+    complete_events = [e for e in events if e.event_type == AgentEventType.COMPLETE]
+    assert len(complete_events) == 1
+    res = complete_events[0].result
+    assert isinstance(res, ExecutionResult)
+    # 1. stdout contains clean decoded markdown (human report + machine report)
+    assert res.stdout == combined_report
+    assert "# Human Report" in res.stdout
+    assert "### Summary" in res.stdout
+
+    # 2. raw_output preserves exact wire transport stream
+    assert "conv-123" in res.raw_output
+    assert '{"event": "init"' in res.raw_output
+    assert '{"event": "step_update"' in res.raw_output
+
+
+def test_antigravity_stream_decoding_error_preserves_raw_transport():
+    """Verify AntigravityAdapter error events preserve exact raw transport in raw_output."""
+    adapter = AntigravityAdapter()
+    stream = [
+        json.dumps({"event": "init", "conversation_id": "conv-fatal"}),
+        json.dumps({"event": "error", "message": "Fatal initialization crash"}),
+    ]
+
+    events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+    err_events = [e for e in events if e.event_type == AgentEventType.ERROR]
+    assert len(err_events) == 1
+    res = err_events[0].result
+    assert isinstance(res, ExecutionResult)
+    assert res.stdout == ""
+    # raw_output preserves raw wire stream for diagnostics
+    assert "Fatal initialization crash" in res.raw_output
+    assert "conv-fatal" in res.raw_output
+
+

@@ -246,6 +246,83 @@ class BaseAdapter(ABC):
         )
 
     @staticmethod
+    def _build_complete_event(
+        ts: float,
+        duration: float,
+        stdout: str,
+        stderr: str,
+        raw_output: str,
+        token_usage: Dict[str, int],
+        metadata: Dict[str, Any],
+        exit_code: int = 0,
+    ) -> AgentEvent:
+        """Construct a post-mortem COMPLETE AgentEvent carrying its verified ExecutionResult."""
+        exec_res = ExecutionResult(
+            exit_code=exit_code,
+            duration_seconds=duration,
+            stdout=stdout,
+            stderr=stderr,
+            raw_output=raw_output,
+            token_usage=dict(token_usage),
+            metadata=metadata,
+        )
+        return AgentEvent(
+            event_type=AgentEventType.COMPLETE,
+            timestamp=ts,
+            text=stdout,
+            result=exec_res,
+        )
+
+    @staticmethod
+    def _build_error_event(
+        ts: float,
+        duration: float,
+        error_msg: str,
+        stdout: str,
+        stderr: str,
+        raw_output: str,
+        token_usage: Dict[str, int],
+        metadata: Dict[str, Any],
+        exit_code: int = 1,
+    ) -> AgentEvent:
+        """Construct an ERROR AgentEvent carrying its verified ExecutionResult."""
+        exec_res = ExecutionResult(
+            exit_code=exit_code,
+            duration_seconds=duration,
+            stdout=stdout,
+            stderr=stderr or error_msg,
+            raw_output=raw_output,
+            token_usage=dict(token_usage),
+            metadata=metadata,
+        )
+        return AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=ts,
+            text=error_msg,
+            result=exec_res,
+        )
+
+    @classmethod
+    def _safe_cleanup_subprocess(cls, proc: Optional[subprocess.Popen]) -> None:
+        """Safely clean up subprocess: only kill process group if proc is still alive.
+
+        Under ADR-017, normal execution observes an already-terminated subprocess.
+        Only interrupted execution (timeout, cancellation, fatal error) actively
+        terminates the process group.
+        """
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                cls._kill_process_group(proc)
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    @staticmethod
     def _safe_kill(proc: subprocess.Popen) -> None:
         """Best-effort process termination ignoring missing or already-exited processes."""
         try:

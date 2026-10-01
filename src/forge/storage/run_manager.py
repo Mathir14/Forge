@@ -155,9 +155,23 @@ class RunManager:
         self._ensure_dirs()
         run_dir = self._validate_run_id(run_id)
         if run_dir.exists() and run_dir.is_dir():
+            from forge.storage.run_lock import RunLock, RunOwnershipError
+            if RunLock.is_run_locked(run_dir):
+                owner = RunLock.read_owner_metadata(run_dir / RunLock.LOCK_FILE_NAME)
+                raise RunOwnershipError(
+                    f"Cannot delete run '{run_id}': run is currently owned by an active Forge process.",
+                    run_id=run_id,
+                    owner_info=owner,
+                    lock_file=run_dir / RunLock.LOCK_FILE_NAME,
+                )
             shutil.rmtree(run_dir)
             return True
         return False
+
+    def acquire_run_lock(self, run: Run) -> Any:
+        """Obtain a RunLock instance for the given run."""
+        from forge.storage.run_lock import RunLock
+        return RunLock(run_dir=run.run_dir, run_id=run.run_id)
 
     def save_stage_artifacts(
         self,

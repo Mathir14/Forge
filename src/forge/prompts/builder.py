@@ -122,15 +122,18 @@ class InstructionBuilder:
             elif changed_files:
                 changed_file_summary = "\n".join(f"- {f}" for f in changed_files)
 
-        # Resolve executor / change-producer report for Reviewer
+        # Resolve executor / change-producer report for Reviewer and Tester
         executor_report: Optional[str] = None
-        if role.name == "reviewer":
+        if role.name in ("reviewer", "tester"):
             executor_report = previous_stage_outputs.get("executor")
-            if not executor_report:
-                # Fallback to direct check using StageOrder
+            if not executor_report and context.run and hasattr(context.run, "run_dir"):
                 from forge.stages.definition import StageOrder
                 producer_def = StageOrder.change_producer()
                 exec_file = context.run.run_dir / f"{producer_def.artifact_prefix}.md"
+                if not exec_file.exists():
+                    candidates = list(context.run.run_dir.glob("*_executor.md"))
+                    if candidates:
+                        exec_file = candidates[0]
                 if exec_file.exists():
                     try:
                         content = exec_file.read_text(encoding="utf-8")
@@ -141,12 +144,70 @@ class InstructionBuilder:
                     except Exception as e:
                         logging.warning("Failed to read change producer artifact %s: %s", exec_file, e)
 
+        # Resolve complete Tester report (both markdown and machine report JSON) for Reviewer
+        tester_report: Optional[str] = None
+        tester_machine_report: Optional[str] = None
+        if role.name == "reviewer":
+            tester_report = previous_stage_outputs.get("tester")
+            if not tester_report and context.run and hasattr(context.run, "run_dir"):
+                from forge.stages.definition import StageOrder
+                tester_def = StageOrder.get_tester()
+                t_file = context.run.run_dir / f"{tester_def.artifact_prefix}.md"
+                if not t_file.exists():
+                    candidates_t = list(context.run.run_dir.glob("*_tester.md"))
+                    if candidates_t:
+                        t_file = candidates_t[0]
+                if t_file.exists():
+                    try:
+                        content = t_file.read_text(encoding="utf-8")
+                        if len(content) > MAX_STAGE_OUTPUT_CHARS:
+                            excess = len(content) - MAX_STAGE_OUTPUT_CHARS
+                            content = content[:MAX_STAGE_OUTPUT_CHARS] + f"\n\n[... Truncated remaining {excess} chars ...]"
+                        tester_report = content
+                    except Exception as e:
+                        logging.warning("Failed to read tester markdown artifact %s: %s", t_file, e)
+
+            # Also load tester machine JSON report
+            if context.run and hasattr(context.run, "run_dir"):
+                from forge.stages.definition import StageOrder
+                tester_def = StageOrder.get_tester()
+                t_json_file = context.run.run_dir / f"{tester_def.artifact_prefix}.json"
+                if not t_json_file.exists():
+                    candidates_tj = list(context.run.run_dir.glob("*_tester.json"))
+                    if candidates_tj:
+                        t_json_file = candidates_tj[0]
+                if t_json_file.exists():
+                    try:
+                        t_json_content = t_json_file.read_text(encoding="utf-8")
+                        if len(t_json_content) > MAX_STAGE_OUTPUT_CHARS:
+                            excess = len(t_json_content) - MAX_STAGE_OUTPUT_CHARS
+                            t_json_content = t_json_content[:MAX_STAGE_OUTPUT_CHARS] + f"\n\n[... Truncated remaining {excess} chars ...]"
+                        tester_machine_report = t_json_content
+                    except Exception as e:
+                        logging.warning("Failed to read tester machine json artifact %s: %s", t_json_file, e)
+
         # Resolve clean user task for instruction so prompt compiler renders repair_feedback independently
         base_task = getattr(context.run, "_initial_task", None)
         if not base_task:
             base_task = context.run.task
             if context.repair_feedback and context.repair_feedback.strip() in base_task:
                 base_task = base_task.replace(context.repair_feedback.strip(), "").strip()
+
+        # Project PKB knowledge context
+        knowledge_context = ""
+        try:
+            from forge.storage.knowledge import KnowledgeStore
+            from forge.prompts.knowledge_projector import KnowledgeProjector
+            k_store = KnowledgeStore(context.project_root)
+            knowledge_context = KnowledgeProjector.project_context(
+                store=k_store,
+                role_name=role.name,
+                task=base_task,
+                changed_files=changed_files,
+                max_chars=20000,
+            )
+        except Exception as e:
+            logging.warning("Failed to project knowledge context in InstructionBuilder: %s", e)
 
         return Instruction(
             role_name=role.name,
@@ -159,7 +220,10 @@ class InstructionBuilder:
             git_status=git_status if git_status else None,
             changed_file_summary=changed_file_summary if changed_file_summary else None,
             executor_report=executor_report if executor_report else None,
+            tester_report=tester_report if tester_report else None,
+            tester_machine_report=tester_machine_report if tester_machine_report else None,
             protocol_schema=role.protocol_content,
             repair_feedback=context.repair_feedback,
+            knowledge_context=knowledge_context,
         )
 

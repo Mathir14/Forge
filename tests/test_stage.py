@@ -72,3 +72,81 @@ HANDOFF: PLANNER
     json_file = tmp_path / ".forge" / "runs" / "run-001" / "01_architect.json"
     assert md_file.exists()
     assert json_file.exists()
+
+
+def test_stage_is_ndjson_detection():
+    assert Stage._is_ndjson('{"type": "step_start"}\n{"type": "text"}') is True
+    assert Stage._is_ndjson('   {"event": "init"}') is True
+    assert Stage._is_ndjson("# Markdown heading\n```yaml\nROLE: PLANNER\n```") is False
+    assert Stage._is_ndjson("") is False
+    assert Stage._is_ndjson("plain text") is False
+    assert Stage._is_ndjson("{invalid json") is False
+
+
+def test_stage_skips_raw_ndjson_fallback_when_primary_parse_fails(tmp_path):
+    run_mgr = RunManager(tmp_path)
+    run = run_mgr.create_run(task="Test planner")
+    context = Context(
+        run=run,
+        project_root=tmp_path,
+        config=Config.default(),
+        git=GitService(tmp_path),
+    )
+
+    role = Role(
+        name="planner",
+        sequence_number=2,
+        template_content="You are planner.",
+        protocol_content="Emit machine report.",
+    )
+
+    # Malformed YAML in stdout (unquoted colon)
+    failing_stdout = """
+# Plan
+```yaml
+ROLE: PLANNER
+STATUS: READY
+HANDOFF: EXECUTOR
+TASKS:
+  - description: Fix bug: bad colon
+```
+"""
+    raw_ndjson = '{"type": "step_start"}\n{"type": "text", "part": {"text": "something"}}\n{"type": "step_finish"}'
+
+    class NdjsonMockAdapter(BaseAdapter):
+        def __init__(self):
+            super().__init__(name="mock_ndjson")
+
+        def is_available(self) -> bool:
+            return True
+
+        def execute(self, prompt: str, cwd=None, timeout=None):
+            return AdapterResponse(
+                stdout=failing_stdout,
+                stderr="",
+                exit_code=0,
+                duration_seconds=0.5,
+                raw_output=raw_ndjson,
+            )
+
+    stage = Stage(role=role, adapter=NdjsonMockAdapter(), run_manager=run_mgr)
+
+    from unittest.mock import patch
+    from forge.protocol.parser import MachineReportParser
+
+    calls = []
+    original_extract_yaml = MachineReportParser.extract_yaml
+
+    def spy_extract(text, expected_role=None):
+        calls.append(text)
+        return original_extract_yaml(text, expected_role=expected_role)
+
+    with patch.object(MachineReportParser, "extract_yaml", side_effect=spy_extract):
+        result = stage.run(context)
+
+    # extract_yaml must have been called ONLY on failing_stdout, NEVER on raw_ndjson
+    assert len(calls) == 1
+    assert calls[0] == failing_stdout
+    assert raw_ndjson not in calls
+    assert result.status == "UNKNOWN"
+

@@ -873,6 +873,511 @@ APPROVAL: NO
     assert report_remediated.reason == "Stored XSS detected on company page and convention debt unclosed."
 
 
+def test_regression_exact_planner_artifact_unspaced_fenced_yaml():
+    """Regression: Verify exact 02_planner.md artifact from run-009 parses successfully despite unspaced ```yaml fence."""
+    exact_planner_md = """## Human Report
+
+### Summary
+Decomposed the Architect-approved run-009 scope (11 refactors from the run-008 Critic audit) into 13 executable tasks. One task is the hard critical gate (fail-closed tagged-thread visibility in profile contracts); the rest are sprint debt. Verified current tree: 125/125 tests, clean tsc/lint with the `vh-pg` Postgres container up. No schema changes, no new deps, no architectural reversal.
+
+### Assumptions
+1. Postgres container `vh-pg` (port 5432, migrations applied) remains available for executor verification.
+2. `getThreadById` fail-closed behavior is authoritative and untouched; only the two profile contracts need the shared predicate.
+3. `ThreadCommentsSection` (threadId-based poster) remains the canonical comment UI after `DiscussionThreadSection` (threadRef-based) is removed — executor must verify before deletion.
+4. ADR-012 wording/demo amendments are documentation-only edits to `decisions.md`; no src changes required for documentation.
+
+### Dependencies
+- T1 → T3 (same file, sequence), and T1 blocks verification of fail-closed leak fix.
+- T3 (remove `DiscussionThreadSection`) must precede T2 removal of `threadRef` path to avoid orphaned consumers.
+- T13 (bounded `getRejectedEntityIds`) informs how `buildVisibleThreadWhere` resolves rejected IDs; do T13's cap as part of T1 predicate work.
+- T4/T5/T10/T11 are independent of the file-heavy refactors; can run in parallel.
+
+### Tasks
+- **T1 (CRITICAL):** Extract `buildVisibleThreadWhere()` in `shared-kernel/contracts`; apply to `getCompanyProfileData`/`getJobProfileData` tagged-thread queries to exclude threads with rejected experience, rejected experience-company, or any rejected ThreadTag/legacy entity reference. Align with `listInterviewThreads` predicate (single source of truth). *(docs: ADR-012.3 cap note in T13)*
+- **T2 (MAJOR):** Delete `getOrCreateDiscussionThread` + `inFlightThreads`; `createComment` requires an existing APPROVED `threadId`; remove `threadRef` from `createCommentSchema`, `CreateCommentInput` (contracts/index.ts), and any poster components; update affected tests (thread-lifecycle, security-audit, auth-rbac).
+- **T3 (MAJOR):** Remove dead `discussion`/`threads`-alias fields from `CompanyProfileResult`/`JobProfileResult`, orphaned `DiscussionThreadProfileDTO`/`CommentProfileDTO` in profile-contracts, the legacy `findFirst`+comments assembly, and delete `DiscussionThreadSection.tsx` + its test import.
+- **T4 (MAJOR):** Unify GET `/api/threads` with the service boundary — invalid params return 200 empty list per ADR-012.5 (drop `ValidationError` 400).
+- **T5 (MAJOR):** Retire `/questions` page + home link; redirect `/companies/[id]/interviews/new` → `/threads/new?companyId=...`; repoint all 4 links in `companies/[id]/page.tsx`; remove dead links.
+- **T6 (MIN):** Bound `db.jobPosting.findMany` to `.take(100)` in `threads/new/page.tsx` (M4).
+- **T7 (MIN):** Cap `interviewThreadQuerySchema.page` upper bound (bounded offset) in `shared-kernel/validation.ts`.
+- **T8 (MIN):** Add typed `TaggedEntityDTO { entityType, entityId, entityName }`; replace the 4 `(tag as any).entityName` escapes in `threads/page.tsx` + `threads/[id]/page.tsx`.
+- **T9 (MIN):** `threads/[id]/page.tsx` catch only `EntityNotFoundError → notFound()`; log/rethrow others.
+- **T10 (MIN):** `auth-options.ts` jwt callback fails loudly if `db.session.create` fails (rethrow) instead of minting a doomed token; keep background pruner as-is.
+- **T11 (MIN):** `reportAbuse` asserts target existence + visibility per `targetType` before queueing; single-source targetType→moderation-entityType mapping (replace direct passthrough).
+- **T12 (MIN):** `/threads` pagination links preserve `q/companyId/role/outcome/difficulty` (+ page).
+- **T13 (MIN):** Bound `getRejectedEntityIds` with a `take` cap + fail-closed empty-page fallback at service boundary; amend ADR-012.3 wording and ratify ADR-012.5 (200-empty) in `decisions.md`.
+
+### Acceptance Criteria
+1. Thread tagged to a REJECTED entity never appears on any APPROVED entity profile or listing (kernel test).
+2. `getOrCreateDiscussionThread`, `threadRef`, `DiscussionThreadSection`, `discussion`/`threads` DTO fields all absent from src.
+3. GET `/api/threads` and the page return identical shaped results on invalid params (empty list, 200).
+4. No `(tag as any)` casts remain; tags are typed with `entityName`.
+5. jwt callback propagates session-create failure; `reportAbuse` 404s on unknown/rejected targets.
+6. All 125 existing tests updated-and-passing plus new kernel fail-closed test; `tsc --noEmit`, `next lint` clean.
+
+### Validation
+- `npx vitest run` (needs Postgres `vh-pg` up; expect ≥126 tests green)
+- `npx tsc --noEmit`
+- `npx next lint`
+- Manual/grep: no `threadRef`, `getOrCreateDiscussionThread`, `DiscussionThreadSection`, `(tag as any)`, `/companies/[id]/interviews/new`, `/questions` home link remain.
+
+### Risks
+- T2 removes a public API used by legacy threads + tests; any missed consumer surfaces as a build break — mitigated by tsc + targeted grep in T2 AC.
+- `buildVisibleThreadWhere` must reproduce the exact fail-closed conditions already in `listInterviewThreads` (tags none + legacy entityType/entityId NOT in rejected IDs) or listing/profile behavior diverges — mitigate by having T1 share the single predicate and add the cross-check kernel test.
+- Removing `discussion` DTO could break the hardening-run005 assertions on `profile.discussion.comments`; executor must update those assertions in lockstep with T3.
+- Postgres must be up; earlier red was purely environmental.
+
+### Recommendation
+**Proceed to execution.** Execute sequentially: T1 → T3 → T2 (file-conflict order), then T4-T13 in any order in parallel. Run full suite + tsc + lint after each major task; confirm DB up first.```yaml
+ROLE: PLANNER
+PROMPT_VERSION: 1.0
+TASK_ID: run-009-plan
+START_TIME: 2026-09-22T20:20:00Z
+END_TIME: 2026-09-22T20:38:00Z
+DURATION: 1080s
+STATUS: READY
+EXIT_CODE: 0
+HANDOFF: EXECUTOR
+REASON: "Critic run-008 fixes scoped into 13 ordered tasks; ready to execute."
+INPUTS:
+  - .forge/runs/run-009/01_architect.md
+  - src/shared-kernel/contracts/profile-contracts.ts
+  - src/shared-kernel/contracts/visibility.ts
+  - src/shared-kernel/validation.ts
+  - src/features/community/services/community-service.ts
+  - src/features/interview-intelligence/services/interview-service.ts
+  - src/shared-kernel/auth/auth-options.ts
+  - src/app/threads/*, src/app/api/threads/route.ts, src/app/page.tsx
+  - src/app/companies/[id]/page.tsx, src/components/DiscussionThreadSection.tsx
+OUTPUTS:
+  - run-009 execution plan (13 tasks)
+ISSUES:
+  CRITICAL:
+    - summary: "profile-contracts tagged-thread queries lack M3/ADR-012 fail-closed filter causing rejected-entity content leak"
+      location: "src/shared-kernel/contracts/profile-contracts.ts"
+  MAJOR:
+    - summary: "getOrCreateDiscussionThread in-memory lock races across instances; lazy thread creation obsolete under ADR-012"
+      location: "src/features/community/services/community-service.ts"
+    - summary: "Dead published discussion/threads interfaces and DiscussionThreadSection component"
+      location: "src/shared-kernel/contracts/profile-contracts.ts, src/components/DiscussionThreadSection.tsx"
+    - summary: "GET /api/threads returns 400 while page/service return empty for same invalid query; contradicts ADR-012.5"
+      location: "src/app/api/threads/route.ts"
+    - summary: "Respec wiring incomplete: /questions linked from home; /companies/[id]/interviews/new duplicate submission path"
+      location: "src/app/page.tsx, src/app/companies/[id]/page.tsx"
+  MINOR:
+    - summary: "Unbounded jobPosting.findMany on thread creation page (M4)"
+      location: "src/app/threads/new/page.tsx"
+    - summary: "interviewThreadQuerySchema.page has no upper bound"
+      location: "src/shared-kernel/validation.ts"
+    - summary: "Four (tag as any).entityName type escapes"
+      location: "src/app/threads/page.tsx, src/app/threads/[id]/page.tsx"
+    - summary: "threads/[id] catches all errors into notFound()"
+      location: "src/app/threads/[id]/page.tsx"
+    - summary: "jwt callback persists sessionToken even when session create fails"
+      location: "src/shared-kernel/auth/auth-options.ts"
+    - summary: "reportAbuse accepts arbitrary target ids with no visibility assertion; broken entityType mapping"
+      location: "src/features/community/services/community-service.ts"
+    - summary: "Threads pagination drops role/outcome/difficulty filters"
+      location: "src/app/threads/page.tsx"
+    - summary: "getRejectedEntityIds deviates from ADR-012.3 single-bounded-query wording"
+      location: "src/shared-kernel/contracts/visibility.ts"
+CONFIDENCE: HIGH
+NEXT_ACTION: "Executor implements T1..T13 in dependency order with DB vh-pg up; verify vitest/tsc/lint"
+TASK_COUNT: 13
+TASKS:
+  - id: T1
+    component: shared-kernel/contracts
+    description: "Extract buildVisibleThreadWhere() and apply fail-closed filter to getCompanyProfileData/getJobProfileData tagged-thread queries (exclude rejected experience, rejected experience-company, rejected tags/legacy refs); single predicate shared with listInterviewThreads; add kernel fail-closed leak test."
+  - id: T2
+    component: features/community
+    description: "Delete getOrCreateDiscussionThread and inFlightThreads; createComment requires existing APPROVED threadId; remove threadRef from createCommentSchema, CreateCommentInput, and posters; update dependent tests."
+  - id: T3
+    component: shared-kernel/contracts
+    description: "Remove discussion/threads alias fields from Company/JobProfileResult, orphaned ThreadProfileDTOs, legacy findFirst+comments assembly; delete DiscussionThreadSection.tsx and its test import; update hardening-run005 assertions."
+  - id: T4
+    component: app/api/threads
+    description: "Unify GET /api/threads with service boundary: invalid params return 200 empty-list result instead of ValidationError 400 per ADR-012.5."
+  - id: T5
+    component: app/wiring
+    description: "Retire /questions page and home link; redirect /companies/[id]/interviews/new to /threads/new?companyId; repoint links in companies/[id]/page.tsx."
+  - id: T6
+    component: app/threads/new
+    description: "Bound db.jobPosting.findMany with take 100 in threads/new/page.tsx (M4 query bounding)."
+  - id: T7
+    component: shared-kernel/validation
+    description: "Cap interviewThreadQuerySchema.page with an upper bound to bound offset-based pagination."
+  - id: T8
+    component: shared-kernel/contracts
+    description: "Add typed TaggedEntityDTO with entityName; replace the four (tag as any).entityName escapes in threads list/detail pages."
+  - id: T9
+    component: app/threads/[id]
+    description: "Catch only EntityNotFoundError to notFound() in threads/[id] page; log and rethrow all other errors."
+  - id: T10
+    component: shared-kernel/auth
+    description: "jwt callback propagates db.session.create failure instead of minting a doomed token with sessionToken; keep background pruner."
+  - id: T11
+    component: features/community
+    description: "reportAbuse asserts target existence and visibility per targetType before queueing; single-source targetType-to-moderation entityType mapping."
+  - id: T12
+    component: app/threads/page
+    description: "Preserve q/companyId/role/outcome/difficulty filters in pagination links on threads listing."
+  - id: T13
+    component: shared-kernel/contracts
+    description: "Bound getRejectedEntityIds with take cap and fail-closed empty-page fallback at service boundary; amend ADR-012.3 and ratify ADR-012.5 in decisions.md."
+DEPENDENCIES:
+  - "T1 before T3; T3 before T2; T13 cap design incorporated in T1 predicate"
+ACCEPTANCE_CRITERIA:
+  - "Thread tagged to a REJECTED entity never appears on any APPROVED entity profile, detail, or listing (kernel fail-closed test present)."
+  - "getOrCreateDiscussionThread, threadRef, DiscussionThreadSection, and discussion/threads DTO fields absent from src."
+  - "GET /api/threads and threads page return identical empty-list 200 result on invalid params."
+  - "No (tag as any) casts remain; tags typed with entityName via TaggedEntityDTO."
+  - "jwt callback propagates session-create failure; reportAbuse 404s on unknown or rejected targets."
+  - "All existing tests updated and passing plus new fail-closed test; tsc --noEmit and next lint clean."
+VALIDATION_REQUIRED:
+  - "docker ps --filter name=vh-pg (Postgres must be up)"
+  - "npx vitest run"
+  - "npx tsc --noEmit"
+  - "npx next lint"
+  - "grep for threadRef, getOrCreateDiscussionThread, DiscussionThreadSection, (tag as any), /companies/[id]/interviews/new, /questions home link"
+EXIT_CRITERIA: "Postgres up; vitest suite green (>= 126 tests); tsc and lint clean; greps return no stale references."
+```"""
+
+    data, raw_yaml = MachineReportParser.extract_yaml(exact_planner_md, expected_role="PLANNER")
+
+    # Must extract cleanly without returning empty dict or error
+    assert data != {}
+    assert raw_yaml != ""
+    assert data["ROLE"] == "PLANNER"
+    assert data["STATUS"] == "READY"
+    assert data["HANDOFF"] == "EXECUTOR"
+    assert data["TASK_COUNT"] == 13
+    assert len(data["TASKS"]) == 13
+
+    # Verification: neither opening ```yaml nor closing ``` code fence markers remain attached to raw_yaml
+    assert not raw_yaml.startswith("```")
+    assert not raw_yaml.endswith("```")
+    assert not raw_yaml.startswith("first.```")
+
+    # Verification: MachineReportValidator validates successfully
+    report = MachineReportValidator.validate(data, expected_role="PLANNER", raw_yaml=raw_yaml)
+    assert report.is_valid is True
+    assert report.role == "PLANNER"
+    assert report.status == "READY"
+    assert report.handoff == "EXECUTOR"
+
+
+def test_regression_unspaced_fenced_yaml_all_stages():
+    """Verify fenced YAML without preceding newline parses successfully across all stages."""
+    stages = [
+        ("ARCHITECT", "APPROVED", "PLANNER", "Architecture verified.```yaml\nROLE: ARCHITECT\nSTATUS: APPROVED\nHANDOFF: PLANNER\n```"),
+        ("PLANNER", "READY", "EXECUTOR", "Plan ready.```yaml\nROLE: PLANNER\nSTATUS: READY\nHANDOFF: EXECUTOR\n```"),
+        ("EXECUTOR", "SUCCESS", "REVIEWER", "Tests passed.```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\n```"),
+        ("REVIEWER", "APPROVED", "NONE", "Diff clean.```yaml\nROLE: REVIEWER\nSTATUS: APPROVED\nHANDOFF: NONE\n```"),
+        ("CRITIC", "CRITIQUE_COMPLETE", "ARCHITECT", "Audit complete.```yaml\nROLE: CRITIC\nSTATUS: CRITIQUE_COMPLETE\nHANDOFF: ARCHITECT\n```"),
+    ]
+
+    for role, status, handoff, report_text in stages:
+        data, raw_yaml = MachineReportParser.extract_yaml(report_text, expected_role=role)
+        assert data != {}, f"Failed to extract unspaced fenced YAML for {role}"
+        assert data["ROLE"] == role
+        assert data["STATUS"] == status
+        assert data["HANDOFF"] == handoff
+        assert not raw_yaml.startswith("```")
+        assert not raw_yaml.endswith("```")
+
+        val_report = MachineReportValidator.validate(data, expected_role=role, raw_yaml=raw_yaml)
+        assert val_report.is_valid is True
+        assert val_report.status == status
+        assert val_report.handoff == handoff
+
+
+def test_regression_universal_scalar_quoting_fixtures():
+    """Verify machine reports following Universal Scalar Quoting parse and validate cleanly.
+
+    Regression fixtures specified:
+    - description: "Apply N-series fixes: z.infer inputs"
+    - description: "foo: bar: baz"
+    - reason: "Fix parser: preserve quoting"
+    - summary: "Supports arrays: maps: and punctuation"
+    """
+    planner_output = """# Human Report
+Planning complete.
+
+## Machine Report
+```yaml
+ROLE: PLANNER
+PROMPT_VERSION: 1.0
+TASK_ID: "task-001"
+START_TIME: "2026-09-20T10:05:00Z"
+END_TIME: "2026-09-20T10:10:00Z"
+DURATION: "300s"
+STATUS: READY
+EXIT_CODE: 0
+HANDOFF: EXECUTOR
+REASON: "Fix parser: preserve quoting"
+INPUTS:
+  - "architecture.md"
+OUTPUTS:
+  - "tasks.json"
+ISSUES:
+  CRITICAL: []
+  MAJOR: []
+  MINOR:
+    - summary: "Supports arrays: maps: and punctuation"
+      location: "src/parser.py"
+CONFIDENCE: HIGH
+NEXT_ACTION: "Proceed to execution"
+TASK_COUNT: 2
+TASKS:
+  - id: "T1"
+    component: "shared-kernel/fixes"
+    description: "Apply N-series fixes: z.infer inputs"
+  - id: "T2"
+    component: "core/routing"
+    description: "foo: bar: baz"
+DEPENDENCIES: []
+ACCEPTANCE_CRITERIA:
+  - "All unit tests pass"
+VALIDATION_REQUIRED:
+  - "pytest tests/"
+```"""
+
+    data, raw_yaml = MachineReportParser.extract_yaml(planner_output, expected_role="PLANNER")
+    assert data != {}, "Expected successful YAML extraction for properly quoted scalars"
+    assert data["ROLE"] == "PLANNER"
+    assert data["STATUS"] == "READY"
+    assert data["HANDOFF"] == "EXECUTOR"
+    assert data["REASON"] == "Fix parser: preserve quoting"
+    assert data["TASKS"][0]["description"] == "Apply N-series fixes: z.infer inputs"
+    assert data["TASKS"][1]["description"] == "foo: bar: baz"
+    assert data["ISSUES"]["MINOR"][0]["summary"] == "Supports arrays: maps: and punctuation"
+
+    report = MachineReportValidator.validate(data, expected_role="PLANNER", raw_yaml=raw_yaml)
+    assert report.is_valid is True
+    assert report.status == "READY"
+    assert report.handoff == "EXECUTOR"
+
+
+def test_regression_unquoted_scalars_with_colons_fail_cleanly_without_silent_repair():
+    """Verify intentionally malformed YAML with unquoted colons in scalars fails validation.
+
+    The parser MUST remain strict standards-compliant YAML and NOT attempt brittle
+    field-specific regex auto-repair. When scalars containing ': ' are emitted without
+    quotes, yaml.safe_load() rejects the syntax and validation fails (is_valid=False).
+    """
+    malformed_planner_output = """# Human Report
+Planning complete.
+
+## Machine Report
+```yaml
+ROLE: PLANNER
+PROMPT_VERSION: 1.0
+STATUS: READY
+HANDOFF: EXECUTOR
+REASON: Fix parser: preserve quoting
+TASK_COUNT: 2
+TASKS:
+  - id: T1
+    component: shared-kernel/fixes
+    description: Apply N-series fixes: z.infer inputs
+  - id: T2
+    component: core/routing
+    description: foo: bar: baz
+```"""
+
+    data, raw_yaml = MachineReportParser.extract_yaml(malformed_planner_output, expected_role="PLANNER")
+    # Strict parser behavior: yaml.safe_load fails with ScannerError ("mapping values are not allowed here")
+    # and no regex auto-repair alters the document to silently succeed.
+    assert data == {}, "Parser must not silently auto-repair unquoted scalars with colons"
+    assert MachineReportParser.last_error is not None
+    assert "mapping values are not allowed here" in str(MachineReportParser.last_error)
+
+    report = MachineReportValidator.validate(data, expected_role="PLANNER", raw_yaml=raw_yaml)
+    assert report.is_valid is False
+    assert len(report.validation_errors) > 0
+
+
+def test_regression_doubled_quotes_inside_yaml_scalars_fail_without_silent_repair():
+    """Verify malformed YAML with CSV/SQL-style doubled quotes inside strings fails validation."""
+    malformed_yaml = """```yaml
+ROLE: PLANNER
+STATUS: READY
+HANDOFF: EXECUTOR
+REASON: "Fix parser"
+TASKS:
+  - id: "T1"
+    description: "Acceptance: ""seal/open round-trip"" test passes"
+```"""
+    data, raw_yaml = MachineReportParser.extract_yaml(malformed_yaml, expected_role="PLANNER")
+    assert data == {}, "Doubled quotes are invalid YAML and must not be silently repaired"
+    assert MachineReportParser.last_error is not None
+    report = MachineReportValidator.validate(data, expected_role="PLANNER", raw_yaml=raw_yaml)
+    assert report.is_valid is False
+
+
+# ===========================================================================
+# ADR-014 Protocol Invariant Tests
+# ===========================================================================
+
+def test_adr014_blocked_with_non_none_handoff_fails_validation():
+    """Verify (STATUS: BLOCKED, HANDOFF: PLANNER) — the run-012 failure mode — is rejected."""
+    raw_data = {
+        "ROLE": "ARCHITECT",
+        "STATUS": "BLOCKED",
+        "HANDOFF": "PLANNER",
+        "REASON": "Repository pre-existing issues require remediation",
+    }
+    report = MachineReportValidator.validate(raw_data, expected_role="ARCHITECT")
+    assert report.is_valid is False
+    assert any("STATUS 'BLOCKED' requires HANDOFF 'NONE'" in err for err in report.validation_errors)
+
+
+def test_adr014_run012_remediated_scenario():
+    """Verify run-012 scenario where Architect finds repo debt emits APPROVED + PLANNER."""
+    data = {
+        "ROLE": "ARCHITECT",
+        "STATUS": "APPROVED",
+        "HANDOFF": "PLANNER",
+        "EXIT_CODE": 0,
+        "REASON": "Architecture specification complete; includes remediation of CI and auth debt.",
+        "ISSUES": {
+            "CRITICAL": [
+                "npm run typecheck fails (5 TS2741) — CI gate red.",
+                "Unconditional client demo sign-in enables one-click takeover.",
+                "No per-IP sign-in rate limit enables bcrypt CPU exhaustion.",
+            ],
+            "MAJOR": [
+                "JWT fail-open: tokens missing sessionToken bypass DB revocation.",
+            ],
+        },
+        "ARCHITECTURE": {
+            "MODULES": ["shared-kernel/auth", "features/trust-safety"],
+            "NEW_INTERFACES": ["VisibilityHelper", "IdempotentModerationResolver"],
+        },
+    }
+    report = MachineReportValidator.validate(data, expected_role="ARCHITECT")
+    assert report.is_valid is True
+    assert report.status == "APPROVED"
+    assert report.handoff == "PLANNER"
+def test_canonical_run012_regression_fixture_blocked_rejected_approved_accepted():
+    """Permanent canonical regression for run-012 incident:
+    
+    Old behavior:
+      STATUS: BLOCKED + HANDOFF: PLANNER (repo has debt, but routing to planner)
+      -> Rejected by MachineReportValidator with invariant violation.
+      
+    New behavior (ADR-014):
+      STATUS: APPROVED + HANDOFF: PLANNER (architecture is complete; debt is under ISSUES)
+      -> Accepted by MachineReportValidator as valid.
+    """
+    import json
+    fixture_path = Path(__file__).parent / "fixtures" / "run_012_incident_report.json"
+    with open(fixture_path) as f:
+        incident_data = json.load(f)
+
+    # 1. Old incident report MUST fail validation
+    old_report = MachineReportValidator.validate(incident_data, expected_role="ARCHITECT")
+    assert old_report.is_valid is False
+    assert any("STATUS 'BLOCKED' requires HANDOFF 'NONE'" in err for err in old_report.validation_errors)
+
+    # 2. Same architectural situation under ADR-014 (STATUS: APPROVED) MUST pass validation
+    remediated_data = dict(incident_data)
+    remediated_data["STATUS"] = "APPROVED"
+    remediated_data["REASON"] = "Architecture complete and verified; findings recorded for planning."
+    new_report = MachineReportValidator.validate(remediated_data, expected_role="ARCHITECT")
+    assert new_report.is_valid is True
+    assert new_report.status == "APPROVED"
+    assert new_report.handoff == "PLANNER"
+    assert len(new_report.issues["CRITICAL"]) == 3
+    assert len(new_report.data["ARCHITECTURE"]["MODULES"]) == 5
+
+
+def test_adr014_blocked_with_none_handoff_passes_validation():
+    """Verify STATUS: BLOCKED with HANDOFF: NONE is valid."""
+    raw_data = {
+        "ROLE": "ARCHITECT",
+        "STATUS": "BLOCKED",
+        "HANDOFF": "NONE",
+        "REASON": "External database unavailable",
+    }
+    report = MachineReportValidator.validate(raw_data, expected_role="ARCHITECT")
+    assert report.is_valid is True
+    assert report.status == "BLOCKED"
+    assert report.handoff == "NONE"
+
+
+def test_adr014_rejected_with_non_none_handoff_fails_validation():
+    """Verify STATUS: REJECTED with non-NONE handoff is rejected."""
+    raw_data = {
+        "ROLE": "ARCHITECT",
+        "STATUS": "REJECTED",
+        "HANDOFF": "PLANNER",
+        "REASON": "Task violates repository ADRs",
+    }
+    report = MachineReportValidator.validate(raw_data, expected_role="ARCHITECT")
+    assert report.is_valid is False
+    assert any("STATUS 'REJECTED' requires HANDOFF 'NONE'" in err for err in report.validation_errors)
+
+
+def test_adr014_rejected_with_none_handoff_passes_validation():
+    """Verify STATUS: REJECTED with HANDOFF: NONE is valid."""
+    raw_data = {
+        "ROLE": "ARCHITECT",
+        "STATUS": "REJECTED",
+        "HANDOFF": "NONE",
+        "REASON": "Task violates repository ADRs",
+    }
+    report = MachineReportValidator.validate(raw_data, expected_role="ARCHITECT")
+    assert report.is_valid is True
+    assert report.status == "REJECTED"
+    assert report.handoff == "NONE"
+
+
+def test_adr014_intermediate_success_requires_active_routing():
+    """Verify non-terminal planning stages require active downstream routing when reporting success."""
+    # Architect APPROVED with NONE must fail
+    arch_none = {
+        "ROLE": "ARCHITECT",
+        "STATUS": "APPROVED",
+        "HANDOFF": "NONE",
+    }
+    rep_arch_none = MachineReportValidator.validate(arch_none, expected_role="ARCHITECT")
+    assert rep_arch_none.is_valid is False
+    assert any("Architect success status 'APPROVED' requires active handoff" in err for err in rep_arch_none.validation_errors)
+
+    # Architect APPROVED with PLANNER must pass
+    arch_planner = {
+        "ROLE": "ARCHITECT",
+        "STATUS": "APPROVED",
+        "HANDOFF": "PLANNER",
+    }
+    rep_arch_planner = MachineReportValidator.validate(arch_planner, expected_role="ARCHITECT")
+    assert rep_arch_planner.is_valid is True
+
+    # Planner READY with NONE must fail
+    plan_none = {
+        "ROLE": "PLANNER",
+        "STATUS": "READY",
+        "HANDOFF": "NONE",
+    }
+    rep_plan_none = MachineReportValidator.validate(plan_none, expected_role="PLANNER")
+    assert rep_plan_none.is_valid is False
+    assert any("Planner success status 'READY' requires active handoff" in err for err in rep_plan_none.validation_errors)
+
+    # Planner READY with EXECUTOR must pass
+    plan_exec = {
+        "ROLE": "PLANNER",
+        "STATUS": "READY",
+        "HANDOFF": "EXECUTOR",
+    }
+    rep_plan_exec = MachineReportValidator.validate(plan_exec, expected_role="PLANNER")
+    assert rep_plan_exec.is_valid is True
+
+
+
+
+
+
 
 
 

@@ -31,6 +31,11 @@ class Run:
     def metadata_file(self) -> Path:
         return self.run_dir / "metadata.json"
 
+    def lock(self) -> Any:
+        """Obtain a RunLock instance for this run."""
+        from forge.storage.run_lock import RunLock
+        return RunLock(run_dir=self.run_dir, run_id=self.run_id)
+
     def save_metadata(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         data = {

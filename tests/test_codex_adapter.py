@@ -387,8 +387,25 @@ def test_codex_config_satisfies_all_standard_lifecycle_stages():
     assert errors == []
 
 
-def test_codex_config_rejected_for_tester_stage():
-    """Verify Config.validate_dict rejects codex for tester stage (lacks playwright/screenshots)."""
+def test_codex_config_rejected_for_synthetic_browser_stage():
+    """Verify Config.validate_dict rejects codex for synthetic_browser_stage (lacks playwright/screenshots)."""
+    data = {
+        "version": "2.0",
+        "stages": {
+            "synthetic_browser_stage": {
+                "adapter": "codex",
+            },
+        },
+    }
+    errors = Config.validate_dict(data)
+    assert len(errors) == 1
+    assert "Configured adapter 'codex' does not satisfy stage 'synthetic_browser_stage'" in errors[0]
+    assert "playwright" in errors[0]
+    assert "screenshots" in errors[0]
+
+
+def test_codex_config_accepts_tester_stage():
+    """Verify Config.validate_dict accepts codex for real tester stage (provides code_read and shell)."""
     data = {
         "version": "2.0",
         "stages": {
@@ -398,10 +415,8 @@ def test_codex_config_rejected_for_tester_stage():
         },
     }
     errors = Config.validate_dict(data)
-    assert len(errors) == 1
-    assert "Configured adapter 'codex' does not satisfy stage 'tester'" in errors[0]
-    assert "playwright" in errors[0]
-    assert "screenshots" in errors[0]
+    assert errors == []
+
 
 
 def test_get_adapter_resolves_codex_defaults():

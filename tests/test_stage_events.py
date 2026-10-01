@@ -45,8 +45,9 @@ class GeneratorMockAdapter(BaseAdapter):
         name: str = "mock_streaming",
         events: Optional[List[AgentEvent]] = None,
         event_generator: Optional[Callable[..., Iterator[AgentEvent]]] = None,
+        auto_approve: bool = False,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name, auto_approve=auto_approve)
         self.events = events or []
         self.event_generator = event_generator
         self.iter_events_called = False
@@ -827,4 +828,99 @@ def test_worker_successful_execution_remains_unchanged(tmp_path):
     assert result.success is True
     assert result.status == "APPROVED"
     assert result.handoff == "EXECUTOR"
+
+
+def test_stage_artifacts_preserve_human_report_when_streaming(tmp_path):
+    """Regression: Verify that Stage artifacts and result.raw_markdown preserve the full human report rather than raw NDJSON transport lines."""
+    context = _create_test_context(tmp_path)
+    role = Role(name="executor", sequence_number=3, template_content="You are executor.", protocol_content="Emit machine report.")
+
+    human_report = "# Human Report\n\n### Summary\nAddressed all reviewer feedback.\n\n### Validation\nAll tests passed.\n\n"
+    machine_report = "```yaml\nROLE: EXECUTOR\nSTATUS: SUCCESS\nHANDOFF: REVIEWER\nREASON: All tests passed\n```\n"
+    combined_report = human_report + machine_report
+    raw_transport_stream = '{"event": "init"}\n{"event": "step_update"}\n{"event": "result"}'
+
+    events = [
+        AgentEvent(event_type=AgentEventType.CHUNK, timestamp=time.time(), text=human_report),
+        AgentEvent(event_type=AgentEventType.CHUNK, timestamp=time.time(), text=machine_report),
+        AgentEvent(
+            event_type=AgentEventType.COMPLETE,
+            timestamp=time.time(),
+            text=combined_report,
+            result=ExecutionResult(
+                exit_code=0,
+                duration_seconds=1.0,
+                stdout=combined_report,
+                # Even if an adapter's raw_output contained raw NDJSON, artifacts must preserve human report
+                raw_output=raw_transport_stream,
+            ),
+        ),
+    ]
+
+    adapter = GeneratorMockAdapter(events=events, auto_approve=True)
+    stage = Stage(role=role, adapter=adapter, run_manager=RunManager(tmp_path))
+
+    result = stage.run(context)
+    assert result.success is True
+
+    # 1. StageResult.raw_markdown must preserve the human report from stdout
+    assert "# Human Report" in result.raw_markdown
+    assert "### Summary" in result.raw_markdown
+    assert "ROLE: EXECUTOR" in result.raw_markdown
+    assert not result.raw_markdown.startswith('{"event":')
+
+    # 2. Saved .md artifact on disk must preserve the human report
+    run_dir = tmp_path / ".forge" / "runs" / context.run.run_id
+    saved_md = (run_dir / "03_executor.md").read_text(encoding="utf-8")
+    assert "# Human Report" in saved_md
+    assert "### Summary" in saved_md
+    assert "ROLE: EXECUTOR" in saved_md
+    assert not saved_md.startswith('{"event":')
+
+    # 3. Machine report parsing succeeds from decoded output
+    assert result.status == "SUCCESS"
+    assert result.handoff == "REVIEWER"
+
+    # 4. raw_output invariant is preserved: contains original transport
+    assert result.response.raw_output == raw_transport_stream
+
+    # 5. Debug artifacts preserve original provider transport
+    debug_raw = (run_dir / "debug" / "executor_raw.txt").read_text(encoding="utf-8")
+    assert debug_raw == raw_transport_stream
+    debug_stdout = (run_dir / "debug" / "executor_stdout.txt").read_text(encoding="utf-8")
+    assert debug_stdout == combined_report
+
+
+def test_legacy_adapter_artifacts_and_debug_preserved(tmp_path):
+    """Regression: Verify legacy non-streaming adapters preserve identical stdout/raw_output across artifacts and debug logs."""
+    context = _create_test_context(tmp_path)
+    role = _create_planner_role()
+
+    human_plan = "# Plan\n1. Analyze requirements\n2. Design solution\n\n"
+    machine_block = "```yaml\nROLE: PLANNER\nSTATUS: APPROVED\nHANDOFF: EXECUTOR\n```\n"
+    full_output = human_plan + machine_block
+
+    resp = AdapterResponse(
+        stdout=full_output,
+        stderr="",
+        exit_code=0,
+        duration_seconds=0.3,
+        raw_output=full_output,
+    )
+    adapter = LegacyMockAdapter(response=resp)
+    stage = Stage(role=role, adapter=adapter, run_manager=RunManager(tmp_path))
+
+    result = stage.run(context)
+    assert result.success is True
+    assert result.status == "APPROVED"
+    assert "# Plan" in result.raw_markdown
+
+    run_dir = tmp_path / ".forge" / "runs" / context.run.run_id
+    saved_md = (run_dir / "02_planner.md").read_text(encoding="utf-8")
+    assert "# Plan" in saved_md
+
+    debug_raw = (run_dir / "debug" / "planner_raw.txt").read_text(encoding="utf-8")
+    assert debug_raw == full_output
+    debug_stdout = (run_dir / "debug" / "planner_stdout.txt").read_text(encoding="utf-8")
+    assert debug_stdout == full_output
 

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
+from forge.core.knowledge import KnowledgeProposal
 
 
 @dataclass
@@ -13,8 +14,9 @@ class MachineReport:
     reason: Optional[str] = None
     confidence: Optional[str] = None
     next_action: Optional[str] = None
-    issues: Dict[str, List[str]] = field(default_factory=dict)
+    issues: Dict[str, List[Any]] = field(default_factory=dict)
     data: Dict[str, Any] = field(default_factory=dict)
+    proposals: List[KnowledgeProposal] = field(default_factory=list)
     raw_yaml: str = ""
     is_valid: bool = True
     validation_errors: List[str] = field(default_factory=list)
@@ -30,6 +32,7 @@ class MachineReport:
             "next_action": self.next_action,
             "issues": self.issues,
             "data": self.data,
+            "proposals": [p.to_dict() for p in self.proposals],
             "is_valid": self.is_valid,
             "validation_errors": self.validation_errors,
         }

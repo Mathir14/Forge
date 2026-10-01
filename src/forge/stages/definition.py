@@ -41,7 +41,7 @@ class StageDefinition:
         base = set(self.success_statuses)
         base.update({"FAILED", "BLOCKED"})
         if self.is_verifier or self.role_type == "verifier":
-            base.update({"CHANGES_REQUIRED", "REJECTED"})
+            base.update({"CHANGES_REQUIRED", "REJECTED", "FAIL"})
         elif self.role_type in ("planning", "producer", "analysis", "audit", "general"):
             base.update({"REJECTED"})
         return frozenset(base)
@@ -97,8 +97,20 @@ STAGE_DEFINITIONS: Tuple[StageDefinition, ...] = (
         success_statuses=frozenset({"SUCCESS", "APPROVED", "COMPLETED"}),
     ),
     StageDefinition(
-        name="reviewer",
+        name="tester",
         sequence_number=4,
+        phase="pre_run",
+        display_title="Tester",
+        emoji="🧪",
+        preposition="for task:",
+        role_type="verifier",
+        is_verifier=True,
+        repair_target="executor",
+        success_statuses=frozenset({"PASS", "APPROVED", "SUCCESS", "COMPLETED", "NOT_TESTABLE"}),
+    ),
+    StageDefinition(
+        name="reviewer",
+        sequence_number=5,
         phase="pre_run",
         display_title="Reviewer",
         emoji="🔍",
@@ -110,7 +122,7 @@ STAGE_DEFINITIONS: Tuple[StageDefinition, ...] = (
     ),
     StageDefinition(
         name="critic",
-        sequence_number=5,
+        sequence_number=6,
         phase="post_run",
         display_title="Post-Execution Critic",
         emoji="🧐",
@@ -206,6 +218,10 @@ class StageOrder:
         return cls.resolve_definition("executor")
 
     @classmethod
+    def get_tester(cls) -> StageDefinition:
+        return cls.resolve_definition("tester")
+
+    @classmethod
     def get_reviewer(cls) -> StageDefinition:
         return cls.resolve_definition("reviewer")
 
@@ -218,11 +234,12 @@ class StageOrder:
 
     @classmethod
     def standard_pipeline_stages(cls, no_critic: bool = False) -> List[StageDefinition]:
-        """Return stage definitions for standard pipeline (architect -> planner -> executor -> reviewer -> [closing_critic])."""
+        """Return stage definitions for standard pipeline (architect -> planner -> executor -> tester -> reviewer -> [closing_critic])."""
         stages = [
             cls.get_architect(),
             cls.get_planner(),
             cls.get_executor(),
+            cls.get_tester(),
             cls.get_reviewer(),
         ]
         if not no_critic:
@@ -238,14 +255,9 @@ class StageOrder:
         ]
 
     @classmethod
-    def implementation_loop_stages(cls) -> Tuple[StageDefinition, StageDefinition]:
+    def implementation_loop_stages(cls) -> Tuple[StageDefinition, ...]:
         """Return the implementation change producer and verification gate stage definitions."""
-        verifiers = cls.verification_stages()
-        rev = verifiers[-1] if verifiers else cls.get_reviewer()
-        return (
-            cls.change_producer(),
-            rev,
-        )
+        return (cls.change_producer(), *cls.verification_stages())
 
     @classmethod
     def post_loop_stages(cls, no_critic: bool = False) -> List[StageDefinition]:
@@ -305,7 +317,7 @@ class StageOrder:
             return False
         stage_phase = phase or getattr(stage, "phase", None)
         seq = getattr(stage, "sequence_number", None)
-        return stage_phase == "post_run" or seq == 5
+        return stage_phase == "post_run" or seq in (5, 6)
 
     @classmethod
     def is_pre_run_critic(

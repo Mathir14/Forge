@@ -141,8 +141,31 @@ stages:
             AdapterRegistry.unregister("readonly")
 
 
-def test_config_validation_rejects_tester_stage_with_opencode(tmp_path):
-    """Verify forge config validate rejects configuring tester stage with an adapter lacking playwright/screenshots."""
+def test_config_validation_rejects_synthetic_browser_stage_with_opencode(tmp_path):
+    """Verify forge config validate rejects configuring synthetic_browser_stage with an adapter lacking playwright/screenshots."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        runner.invoke(main, ["init"])
+        cfg_file = Path("forge.yaml")
+        cfg_file.write_text(
+            """
+version: "2.0"
+stages:
+  synthetic_browser_stage:
+    adapter: opencode
+""",
+            encoding="utf-8",
+        )
+
+        res = runner.invoke(main, ["config", "validate"])
+        assert res.exit_code == 1
+        assert "does not satisfy stage 'synthetic_browser_stage'" in res.output
+        assert "playwright" in res.output
+        assert "screenshots" in res.output
+
+
+def test_config_validation_accepts_tester_stage_with_opencode(tmp_path):
+    """Verify forge config validate accepts configuring real tester stage with opencode (which provides code_read and shell)."""
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
         runner.invoke(main, ["init"])
@@ -158,10 +181,9 @@ stages:
         )
 
         res = runner.invoke(main, ["config", "validate"])
-        assert res.exit_code == 1
-        assert "does not satisfy stage 'tester'" in res.output
-        assert "playwright" in res.output
-        assert "screenshots" in res.output
+        assert res.exit_code == 0
+        assert "is valid" in res.output
+
 
 
 def test_config_validation_post_run_override_capabilities(tmp_path):
