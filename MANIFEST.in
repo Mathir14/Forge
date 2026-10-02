@@ -1,0 +1,20 @@
+# Include essential repository documentation and configuration
+include README.md
+include LICENSE
+include CONTRIBUTING.md
+include forge.yaml
+recursive-include docs *
+
+# Only exclude runtime state, repository configuration, caches, and build artifacts
+prune .github
+prune .forge
+prune build
+prune dist
+
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude .DS_Store
+global-exclude *.swp *.swo *~
+global-exclude .pytest_cache .pytest_cache/*
+global-exclude .ruff_cache .ruff_cache/*

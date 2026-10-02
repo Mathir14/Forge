@@ -46,23 +46,23 @@ Forge connects directly to installed developer CLI tools—**OpenCode**, **Googl
 
 ## 2. Installation
 
-Forge is packaged as a standard Python package (`forge-orchestrator`).
+Forge is published as a Python package (`forge-orchestrator`) on PyPI.
 
 ### Standard Installation
 
-Clone the repository and install Forge into your active Python environment:
+Install Forge into your active Python environment using `pip`:
 
 ```bash
-git clone https://github.com/Mathir14/Forge.git
-cd Forge
-pip install -e .
+pip install forge-orchestrator
 ```
 
 ### Development Installation
 
-To install Forge along with test tools and development dependencies:
+To contribute to Forge or install directly from the source repository along with development and testing dependencies:
 
 ```bash
+git clone https://github.com/Mathir14/Forge.git
+cd Forge
 pip install -e ".[dev]"
 ```
 
@@ -73,8 +73,13 @@ Forge is primarily developed on Linux. Native Windows is not supported because F
 WSL2 is the recommended environment for Windows users:
 
 - Open your WSL2 terminal.
-- Clone the repository inside the Linux filesystem.
-- Install normally using:
+- Install Forge inside the WSL2 Linux environment:
+
+```bash
+pip install forge-orchestrator
+```
+
+For development inside WSL2:
 
 ```bash
 git clone https://github.com/Mathir14/Forge.git

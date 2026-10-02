@@ -1,0 +1,210 @@
+name: Staged Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  test-and-build:
+    name: Test, Build & Validate 📦
+    runs-on: ubuntu-latest
+    outputs:
+      is_prerelease: ${{ steps.validate-tag.outputs.is_prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate version tag against pyproject.toml
+        id: validate-tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python -c "
+          import os, sys, tomllib
+          from packaging.version import Version, InvalidVersion
+
+          tag = '${{ github.ref_name }}'
+          if not tag.startswith('v'):
+              sys.exit(f'Error: Tag \"{tag}\" must start with \"v\"')
+
+          try:
+              tag_version = Version(tag[1:])
+          except InvalidVersion as e:
+              sys.exit(f'Error: Tag \"{tag}\" is not a valid PEP 440 version: {e}')
+
+          with open('pyproject.toml', 'rb') as f:
+              pyproject = tomllib.load(f)
+
+          raw_pkg_version = pyproject.get('project', {}).get('version')
+          if not raw_pkg_version:
+              sys.exit('Error: version field missing in [project] section of pyproject.toml')
+
+          try:
+              pkg_version = Version(raw_pkg_version)
+          except InvalidVersion as e:
+              sys.exit(f'Error: pyproject.toml version \"{raw_pkg_version}\" is not a valid PEP 440 version: {e}')
+
+          if tag_version != pkg_version:
+              sys.exit(
+                  f'Error: Version mismatch! Git tag version is \"{tag_version}\" ({tag}), '
+                  f'but pyproject.toml version is \"{pkg_version}\" ({raw_pkg_version}). '
+                  f'They must match exactly.'
+              )
+
+          print(f'✓ Validation passed: Git tag {tag} matches pyproject.toml version {pkg_version}')
+          print(f'✓ PEP 440 is_prerelease: {tag_version.is_prerelease}')
+
+          github_output = os.environ.get('GITHUB_OUTPUT')
+          if github_output:
+              with open(github_output, 'a') as out:
+                  out.write(f'is_prerelease={str(tag_version.is_prerelease).lower()}\n')
+          "
+
+      - name: Install build tooling & project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install build twine
+
+      - name: Run full test suite
+        run: pytest -v
+
+      - name: Build wheel and source distribution (Single Build)
+        run: python -m build
+
+      - name: Validate distributions with twine
+        run: twine check --strict dist/*
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI 🧪
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/forge-orchestrator
+    permissions:
+      id-token: write  # Required for OIDC Trusted Publishing
+
+    steps:
+      - name: Download built distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  smoke-test-testpypi:
+    name: Smoke Test from TestPyPI 🔍
+    needs: publish-testpypi
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Forge from TestPyPI with retry loop
+        run: |
+          python -m pip install --upgrade pip
+          echo "Installing forge-orchestrator from TestPyPI (polling for index propagation)..."
+          
+          INSTALLED=false
+          for i in {1..20}; do
+            echo "Attempt $i/20: fetching from TestPyPI..."
+            if pip install --no-cache-dir \
+              --index-url https://test.pypi.org/simple/ \
+              --extra-index-url https://pypi.org/simple/ \
+              forge-orchestrator; then
+              echo "Successfully installed from TestPyPI!"
+              INSTALLED=true
+              break
+            fi
+            echo "Package not yet discoverable on TestPyPI index. Waiting 10 seconds..."
+            sleep 10
+          done
+
+          if [ "$INSTALLED" != "true" ]; then
+            echo "ERROR: Failed to install forge-orchestrator from TestPyPI after 20 attempts."
+            exit 1
+          fi
+
+      - name: Run Smoke Tests & Lightweight Verification
+        run: |
+          echo "1. Verifying Python package import and version metadata..."
+          python -c "import forge; print('Imported forge version:', forge.__version__)"
+          
+          echo "2. Verifying CLI version command..."
+          forge --version
+          
+          echo "3. Verifying CLI help and command discovery..."
+          forge --help
+          
+          echo "4. Verifying environment & tool diagnostics..."
+          forge doctor
+          
+          echo "All smoke tests and CLI checks passed successfully!"
+
+  publish-pypi:
+    name: Publish to Production PyPI 🚀
+    needs: smoke-test-testpypi
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/forge-orchestrator
+    permissions:
+      id-token: write  # Required for OIDC Trusted Publishing
+
+    steps:
+      - name: Download EXACT SAME built distributions (No Rebuild)
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish to Production PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  create-github-release:
+    name: Publish GitHub Release 🏷️
+    needs: [publish-pypi, test-and-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required for creating releases and uploading release assets
+
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ needs.test-and-build.outputs.is_prerelease == 'true' }}

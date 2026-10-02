@@ -4,12 +4,40 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forge-orchestrator"
-version = "0.1.0-beta"
+version = "0.1.0b1"
+
 description = "CLI-first multi-agent orchestration framework"
 readme = "README.md"
 authors = [{ name = "Forge Contributors" }]
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.10"
+keywords = [
+    "ai",
+    "autonomous",
+    "cli",
+    "developer-tools",
+    "llm",
+    "multi-agent",
+    "orchestration",
+    "playwright",
+    "testing",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "click>=8.0.0",
     "pyyaml>=6.0.0",
@@ -20,6 +48,15 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
 ]
+web = [
+    "playwright>=1.30.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Mathir14/Forge"
+Repository = "https://github.com/Mathir14/Forge"
+Documentation = "https://github.com/Mathir14/Forge/blob/master/docs/USER_GUIDE.md"
+Issues = "https://github.com/Mathir14/Forge/issues"
 
 [project.scripts]
 forge = "forge.cli:main"

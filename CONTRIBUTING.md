@@ -82,3 +82,8 @@ If you encounter a bug, have a feature suggestion, or want to provide feedback, 
 - **Bug Report**: For reproducible errors, broken commands, or unexpected behavior.
 - **Feature Request**: For proposing additions or improvements.
 - **Usability Feedback**: For sharing usability experiences and general workflow feedback.
+
+## Releases & Packaging
+
+For maintainers managing package versions, PyPI publication, and Trusted Publishing workflows, refer to the [Release Guide](https://github.com/Mathir14/Forge/blob/master/docs/RELEASING.md).
+

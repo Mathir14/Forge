@@ -320,9 +320,11 @@ def test_runs_cmd_avoids_loading_all_metadata(tmp_path, monkeypatch):
 
 def test_version_metadata_consistency():
     """Finding 11 (Release): __version__ must match pyproject.toml and CLI."""
-    assert __version__ == "0.1.0-beta"
+    assert __version__ == "0.1.0b1"
 
     runner = CliRunner()
     res = runner.invoke(main, ["--version"])
     assert res.exit_code == 0
-    assert "0.1.0-beta" in res.output
+    assert "0.1.0b1" in res.output
+
+

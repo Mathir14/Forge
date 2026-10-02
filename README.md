@@ -38,18 +38,20 @@ Forge is primarily developed and tested on Linux. For Windows users, WSL2 is the
 | **Native Windows** | Not Supported | Forge relies on Linux/WSL-compatible process management for runtime supervision and testing. |
 
 ## Installation
-
-Install Forge from the repository root:
-
+ 
+Install Forge from PyPI:
+ 
+```bash
+pip install forge-orchestrator
+```
+ 
+### Development Installation
+ 
+To contribute to Forge or install directly from the source repository:
+ 
 ```bash
 git clone https://github.com/Mathir14/Forge.git
 cd Forge
-pip install -e .
-```
-
-To install with development and test dependencies:
-
-```bash
 pip install -e ".[dev]"
 ```
 
@@ -99,12 +101,13 @@ Forge connects to installed CLI tools using native adapters. View all registered
 
 ## Documentation
 
-For full operational details, configuration schemas, CLI command reference, testing engine guides, and troubleshooting workflows, consult the [Complete User Guide](docs/USER_GUIDE.md).
+For full operational details, configuration schemas, CLI command reference, testing engine guides, and troubleshooting workflows, consult the [Complete User Guide](https://github.com/Mathir14/Forge/blob/master/docs/USER_GUIDE.md).
 
 ## Contributing
 
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on development environment setup, coding conventions, and submitting pull requests.
+Contributions are welcome! Please read [CONTRIBUTING.md](https://github.com/Mathir14/Forge/blob/master/CONTRIBUTING.md) for guidelines on development environment setup, coding conventions, and submitting pull requests.
 
 ## License
 
-Forge is licensed under the [MIT License](LICENSE).
+Forge is licensed under the [MIT License](https://github.com/Mathir14/Forge/blob/master/LICENSE).
+
