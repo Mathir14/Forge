@@ -1,0 +1,60 @@
+name: Usability Feedback
+description: Usability and workflow feedback from users and testers
+title: "[Feedback]: "
+labels: ["feedback"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What were you trying to accomplish?
+      description: Describe the task, project, or workflow you were trying to complete.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Did Forge help you accomplish it?
+      description: Share how well Forge supported your task.
+    validations:
+      required: true
+
+  - type: textarea
+    id: stuck
+    attributes:
+      label: If not, where did you get stuck?
+      description: Mention where you ran into difficulty or where progress halted.
+    validations:
+      required: false
+
+  - type: textarea
+    id: confusing
+    attributes:
+      label: What was confusing?
+      description: Note any commands, outputs, or concepts that felt unintuitive.
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What feature or behaviour did you expect?
+      description: Describe what you anticipated happening instead.
+    validations:
+      required: false
+
+  - type: textarea
+    id: suggestions
+    attributes:
+      label: Suggestions for improvement
+      description: Any ideas to make using Forge clearer or smoother.
+    validations:
+      required: false
+
+  - type: textarea
+    id: experience
+    attributes:
+      label: Overall experience
+      description: How would you summarize your overall experience working with Forge?
+    validations:
+      required: false

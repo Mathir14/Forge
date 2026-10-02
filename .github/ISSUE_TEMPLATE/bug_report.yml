@@ -1,0 +1,88 @@
+name: Bug Report
+description: Report a reproducible bug or unexpected error in Forge
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behaviour
+    attributes:
+      label: Expected Behaviour
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behaviour
+    attributes:
+      label: Actual Behaviour
+      description: What actually happened, including any error messages or unexpected output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Reproduction Steps
+      description: Step-by-step instructions to reproduce the issue.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Forge Version
+      description: The output of running `forge --version`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: The operating system where Forge is running.
+      options:
+        - Linux
+        - WSL2
+        - macOS
+        - Native Windows
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: adapter
+    attributes:
+      label: Adapter Used
+      description: The agent CLI adapter active during the issue, if applicable.
+      options:
+        - opencode
+        - antigravity (agy)
+        - codex
+        - None / Not applicable
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs-screenshots
+    attributes:
+      label: Logs / Screenshots
+      description: Relevant terminal output, logs from `.forge/runs/`, or screenshots.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Any other environment details or context relevant to the issue.
+    validations:
+      required: false

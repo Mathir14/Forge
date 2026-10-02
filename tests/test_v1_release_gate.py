@@ -227,16 +227,16 @@ def test_pipeline_resumption_skips_completed_stages(tmp_path):
             assert mock_exec.call_count == 1
 
 
-def test_version_metadata_is_1_0_0():
-    """P1 Regression: Version must be 1.0.0 in CLI and pyproject.toml."""
+def test_version_metadata_is_beta():
+    """P1 Regression: Version must match CLI and pyproject.toml."""
     runner = CliRunner()
     res = runner.invoke(main, ["--version"])
     assert res.exit_code == 0
-    assert "1.0.0" in res.output
+    assert "0.1.0-beta" in res.output
 
     pyproject_file = Path(__file__).resolve().parent.parent / "pyproject.toml"
     content = pyproject_file.read_text(encoding="utf-8")
-    assert 'version = "1.0.0"' in content
+    assert 'version = "0.1.0-beta"' in content
 
 
 def test_run_manager_latest_scales_without_loading_all_runs(tmp_path):

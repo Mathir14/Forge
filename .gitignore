@@ -20,18 +20,31 @@ share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# Testing & Linting
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 
-# Forge runtime data
-.forge/
+# Environment & Secrets
+.env
+.env.*
+.env.local
 
+# Logs
+*.log
 
-# IDE
+# IDE & OS
 .vscode/
 .idea/
 *.swp
 *~
+.DS_Store
+Thumbs.db
 
-# Forge runtime data
-.forge/runs/
-.forge/cache/
+# Forge runtime data & temporary scratch
+.forge/
+.tmp_run_*
