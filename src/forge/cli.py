@@ -3,7 +3,7 @@ import signal
 import sys
 import threading
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 import click
 import yaml
 
@@ -11,6 +11,7 @@ from forge import __version__
 from forge.core.config import Config, StageConfig, ConfigValidationError
 from forge.core.git import GitService, GitBaseline
 from forge.core.role import Role
+from forge.core.run import Run
 from forge.core.context import Context
 from forge.stages.result import StageResult
 from forge.adapters.base import BaseAdapter

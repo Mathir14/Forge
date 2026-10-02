@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,6 +25,7 @@ from forge.prompts.instruction import Instruction
 from forge.protocol.report import MachineReport
 from forge.protocol.validator import MachineReportValidator
 from forge.stages.definition import StageOrder, StageDefinition
+from forge.stages.result import StageResult
 from forge.storage.run_manager import RunManager
 
 

@@ -1,6 +1,7 @@
 import pytest
 import logging
 from pathlib import Path
+from typing import Optional
 from forge.adapters.base import BaseAdapter, AdapterResponse
 from forge.adapters.antigravity import AntigravityAdapter
 from forge.adapters.opencode import OpenCodeAdapter
