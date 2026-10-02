@@ -25,6 +25,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install release tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install packaging build twine
+
       - name: Validate version tag against pyproject.toml
         id: validate-tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -70,11 +75,8 @@ jobs:
                   out.write(f'is_prerelease={str(tag_version.is_prerelease).lower()}\n')
           "
 
-      - name: Install build tooling & project dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install build twine
+      - name: Install project dependencies
+        run: pip install -e ".[dev]"
 
       - name: Run full test suite
         run: pytest -v
