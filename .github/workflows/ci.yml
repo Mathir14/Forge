@@ -9,6 +9,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      LC_ALL: "C.UTF-8"
+      LANG: "C.UTF-8"
+      PYTHONUTF8: "1"
+      TZ: "UTC"
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]

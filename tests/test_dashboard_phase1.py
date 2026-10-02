@@ -370,7 +370,7 @@ def test_run_model_loading_production_run_005():
     assert len(reviewer_stage.attempts) == 2
 
 
-def test_header_status_variations():
+def test_header_status_variations(tmp_path):
     """Verify header component renders correct styling for various run statuses."""
     for st in ("APPROVED", "FAILED", "IN_PROGRESS", "BLOCKED", "UNKNOWN"):
         model = RunModel(
@@ -378,7 +378,7 @@ def test_header_status_variations():
             task="Test task",
             status=st,
             created_at="",
-            run_dir=Path("/tmp"),
+            run_dir=tmp_path,
             stages=[],
             total_duration_seconds=125.0,
         )
@@ -387,7 +387,7 @@ def test_header_status_variations():
         assert header is not None
 
 
-def test_artifact_view_scrolling_and_empty_stages():
+def test_artifact_view_scrolling_and_empty_stages(tmp_path):
     """Verify artifact viewport handles empty, pending, and scrolled stages."""
     empty_stage = StageModel(
         stage_name="05_tester",
@@ -408,7 +408,7 @@ def test_artifact_view_scrolling_and_empty_stages():
         task="Scroll test",
         status="IN_PROGRESS",
         created_at="",
-        run_dir=Path("/tmp"),
+        run_dir=tmp_path,
         stages=[empty_stage, populated_stage],
     )
     state = DashboardState(run=model, selected_stage_index=0)

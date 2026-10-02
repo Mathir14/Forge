@@ -131,7 +131,7 @@ class InstructionBuilder:
                 producer_def = StageOrder.change_producer()
                 exec_file = context.run.run_dir / f"{producer_def.artifact_prefix}.md"
                 if not exec_file.exists():
-                    candidates = list(context.run.run_dir.glob("*_executor.md"))
+                    candidates = sorted(context.run.run_dir.glob("*_executor.md"))
                     if candidates:
                         exec_file = candidates[0]
                 if exec_file.exists():
@@ -154,7 +154,7 @@ class InstructionBuilder:
                 tester_def = StageOrder.get_tester()
                 t_file = context.run.run_dir / f"{tester_def.artifact_prefix}.md"
                 if not t_file.exists():
-                    candidates_t = list(context.run.run_dir.glob("*_tester.md"))
+                    candidates_t = sorted(context.run.run_dir.glob("*_tester.md"))
                     if candidates_t:
                         t_file = candidates_t[0]
                 if t_file.exists():
@@ -173,7 +173,7 @@ class InstructionBuilder:
                 tester_def = StageOrder.get_tester()
                 t_json_file = context.run.run_dir / f"{tester_def.artifact_prefix}.json"
                 if not t_json_file.exists():
-                    candidates_tj = list(context.run.run_dir.glob("*_tester.json"))
+                    candidates_tj = sorted(context.run.run_dir.glob("*_tester.json"))
                     if candidates_tj:
                         t_json_file = candidates_tj[0]
                 if t_json_file.exists():

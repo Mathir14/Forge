@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Optional
+import os
 import yaml
 import pytest
 
@@ -58,3 +59,29 @@ def clean_validator_rules():
     MachineReportValidator.reset_custom_rules()
     yield
     MachineReportValidator.reset_custom_rules()
+
+
+@pytest.fixture(autouse=True)
+def isolate_test_environment(tmp_path_factory, monkeypatch):
+    """Ensure tests run in a completely isolated and deterministic environment."""
+    test_home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(test_home))
+    monkeypatch.setattr(Path, "home", lambda: test_home)
+
+    # Deterministic Git identity and configuration isolation
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Forge Tester")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "tester@forge.dev")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Forge Tester")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "tester@forge.dev")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(test_home / ".gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+    # Deterministic timezone and UTF-8 encoding
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setenv("PYTHONUTF8", "1")
+
+    # Deterministic PYTHONPATH ensuring subprocesses can resolve forge package from src
+    src_dir = str(Path(__file__).resolve().parent.parent / "src")
+    existing_pythonpath = os.environ.get("PYTHONPATH", "")
+    new_pythonpath = f"{src_dir}:{existing_pythonpath}" if existing_pythonpath else src_dir
+    monkeypatch.setenv("PYTHONPATH", new_pythonpath)

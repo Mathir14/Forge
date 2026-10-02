@@ -172,7 +172,12 @@ def test_playwright_browser_driver_smoke(tmp_path):
         pytest.skip("Playwright not installed in environment")
 
     driver = PlaywrightBrowserDriver(headless=True, viewport=(800, 600))
-    driver.start()
+    try:
+        driver.start()
+    except Exception as e:
+        if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
+            pytest.skip("Playwright browser binaries not installed in environment")
+        raise
     try:
         # Evaluate local page
         driver.evaluate("document.body.innerHTML = '<h1>Forge Tester v2</h1><button id=\"b1\">Action</button>'")
