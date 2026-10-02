@@ -56,6 +56,8 @@ def test_unicode_binary_git_diff_handling(tmp_path):
     """P0 Regression: GitService._run must not crash on non-UTF8 bytes in diff."""
     git = GitService(tmp_path)
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Forge Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@forge.local"], cwd=tmp_path, check=True)
     (tmp_path / "data.bin").write_text("ascii line\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True)

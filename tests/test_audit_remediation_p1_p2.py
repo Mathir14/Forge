@@ -183,7 +183,8 @@ def test_p1_03_standalone_stage_captures_git_baseline(tmp_path, monkeypatch):
 
     from forge.cli import _run_stage
 
-    with patch("forge.cli.Stage.run") as mock_stage_run:
+    with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
+         patch("forge.cli.Stage.run") as mock_stage_run:
         mock_stage_run.return_value = make_fake_stage_result("architect", "APPROVED", seq=1)
         _run_stage("architect", task="Design a new feature")
 
