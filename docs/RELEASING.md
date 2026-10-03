@@ -23,7 +23,7 @@ Developer
   │
   ├─ 1. Bump version in pyproject.toml & src/forge/__init__.py
   ├─ 2. Commit changes
-  ├─ 3. Tag (e.g., git tag -a v0.1.0b1 -m "Release v0.1.0b1")
+  ├─ 3. Tag (e.g., git tag -a v0.1.0b2 -m "Release v0.1.0b2")
   └─ 4. Push tag to GitHub
         │
 GitHub Actions (.github/workflows/release.yml)
@@ -106,8 +106,8 @@ To cut a new release:
 ### Step 1: Bump Version & Validate Locally
 
 Update the version in:
-- `pyproject.toml` (e.g. `version = "0.1.0b1"`)
-- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b1"`)
+- `pyproject.toml` (e.g. `version = "0.1.0b2"`)
+- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b2"`)
 
 Run local tests to confirm:
 ```bash
@@ -117,11 +117,11 @@ pytest
 ### Step 2: Commit and Tag
 
 ```bash
-git commit -am "chore: release v0.1.0b1"
+git commit -am "chore: release v0.1.0b2"
 git push origin master
 
-git tag -a v0.1.0b1 -m "Release v0.1.0b1"
-git push origin v0.1.0b1
+git tag -a v0.1.0b2 -m "Release v0.1.0b2"
+git push origin v0.1.0b2
 ```
 
 ### Step 3: Monitor Staged Release in GitHub Actions

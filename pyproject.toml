@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forge-orchestrator"
-version = "0.1.0b1"
+version = "0.1.0b2"
 
 description = "CLI-first multi-agent orchestration framework"
 readme = "README.md"
-authors = [{ name = "Forge Contributors" }]
-license = "MIT"
+authors = [{ name = "Forge Contributors", email = "mathirvishnum2006@gmail.com" }]
+license = { text = "MIT" }
 requires-python = ">=3.10"
 keywords = [
     "ai",
@@ -26,6 +26,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
