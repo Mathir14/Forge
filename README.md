@@ -33,7 +33,7 @@ Forge is primarily developed and tested on Linux. For Windows users, WSL2 is the
 | Platform | Status | Notes |
 | :--- | :--- | :--- |
 | **Linux** | Supported | Primary development and testing platform. |
-| **WSL2** | Supported (Recommended for Windows) | Full compatibility with all pipeline stages and process supervision. |
+| **WSL2** | Supported (Recommended for Windows) | Full compatibility with all pipeline stages and process supervision. Note: CLI agent tools (e.g. OpenCode) must also be installed natively inside the WSL2 Linux environment; Windows host binaries exposed via WSL PATH are not supported. |
 | **macOS** | Supported | Compatible with POSIX process isolation and standard pipeline execution. |
 | **Native Windows** | Not Supported | Forge relies on Linux/WSL-compatible process management for runtime supervision and testing. |
 

@@ -1,8 +1,11 @@
 import json
 import logging
 import os
+import platform
+import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Iterator, Iterable, Callable, Tuple
@@ -12,6 +15,101 @@ from forge.core.capabilities import Capability
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
 
 logger = logging.getLogger(__name__)
+
+
+def is_wsl() -> bool:
+    """Return True if Forge is running under Windows Subsystem for Linux (WSL)."""
+    if sys.platform != "linux":
+        return False
+    if "WSL_DISTRO_NAME" in os.environ or "WSL_INTEROP" in os.environ:
+        return True
+    if Path("/proc/sys/fs/binfmt_misc/WSLInterop").exists():
+        return True
+    try:
+        release = platform.release().lower()
+        if "microsoft" in release or "wsl" in release:
+            return True
+    except Exception:
+        pass
+    try:
+        proc_version = Path("/proc/version")
+        if proc_version.exists():
+            text = proc_version.read_text(encoding="utf-8", errors="replace").lower()
+            if "microsoft" in text or "wsl" in text:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def is_windows_executable(path_str: str) -> bool:
+    """Determine whether a given executable path is a Windows executable or wrapper shim.
+
+    Distinguishes:
+    - Direct Windows executables (.exe, .cmd, .bat, .ps1).
+    - Windows PE binaries (MZ magic bytes).
+    - Windows wrapper shims (npm/scoop/chocolatey scripts that execute .exe or have sibling .cmd/.bat/.exe files).
+    - Windows filesystem paths (/mnt/c/Users/.../AppData/Roaming/npm).
+
+    Crucially, genuine Linux ELF executables (starting with \\x7fELF) or standard
+    Linux shell scripts (without Windows shim indicators) are NOT classified as Windows
+    binaries even if located on a mounted volume (e.g., /mnt/data/bin/opencode).
+    """
+    if not path_str:
+        return False
+
+    try:
+        p = Path(path_str)
+        resolved = p.resolve()
+    except Exception:
+        p = Path(path_str)
+        resolved = p
+
+    # 1. Direct extension check on original or resolved path
+    windows_exts = {".exe", ".cmd", ".bat", ".ps1"}
+    if p.suffix.lower() in windows_exts or resolved.suffix.lower() in windows_exts:
+        return True
+
+    # 2. Check binary header for PE (MZ) or ELF magic bytes
+    if resolved.is_file():
+        try:
+            with open(resolved, "rb") as f:
+                header = f.read(4)
+                if header.startswith(b"MZ"):
+                    return True
+                if header.startswith(b"\x7fELF"):
+                    # Definite Linux ELF executable - safe, not a Windows binary
+                    return False
+        except (OSError, PermissionError):
+            pass
+
+    # 3. Check for sibling Windows shims in the same directory (e.g., npm generates opencode.cmd alongside opencode)
+    for ext in windows_exts:
+        try:
+            if p.with_suffix(ext).is_file() or resolved.with_suffix(ext).is_file():
+                return True
+        except (OSError, PermissionError):
+            pass
+
+    # 4. Check for paths located under Windows mounts (/mnt/[a-z]/...) containing Windows directory structures
+    parts_lower = [part.lower() for part in resolved.parts]
+    if len(parts_lower) >= 3 and parts_lower[1] == "mnt" and len(parts_lower[2]) == 1:
+        if any(w_dir in parts_lower for w_dir in ("appdata", "program files", "program files (x86)", "windows", "users")):
+            return True
+
+    # 5. Inspect script content if it's a text/wrapper script
+    if resolved.is_file():
+        try:
+            content = resolved.read_text(encoding="utf-8", errors="replace")[:4096]
+            lower = content.lower()
+            if any(marker in lower for marker in ("opencode.exe", "cmd.exe", "%~dp0", "appdata\\roaming\\npm", "appdata/roaming/npm")):
+                return True
+            if re.search(r'\b[a-zA-Z0-9_\-]+\.exe\b', lower):
+                return True
+        except (OSError, PermissionError, UnicodeDecodeError):
+            pass
+
+    return False
 
 
 class OpenCodeAdapter(BaseAdapter):
@@ -40,12 +138,97 @@ class OpenCodeAdapter(BaseAdapter):
             auto_approve=auto_approve,
             extra_flags=extra_flags,
         )
+        self._availability_error: Optional[str] = None
+
+    @property
+    def availability_error(self) -> Optional[str]:
+        """Return diagnostic explanation if binary was rejected during resolution."""
+        return self._availability_error
+
+    def _find_candidates(self) -> List[str]:
+        """Find all executable candidates matching 'opencode' in PATH."""
+        candidates: List[str] = []
+        path_env = os.environ.get("PATH", "")
+        for dir_path in path_env.split(os.pathsep):
+            cleaned = dir_path.strip()
+            if not cleaned:
+                continue
+            candidate = Path(cleaned) / "opencode"
+            try:
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    cand_str = str(candidate)
+                    if cand_str not in candidates:
+                        candidates.append(cand_str)
+            except (OSError, PermissionError):
+                continue
+
+        which_result = shutil.which("opencode")
+        if which_result and which_result not in candidates:
+            candidates.insert(0, which_result)
+
+        return candidates
+
+    def _resolve_binary(self) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve OpenCode binary, validating WSL compatibility.
+
+        Returns:
+            Tuple of (valid_binary_path, rejection_error_message).
+        """
+        # If not running under WSL, standard resolution applies (native Linux, macOS, etc.)
+        if not is_wsl():
+            bin_path = shutil.which("opencode")
+            return bin_path, None
+
+        # Under WSL: inspect all PATH candidates to prefer a native Linux OpenCode binary
+        candidates = self._find_candidates()
+
+        valid_linux_candidates: List[str] = []
+        windows_candidates: List[str] = []
+
+        for cand in candidates:
+            if is_windows_executable(cand):
+                windows_candidates.append(cand)
+            else:
+                valid_linux_candidates.append(cand)
+
+        # 1. If a valid native Linux binary was found in PATH, use it
+        if valid_linux_candidates:
+            return valid_linux_candidates[0], None
+
+        # 2. If no valid Linux binary was found, but a Windows binary was found in WSL PATH, reject it
+        if windows_candidates:
+            win_bin = windows_candidates[0]
+            err = (
+                f"OpenCode resolved to a Windows installation while Forge is running inside WSL2:\n\n"
+                f"    {win_bin}\n\n"
+                f"Forge currently requires a native Linux OpenCode installation inside WSL2.\n\n"
+                f"Please install OpenCode natively inside your WSL environment (e.g., via 'npm install -g opencode' "
+                f"or the Linux installer) and ensure it appears before Windows PATH entries."
+            )
+            return None, err
+
+        # 3. No OpenCode binary found in PATH
+        return None, None
 
     def _get_binary(self) -> Optional[str]:
-        return shutil.which("opencode")
+        bin_path, _ = self._resolve_binary()
+        return bin_path
 
     def is_available(self) -> bool:
-        return self._get_binary() is not None
+        bin_path, err = self._resolve_binary()
+        if err:
+            self._availability_error = err
+            return False
+        self._availability_error = None
+        return bin_path is not None
+
+    def validate_availability(self) -> None:
+        """Validate availability and raise an explicit error if rejected or missing."""
+        bin_path, err = self._resolve_binary()
+        if err:
+            raise RuntimeError(err)
+        if not bin_path:
+            raise RuntimeError(f"Adapter tool '{self.name}' is not installed or not in PATH.")
 
     def execute(
         self,
@@ -54,7 +237,17 @@ class OpenCodeAdapter(BaseAdapter):
         timeout: Optional[int] = None,
     ) -> AdapterResponse:
         work_dir = cwd or Path.cwd()
-        bin_path = self._get_binary() or "opencode"
+        bin_path, err = self._resolve_binary()
+        if err:
+            logger.error("OpenCode WSL compatibility error: %s", err)
+            return AdapterResponse(
+                stdout="",
+                stderr=err,
+                exit_code=1,
+                duration_seconds=0.0,
+                raw_output=err,
+            )
+        bin_path = bin_path or "opencode"
         cmd: List[str] = [bin_path, "run"]
 
         if self.model:
@@ -521,7 +714,22 @@ class OpenCodeAdapter(BaseAdapter):
         canonical Forge AgentEvents (CHUNK, TOOL_START, TOOL_FINISH, COMPLETE, ERROR).
         """
         work_dir = cwd or Path.cwd()
-        bin_path = self._get_binary() or "opencode"
+        bin_path, err = self._resolve_binary()
+        if err:
+            logger.error("OpenCode WSL compatibility error: %s", err)
+            yield self._build_error_event(
+                ts=time.time(),
+                duration=0.0,
+                error_msg=err,
+                stdout="",
+                stderr=err,
+                raw_output=err,
+                token_usage={},
+                metadata={"error": "WSLWindowsBinaryCompatibilityError"},
+                exit_code=1,
+            )
+            return
+        bin_path = bin_path or "opencode"
         cmd: List[str] = [bin_path, "run"]
 
         if self.model:

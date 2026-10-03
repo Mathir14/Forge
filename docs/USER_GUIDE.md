@@ -89,6 +89,9 @@ pip install -e ".[dev]"
 
 Installation inside WSL2 follows the normal Linux installation process.
 
+> [!IMPORTANT]
+> **CLI Agent Tools in WSL2**: When running Forge inside WSL2, all CLI agent tools you use (such as **OpenCode**, **Antigravity**, or **Codex**) must be installed natively within the WSL2 Linux distribution (e.g. using `npm install -g opencode` inside your WSL shell). Running Windows-installed agent binaries or npm wrappers exposed across the WSL mount (such as `/mnt/c/Users/.../AppData/Roaming/npm/opencode`) is not supported and will be rejected with an informative error. Make sure your Linux `$PATH` places native Linux binaries before any Windows PATH entries.
+
 ### Browser Automation Setup (Optional)
 
 The Tester role can drive real headless browsers during web application verification. To enable web browser testing:
@@ -1054,4 +1057,4 @@ Forge enforces kernel-backed file locking (`run.lock`) using `flock` on Linux/ma
 Run state and stage artifacts are written atomically to disk using temporary files and filesystem renames. If a run is interrupted, all completed stages are safely preserved. You can resume at any time using `forge run --run <run_id>` or `forge auto --run <run_id>`.
 
 ### Does Forge support Windows?
-Forge is primarily developed and tested on Linux. Native Windows is not supported because Forge relies on Linux/WSL-compatible process management for runtime supervision and testing. For Windows users, WSL2 is the recommended environment, where all Forge features and pipeline stages work normally.
+Forge is primarily developed and tested on Linux. Native Windows is not supported because Forge relies on Linux/WSL-compatible process management for runtime supervision and testing. For Windows users, WSL2 is the recommended environment, where all Forge features and pipeline stages work normally. When running inside WSL2, ensure all AI agent CLI tools (such as OpenCode) are also installed natively within your WSL Linux distribution; Windows host binaries exposed via `/mnt/c` are not supported.

@@ -68,6 +68,14 @@ def _get_adapter(
         raise
 
     if not adapter.is_available():
+        diagnostic = getattr(adapter, "availability_error", None)
+        if diagnostic:
+            click.secho(f"\n❌ OpenCode WSL compatibility error:", fg="red", bold=True)
+            click.echo(f"\n{diagnostic}\n")
+            if exit_on_error:
+                sys.exit(1)
+            raise RuntimeError(diagnostic)
+
         click.secho(f"Adapter tool '{adapter.name}' is not installed or not in PATH.", fg="red")
         click.echo("Run 'forge doctor' to inspect available tools.")
         if exit_on_error:
@@ -468,7 +476,11 @@ def doctor():
     tools = AdapterRegistry.check_all_tools()
     click.echo("\n[CLI Tools]")
     for t in tools:
-        if t["found"]:
+        if t.get("incompatible"):
+            click.secho(f"  ✗ {t['name']:<14} incompatible under WSL2 ({t['path']})", fg="red")
+            first_err = t['error'].splitlines()[0] if t.get('error') else "Windows binary not supported in WSL"
+            click.secho(f"    ↳ {first_err}", fg="yellow")
+        elif t["found"]:
             click.secho(f"  ✓ {t['name']:<14} found ({t['path']})", fg="green")
         else:
             click.secho(f"  ✗ {t['name']:<14} missing ({t['desc']})", fg="yellow")

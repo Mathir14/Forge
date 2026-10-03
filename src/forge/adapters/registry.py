@@ -122,11 +122,26 @@ class AdapterRegistry:
             path = shutil.which(tool["binary"])
             if not path and "alt_binary" in tool:
                 path = shutil.which(tool["alt_binary"])
-            results.append({
+            tool_entry = {
                 "name": tool["name"],
                 "binary": tool["binary"],
                 "found": path is not None,
                 "path": path,
                 "desc": tool["desc"],
-            })
+            }
+            # Check registered adapter for compatibility errors (e.g. WSL + Windows binary)
+            adapter_name = tool["binary"]
+            if cls.is_registered(adapter_name):
+                try:
+                    adapter_inst = cls.get(adapter_name)
+                    if not adapter_inst.is_available():
+                        avail_err = getattr(adapter_inst, "availability_error", None)
+                        if avail_err:
+                            tool_entry["found"] = False
+                            tool_entry["incompatible"] = True
+                            tool_entry["error"] = avail_err
+                except Exception:
+                    pass
+
+            results.append(tool_entry)
         return results
