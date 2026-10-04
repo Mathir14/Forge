@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Set, Iterator, Iterable, Callable, Tuple
+from typing import Optional, Dict, Any, List, Set, Iterator, Iterable, Callable, Tuple, Union
 
 from forge.adapters.base import BaseAdapter, AdapterResponse
 from forge.core.capabilities import Capability
