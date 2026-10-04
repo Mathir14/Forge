@@ -15,6 +15,13 @@ from forge.adapters.opencode import OpenCodeAdapter
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
 
 
+@pytest.fixture(autouse=True)
+def reset_opencode_cache():
+    OpenCodeAdapter._clear_variants_cache()
+    yield
+    OpenCodeAdapter._clear_variants_cache()
+
+
 # ---------------------------------------------------------------------------
 # 1. Chunk Events
 # ---------------------------------------------------------------------------
@@ -437,6 +444,7 @@ def test_opencode_iter_events_command_construction():
     mock_proc.wait.return_value = 0
 
     with patch("shutil.which", return_value="/bin/opencode"), \
+         patch.object(OpenCodeAdapter, "_fetch_model_variants", return_value={}), \
          patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
          patch.object(adapter, "_kill_process_group") as mock_kill_pg:
 
@@ -449,8 +457,8 @@ def test_opencode_iter_events_command_construction():
         assert cmd[1] == "run"
         assert "-m" in cmd
         assert cmd[cmd.index("-m") + 1] == "custom-model"
-        assert "--variant" in cmd
-        assert cmd[cmd.index("--variant") + 1] == "high"
+        assert "--variant" not in cmd
+        assert "--effort" not in cmd
         assert "--auto" in cmd
         assert "--format" in cmd
         assert cmd[cmd.index("--format") + 1] == "json"
@@ -463,6 +471,235 @@ def test_opencode_iter_events_command_construction():
         assert events[0].event_type == AgentEventType.CHUNK
         assert events[1].event_type == AgentEventType.COMPLETE
         mock_kill_pg.assert_called_once_with(mock_proc)
+
+
+MOCK_OPENCODE_CATALOG = {
+    "data": [
+        {
+            "id": "fledge-alpha-free",
+            "modelID": "fledge-alpha-free",
+            "providerID": "opencode",
+            "variants": [
+                {"id": "low", "settings": {"reasoningEffort": "low"}},
+                {"id": "high", "settings": {"reasoningEffort": "high"}},
+                {"id": "max", "settings": {"reasoningEffort": "max"}},
+            ],
+        },
+        {
+            "id": "space-bunny-free",
+            "modelID": "space-bunny-free",
+            "providerID": "opencode",
+            "variants": [
+                {"id": "low", "settings": {"reasoningEffort": "low"}},
+                {"id": "medium", "settings": {"reasoningEffort": "medium"}},
+                {"id": "high", "settings": {"reasoningEffort": "high"}},
+                {"id": "xhigh", "settings": {"reasoningEffort": "xhigh"}},
+                {"id": "max", "settings": {"reasoningEffort": "max"}},
+            ],
+        },
+        {
+            "id": "big-pickle",
+            "modelID": "big-pickle",
+            "providerID": "opencode",
+            "variants": [],
+        },
+    ]
+}
+
+
+def test_opencode_dynamic_variant_discovery_supported():
+    """Verify dynamic variant discovery translates supported effort levels to model#effort."""
+    mock_res = subprocess.CompletedProcess(
+        args=["opencode", "api", "model.list"],
+        returncode=0,
+        stdout=json.dumps(MOCK_OPENCODE_CATALOG),
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=mock_res):
+        # 1. Provider-qualified ID
+        adapter_high = OpenCodeAdapter(model="opencode/fledge-alpha-free", effort="high")
+        assert adapter_high._resolve_model_argument() == "opencode/fledge-alpha-free#high"
+
+        # 2. Short model ID
+        adapter_low = OpenCodeAdapter(model="fledge-alpha-free", effort="low")
+        assert adapter_low._resolve_model_argument() == "fledge-alpha-free#low"
+
+        # 3. Medium effort on space-bunny-free
+        adapter_med = OpenCodeAdapter(model="opencode/space-bunny-free", effort="medium")
+        assert adapter_med._resolve_model_argument() == "opencode/space-bunny-free#medium"
+
+
+def test_opencode_effort_unsupported_model_logs_warning_and_uses_base_model(caplog):
+    """When a model cannot honor requested effort, OpenCodeAdapter logs a warning and uses base model."""
+    mock_res = subprocess.CompletedProcess(
+        args=["opencode", "api", "model.list"],
+        returncode=0,
+        stdout=json.dumps(MOCK_OPENCODE_CATALOG),
+        stderr="",
+    )
+    adapter = OpenCodeAdapter(model="opencode/big-pickle", effort="high")
+
+    with patch("subprocess.run", return_value=mock_res), caplog.at_level(logging.WARNING):
+        model_arg = adapter._resolve_model_argument()
+
+    assert model_arg == "opencode/big-pickle"
+    assert any("OpenCode model 'opencode/big-pickle' does not expose a variant corresponding to requested effort 'high'" in r.message for r in caplog.records)
+
+
+def test_opencode_explicit_model_variant_preserved_and_bypasses_metadata_query():
+    """Explicit model variant (e.g. #custom) is preserved and bypasses OpenCode metadata query."""
+    with patch("subprocess.run") as mock_sub:
+        adapter = OpenCodeAdapter(model="custom/model#myvariant", effort="high")
+        assert adapter._resolve_model_argument() == "custom/model#myvariant"
+        mock_sub.assert_not_called()
+
+
+def test_opencode_metadata_caching_and_cache_clear():
+    """Metadata is cached at class level across instances, and cleared by _clear_variants_cache."""
+    mock_res = subprocess.CompletedProcess(
+        args=["opencode", "api", "model.list"],
+        returncode=0,
+        stdout=json.dumps(MOCK_OPENCODE_CATALOG),
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=mock_res) as mock_sub:
+        ad1 = OpenCodeAdapter(model="opencode/space-bunny-free", effort="high")
+        assert ad1._resolve_model_argument() == "opencode/space-bunny-free#high"
+
+        ad2 = OpenCodeAdapter(model="opencode/space-bunny-free", effort="low")
+        assert ad2._resolve_model_argument() == "opencode/space-bunny-free#low"
+
+        assert mock_sub.call_count == 1
+
+        # Clear cache and verify subsequent call re-queries metadata
+        OpenCodeAdapter._clear_variants_cache()
+        ad3 = OpenCodeAdapter(model="opencode/space-bunny-free", effort="high")
+        assert ad3._resolve_model_argument() == "opencode/space-bunny-free#high"
+        assert mock_sub.call_count == 2
+
+
+def test_opencode_metadata_query_failure_falls_back_to_base_model(caplog):
+    """When metadata query fails (non-zero exit, timeout, invalid JSON, or missing binary),
+    fall back to base model, log DEBUG, and do NOT emit warning about missing variant."""
+    adapter = OpenCodeAdapter(model="opencode/big-pickle", effort="high")
+
+    # 1. Non-zero exit code
+    mock_err_res = subprocess.CompletedProcess(
+        args=["opencode", "api", "model.list"],
+        returncode=1,
+        stdout="",
+        stderr="internal server error",
+    )
+    with patch("subprocess.run", return_value=mock_err_res), caplog.at_level(logging.DEBUG):
+        caplog.clear()
+        assert adapter._resolve_model_argument() == "opencode/big-pickle"
+        assert any("Failed to query OpenCode model metadata:" in r.message for r in caplog.records)
+        assert not any("does not expose a variant corresponding to requested effort" in r.message for r in caplog.records)
+
+    # 2. Timeout
+    OpenCodeAdapter._clear_variants_cache()
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="opencode", timeout=3.0)), caplog.at_level(logging.DEBUG):
+        caplog.clear()
+        assert adapter._resolve_model_argument() == "opencode/big-pickle"
+        assert any("Failed to query OpenCode model metadata:" in r.message for r in caplog.records)
+        assert not any("does not expose a variant corresponding to requested effort" in r.message for r in caplog.records)
+
+    # 3. Invalid JSON
+    OpenCodeAdapter._clear_variants_cache()
+    mock_bad_json = subprocess.CompletedProcess(
+        args=["opencode", "api", "model.list"],
+        returncode=0,
+        stdout="THIS IS NOT JSON",
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=mock_bad_json), caplog.at_level(logging.DEBUG):
+        caplog.clear()
+        assert adapter._resolve_model_argument() == "opencode/big-pickle"
+        assert any("Failed to query OpenCode model metadata:" in r.message for r in caplog.records)
+        assert not any("does not expose a variant corresponding to requested effort" in r.message for r in caplog.records)
+
+    # 4. OpenCode binary not found
+    OpenCodeAdapter._clear_variants_cache()
+    with patch.object(adapter, "_resolve_binary", return_value=(None, None)), caplog.at_level(logging.DEBUG):
+        caplog.clear()
+        assert adapter._resolve_model_argument() == "opencode/big-pickle"
+        assert any("Failed to query OpenCode model metadata:" in r.message for r in caplog.records)
+        assert not any("does not expose a variant corresponding to requested effort" in r.message for r in caplog.records)
+
+
+def test_opencode_never_emits_unsupported_cli_flags():
+    """OpenCodeAdapter must never emit --variant or --effort flags for any effort level."""
+    mock_res = subprocess.CompletedProcess(
+        args=["opencode", "api", "model.list"],
+        returncode=0,
+        stdout=json.dumps(MOCK_OPENCODE_CATALOG),
+        stderr="",
+    )
+    for effort in ("low", "medium", "high", None):
+        adapter = OpenCodeAdapter(model="opencode/space-bunny-free", effort=effort)
+
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.poll.return_value = 0
+        mock_proc.wait.return_value = 0
+
+        with patch("shutil.which", return_value="/bin/opencode"), \
+             patch("subprocess.run", return_value=mock_res), \
+             patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch.object(adapter, "_kill_process_group"):
+
+            list(adapter.iter_events(prompt="test"))
+            cmd = mock_popen.call_args[0][0]
+            assert "--variant" not in cmd
+            assert "--effort" not in cmd
+            if effort:
+                assert f"opencode/space-bunny-free#{effort}" in cmd
+
+        with patch("shutil.which", return_value="/bin/opencode"), \
+             patch("subprocess.run", return_value=mock_res), \
+             patch.object(adapter, "_run_subprocess", return_value=("", "", 0)) as mock_run_sub:
+
+            adapter.execute(prompt="test")
+            cmd = mock_run_sub.call_args[0][0]
+            assert "--variant" not in cmd
+            assert "--effort" not in cmd
+            if effort:
+                assert f"opencode/space-bunny-free#{effort}" in cmd
+
+
+def test_provider_specific_effort_flags_matrix():
+    """Ensure provider-specific CLI flags are only emitted by adapters whose CLI tools support them."""
+    from forge.adapters.antigravity import AntigravityAdapter
+    from forge.adapters.codex import CodexAdapter
+
+    # 1. Antigravity emits --effort
+    agy = AntigravityAdapter(effort="high")
+    with patch("shutil.which", return_value="/bin/agy"), \
+         patch.object(agy, "_run_subprocess", return_value=("", "", 0)) as mock_agy:
+        agy.execute(prompt="test")
+        agy_cmd = mock_agy.call_args[0][0]
+        assert "--effort" in agy_cmd
+        assert agy_cmd[agy_cmd.index("--effort") + 1] == "high"
+
+    # 2. Codex emits -c model_reasoning_effort="..."
+    codex = CodexAdapter(effort="high")
+    with patch("shutil.which", return_value="/bin/codex"), \
+         patch.object(codex, "_run_subprocess", return_value=("", "", 0)) as mock_codex:
+        codex.execute(prompt="test")
+        codex_cmd = mock_codex.call_args[0][0]
+        assert "-c" in codex_cmd
+        assert 'model_reasoning_effort="high"' in codex_cmd[codex_cmd.index("-c") + 1]
+
+    # 3. OpenCode does NOT emit --effort or --variant
+    oc = OpenCodeAdapter(model="opencode/big-pickle", effort="high")
+    with patch("shutil.which", return_value="/bin/opencode"), \
+         patch.object(oc, "_fetch_model_variants", return_value={}), \
+         patch.object(oc, "_run_subprocess", return_value=("", "", 0)) as mock_oc:
+        oc.execute(prompt="test")
+        oc_cmd = mock_oc.call_args[0][0]
+        assert "--effort" not in oc_cmd
+        assert "--variant" not in oc_cmd
 
 
 def test_kill_process_group_safely_ignores_mock_and_invalid_pids():

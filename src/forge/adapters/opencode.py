@@ -124,6 +124,16 @@ class OpenCodeAdapter(BaseAdapter):
     DEFAULT_MODEL: Optional[str] = None
     DEFAULT_EFFORT: Optional[str] = None
 
+    OPENCODE_METADATA_TIMEOUT: float = 3.0
+    _model_variants_cache: Optional[Dict[str, Set[str]]] = None
+    _metadata_query_failed: bool = False
+
+    @classmethod
+    def _clear_variants_cache(cls) -> None:
+        """Clear cached model variants metadata (primarily for testing)."""
+        cls._model_variants_cache = None
+        cls._metadata_query_failed = False
+
     def __init__(
         self,
         model: Optional[str] = None,
@@ -139,6 +149,149 @@ class OpenCodeAdapter(BaseAdapter):
             extra_flags=extra_flags,
         )
         self._availability_error: Optional[str] = None
+
+    def _fetch_model_variants(self) -> Dict[str, Set[str]]:
+        """Query and cache available model variants from OpenCode CLI.
+
+        Executes 'opencode api model.list' with OPENCODE_METADATA_TIMEOUT.
+        Caches the parsed mapping at class level to avoid repeated queries across stages.
+        """
+        if OpenCodeAdapter._model_variants_cache is not None:
+            return OpenCodeAdapter._model_variants_cache
+
+        bin_path, err = self._resolve_binary()
+        if err or not bin_path:
+            logger.debug(
+                "Failed to query OpenCode model metadata: %s",
+                err or "OpenCode binary not found in PATH",
+            )
+            OpenCodeAdapter._metadata_query_failed = True
+            OpenCodeAdapter._model_variants_cache = {}
+            return OpenCodeAdapter._model_variants_cache
+
+        cmd = [bin_path, "api", "model.list"]
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.OPENCODE_METADATA_TIMEOUT,
+                check=False,
+            )
+            if res.returncode != 0:
+                err_detail = (res.stderr or res.stdout or "").strip()
+                logger.debug(
+                    "Failed to query OpenCode model metadata: command exited with code %d: %s",
+                    res.returncode,
+                    err_detail,
+                )
+                OpenCodeAdapter._metadata_query_failed = True
+                OpenCodeAdapter._model_variants_cache = {}
+                return OpenCodeAdapter._model_variants_cache
+
+            payload = json.loads(res.stdout)
+            data = payload.get("data", [])
+            catalog: Dict[str, Set[str]] = {}
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    m_id = str(item.get("id") or item.get("modelID") or "").strip()
+                    provider_id = str(item.get("providerID") or "").strip()
+                    raw_variants = item.get("variants") or []
+                    variant_names: Set[str] = set()
+                    if isinstance(raw_variants, list):
+                        for v in raw_variants:
+                            if isinstance(v, dict) and "id" in v:
+                                variant_names.add(str(v["id"]))
+                            elif isinstance(v, str):
+                                variant_names.add(v)
+
+                    if m_id:
+                        catalog[m_id] = variant_names
+                        if "/" in m_id:
+                            catalog[m_id.split("/", 1)[1]] = variant_names
+                        if provider_id and not m_id.startswith(f"{provider_id}/"):
+                            catalog[f"{provider_id}/{m_id}"] = variant_names
+
+                    alt_id = str(item.get("modelID") or "").strip()
+                    if alt_id and alt_id != m_id:
+                        catalog[alt_id] = variant_names
+                        if "/" in alt_id:
+                            catalog[alt_id.split("/", 1)[1]] = variant_names
+                        if provider_id and not alt_id.startswith(f"{provider_id}/"):
+                            catalog[f"{provider_id}/{alt_id}"] = variant_names
+
+            OpenCodeAdapter._metadata_query_failed = False
+            OpenCodeAdapter._model_variants_cache = catalog
+            return catalog
+
+        except Exception as e:
+            logger.debug("Failed to query OpenCode model metadata: %s", e)
+            OpenCodeAdapter._metadata_query_failed = True
+            OpenCodeAdapter._model_variants_cache = {}
+            return OpenCodeAdapter._model_variants_cache
+
+    def _resolve_model_argument(self) -> Optional[str]:
+        """Resolve the model CLI argument for OpenCode.
+
+        OpenCode does not support standalone CLI flags for reasoning effort or variants
+        (e.g., '--variant' or '--effort' do not exist in OpenCode CLI). Instead, OpenCode
+        encodes variants directly into the model string as 'provider/model#variant'.
+
+        If the model string already specifies an explicit variant ('#' in self.model),
+        it is preserved as-is without querying metadata.
+
+        When semantic effort is configured without an explicit variant:
+        - OpenCode model metadata is dynamically queried via 'opencode api model.list'
+          and cached at class level.
+        - If the model exposes a variant matching the requested effort level,
+          it is translated to 'provider/model#<effort>'.
+        - If the selected model does not expose the requested variant, explicit behavior
+          is defined: log a warning and proceed with the base model without a variant suffix.
+        - If metadata discovery fails, log at DEBUG level and fall back safely to the base model.
+        """
+        if not self.model:
+            if self.effort:
+                logger.warning(
+                    "OpenCode adapter: semantic effort '%s' requested but no model specified; "
+                    "proceeding with OpenCode default model without effort configuration.",
+                    self.effort,
+                )
+            return None
+
+        if "#" in self.model:
+            return self.model
+
+        if not self.effort:
+            return self.model
+
+        catalog = self._fetch_model_variants()
+        if OpenCodeAdapter._metadata_query_failed:
+            return self.model
+
+        variants = catalog.get(self.model)
+        if variants is None:
+            if "/" in self.model:
+                variants = catalog.get(self.model.split("/", 1)[1])
+            else:
+                for k, v in catalog.items():
+                    if k.endswith(f"/{self.model}"):
+                        variants = v
+                        break
+        if variants is None:
+            variants = set()
+
+        if self.effort in variants:
+            return f"{self.model}#{self.effort}"
+
+        logger.warning(
+            "OpenCode model '%s' does not expose a variant corresponding to requested effort '%s'. "
+            "Proceeding with base model without variant configuration.",
+            self.model,
+            self.effort,
+        )
+        return self.model
 
     @property
     def availability_error(self) -> Optional[str]:
@@ -250,12 +403,11 @@ class OpenCodeAdapter(BaseAdapter):
         bin_path = bin_path or "opencode"
         cmd: List[str] = [bin_path, "run"]
 
-        if self.model:
-            cmd.extend(["-m", self.model])
+        model_arg = self._resolve_model_argument()
+        if model_arg:
+            cmd.extend(["-m", model_arg])
         if self.auto_approve:
             cmd.append("--auto")
-        if self.effort:
-            cmd.extend(["--variant", self.effort])
         if self.extra_flags:
             cmd.extend(self._render_extra_flags())
 
@@ -732,12 +884,11 @@ class OpenCodeAdapter(BaseAdapter):
         bin_path = bin_path or "opencode"
         cmd: List[str] = [bin_path, "run"]
 
-        if self.model:
-            cmd.extend(["-m", self.model])
+        model_arg = self._resolve_model_argument()
+        if model_arg:
+            cmd.extend(["-m", model_arg])
         if self.auto_approve:
             cmd.append("--auto")
-        if self.effort:
-            cmd.extend(["--variant", self.effort])
         if self.extra_flags:
             cmd.extend(self._render_extra_flags())
         if "--format" not in cmd:
