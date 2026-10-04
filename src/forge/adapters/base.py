@@ -1,3 +1,4 @@
+import atexit
 import os
 import re
 import signal
@@ -54,6 +55,7 @@ class BaseAdapter(ABC):
     CAPABILITIES: Optional[Set[Union[str, Any]]] = None
     DEFAULT_MODEL: Optional[str] = None
     DEFAULT_EFFORT: Optional[str] = None
+    _all_active_procs: Set[subprocess.Popen] = set()
 
     def __init__(
         self,
@@ -68,6 +70,43 @@ class BaseAdapter(ABC):
         self.effort = effort
         self.auto_approve = auto_approve
         self.extra_flags = extra_flags or {}
+        self._active_procs: Set[subprocess.Popen] = set()
+
+    @classmethod
+    def _register_proc(cls, proc: subprocess.Popen, instance: Optional["BaseAdapter"] = None) -> None:
+        """Track an active child subprocess across class and instance."""
+        if proc is not None:
+            cls._all_active_procs.add(proc)
+            if instance is not None:
+                if not hasattr(instance, "_active_procs"):
+                    instance._active_procs = set()
+                instance._active_procs.add(proc)
+
+    @classmethod
+    def _unregister_proc(cls, proc: Optional[subprocess.Popen], instance: Optional["BaseAdapter"] = None) -> None:
+        """Remove a terminated child subprocess from tracking."""
+        if proc is not None:
+            cls._all_active_procs.discard(proc)
+            if instance is not None and hasattr(instance, "_active_procs"):
+                instance._active_procs.discard(proc)
+
+    def cancel(self) -> None:
+        """Terminate and clean up all active subprocesses belonging to this adapter."""
+        active = list(getattr(self, "_active_procs", set()))
+        for proc in active:
+            self._safe_cleanup_subprocess(proc)
+            self._unregister_proc(proc, instance=self)
+        if hasattr(self, "_active_procs"):
+            self._active_procs.clear()
+
+    @classmethod
+    def cleanup_all(cls) -> None:
+        """Emergency cleanup of all active subprocesses tracked across adapters."""
+        active = list(cls._all_active_procs)
+        for proc in active:
+            cls._safe_cleanup_subprocess(proc)
+            cls._all_active_procs.discard(proc)
+        cls._all_active_procs.clear()
 
     @classmethod
     def get_capabilities(cls) -> Set[str]:
@@ -400,6 +439,7 @@ class BaseAdapter(ABC):
             popen_kwargs["start_new_session"] = True
 
         proc = subprocess.Popen(cmd, **popen_kwargs)
+        cls._register_proc(proc)
         try:
             stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
             return stdout or "", stderr or "", proc.returncode
@@ -418,3 +458,9 @@ class BaseAdapter(ABC):
         except BaseException:
             cls._kill_process_group(proc)
             raise
+        finally:
+            cls._unregister_proc(proc)
+
+
+atexit.register(BaseAdapter.cleanup_all)
+

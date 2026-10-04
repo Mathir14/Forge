@@ -383,8 +383,13 @@ class Stage:
 
         finally:
             stop_requested.set()
+            if hasattr(self.adapter, "cancel"):
+                try:
+                    self.adapter.cancel()
+                except Exception as exc:
+                    logger.debug("Error canceling adapter on stage exit: %s", exc)
             if worker_thread.is_alive():
-                worker_thread.join(timeout=0.1)
+                worker_thread.join(timeout=1.0)
 
         # Handle timeout termination if encountered
         if timeout_type and timeout_reason:

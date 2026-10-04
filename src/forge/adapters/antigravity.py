@@ -722,6 +722,7 @@ class AntigravityAdapter(BaseAdapter):
         proc: Optional[subprocess.Popen] = None
         try:
             proc = subprocess.Popen(cmd, **popen_kwargs)
+            self._register_proc(proc, instance=self)
 
             def _get_returncode() -> Optional[int]:
                 if proc is not None:
@@ -814,5 +815,6 @@ class AntigravityAdapter(BaseAdapter):
                     proc.wait(timeout=1.0)
                 except Exception:
                     pass
+                self._unregister_proc(proc, instance=self)
 
     execute_events = iter_events

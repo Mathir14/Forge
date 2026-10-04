@@ -983,3 +983,54 @@ def test_opencode_compaction_stage_raw_markdown_contains_final_output_not_compac
     assert "final Human Report + YAML Machine Report had NOT yet been written" not in result.raw_markdown
     assert "## Next Move" not in result.raw_markdown
 
+
+def test_opencode_adapter_tracks_and_cancels_active_subprocess():
+    """Verify OpenCodeAdapter registers running subprocess and terminates it upon cancel()."""
+    adapter = OpenCodeAdapter()
+    mock_proc = MagicMock()
+    mock_proc.pid = 8888
+    mock_proc.poll.return_value = None
+
+    adapter._register_proc(mock_proc, instance=adapter)
+    assert mock_proc in adapter._active_procs
+    assert mock_proc in OpenCodeAdapter._all_active_procs
+
+    with patch.object(OpenCodeAdapter, "_kill_process_group") as mock_kill_pg:
+        adapter.cancel()
+        mock_kill_pg.assert_called_once_with(mock_proc)
+
+    assert mock_proc not in adapter._active_procs
+    assert mock_proc not in OpenCodeAdapter._all_active_procs
+
+
+def test_stage_timeout_cancels_opencode_subprocess_and_unblocks_worker(tmp_path):
+    """Verify that Stage timeout invokes adapter.cancel(), terminating child process and unblocking worker thread."""
+    from forge.stages.stage import Stage
+    from forge.core.role import Role
+    from forge.core.context import Context
+    from forge.core.config import Config
+    from forge.core.git import GitService
+    from forge.storage.run_manager import RunManager
+
+    fake_bin = tmp_path / "opencode"
+    fake_bin.write_text("#!/bin/sh\nsleep 30\n")
+    fake_bin.chmod(0o755)
+
+    adapter = OpenCodeAdapter()
+    run_mgr = RunManager(tmp_path)
+    run = run_mgr.create_run("test timeout cleanup")
+    role = Role(name="critic", sequence_number=0, template_content="Test prompt template", phase="pre_run")
+    context = Context(run=run, project_root=tmp_path, config=Config.default(), git=GitService(tmp_path))
+    stage = Stage(role=role, adapter=adapter, run_manager=run_mgr, timeout=0.3)
+
+    with patch.object(adapter, "_resolve_binary", return_value=(str(fake_bin), None)):
+        start = time.time()
+        result = stage.run(context)
+        elapsed = time.time() - start
+
+    assert result.response.exit_code == 124
+    assert result.success is False
+    assert elapsed < 3.0, f"Stage took too long to terminate: {elapsed}s"
+    assert len(adapter._active_procs) == 0
+
+

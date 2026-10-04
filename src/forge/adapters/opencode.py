@@ -923,6 +923,7 @@ class OpenCodeAdapter(BaseAdapter):
         proc: Optional[subprocess.Popen] = None
         try:
             proc = subprocess.Popen(cmd, **popen_kwargs)
+            self._register_proc(proc, instance=self)
             if proc.stdin:
                 try:
                     proc.stdin.write(prompt)
@@ -1017,5 +1018,6 @@ class OpenCodeAdapter(BaseAdapter):
                     proc.wait(timeout=1.0)
                 except Exception:
                     pass
+                self._unregister_proc(proc, instance=self)
 
     execute_events = iter_events
