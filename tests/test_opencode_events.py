@@ -515,7 +515,7 @@ def test_opencode_dynamic_variant_discovery_supported():
         stdout=json.dumps(MOCK_OPENCODE_CATALOG),
         stderr="",
     )
-    with patch("subprocess.run", return_value=mock_res):
+    with patch("shutil.which", return_value="/bin/opencode"), patch("subprocess.run", return_value=mock_res):
         # 1. Provider-qualified ID
         adapter_high = OpenCodeAdapter(model="opencode/fledge-alpha-free", effort="high")
         assert adapter_high._resolve_model_argument() == "opencode/fledge-alpha-free#high"
@@ -539,7 +539,9 @@ def test_opencode_effort_unsupported_model_logs_warning_and_uses_base_model(capl
     )
     adapter = OpenCodeAdapter(model="opencode/big-pickle", effort="high")
 
-    with patch("subprocess.run", return_value=mock_res), caplog.at_level(logging.WARNING):
+    with patch("shutil.which", return_value="/bin/opencode"), \
+         patch("subprocess.run", return_value=mock_res), \
+         caplog.at_level(logging.WARNING):
         model_arg = adapter._resolve_model_argument()
 
     assert model_arg == "opencode/big-pickle"
@@ -562,7 +564,7 @@ def test_opencode_metadata_caching_and_cache_clear():
         stdout=json.dumps(MOCK_OPENCODE_CATALOG),
         stderr="",
     )
-    with patch("subprocess.run", return_value=mock_res) as mock_sub:
+    with patch("shutil.which", return_value="/bin/opencode"), patch("subprocess.run", return_value=mock_res) as mock_sub:
         ad1 = OpenCodeAdapter(model="opencode/space-bunny-free", effort="high")
         assert ad1._resolve_model_argument() == "opencode/space-bunny-free#high"
 
@@ -590,7 +592,9 @@ def test_opencode_metadata_query_failure_falls_back_to_base_model(caplog):
         stdout="",
         stderr="internal server error",
     )
-    with patch("subprocess.run", return_value=mock_err_res), caplog.at_level(logging.DEBUG):
+    with patch("shutil.which", return_value="/bin/opencode"), \
+         patch("subprocess.run", return_value=mock_err_res), \
+         caplog.at_level(logging.DEBUG):
         caplog.clear()
         assert adapter._resolve_model_argument() == "opencode/big-pickle"
         assert any("Failed to query OpenCode model metadata:" in r.message for r in caplog.records)
@@ -598,7 +602,9 @@ def test_opencode_metadata_query_failure_falls_back_to_base_model(caplog):
 
     # 2. Timeout
     OpenCodeAdapter._clear_variants_cache()
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="opencode", timeout=3.0)), caplog.at_level(logging.DEBUG):
+    with patch("shutil.which", return_value="/bin/opencode"), \
+         patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="opencode", timeout=3.0)), \
+         caplog.at_level(logging.DEBUG):
         caplog.clear()
         assert adapter._resolve_model_argument() == "opencode/big-pickle"
         assert any("Failed to query OpenCode model metadata:" in r.message for r in caplog.records)
@@ -612,7 +618,9 @@ def test_opencode_metadata_query_failure_falls_back_to_base_model(caplog):
         stdout="THIS IS NOT JSON",
         stderr="",
     )
-    with patch("subprocess.run", return_value=mock_bad_json), caplog.at_level(logging.DEBUG):
+    with patch("shutil.which", return_value="/bin/opencode"), \
+         patch("subprocess.run", return_value=mock_bad_json), \
+         caplog.at_level(logging.DEBUG):
         caplog.clear()
         assert adapter._resolve_model_argument() == "opencode/big-pickle"
         assert any("Failed to query OpenCode model metadata:" in r.message for r in caplog.records)
