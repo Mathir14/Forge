@@ -71,6 +71,7 @@ class BaseAdapter(ABC):
         self.auto_approve = auto_approve
         self.extra_flags = extra_flags or {}
         self._active_procs: Set[subprocess.Popen] = set()
+        self._cancel_requested: bool = False
 
     @classmethod
     def _register_proc(cls, proc: subprocess.Popen, instance: Optional["BaseAdapter"] = None) -> None:
@@ -92,6 +93,7 @@ class BaseAdapter(ABC):
 
     def cancel(self) -> None:
         """Terminate and clean up all active subprocesses belonging to this adapter."""
+        self._cancel_requested = True
         active = list(getattr(self, "_active_procs", set()))
         for proc in active:
             self._safe_cleanup_subprocess(proc)
@@ -238,6 +240,30 @@ class BaseAdapter(ABC):
             )
 
     execute_events = iter_events
+ 
+    def can_recover_session(
+        self,
+        terminal_event: Optional[AgentEvent] = None,
+        response: Optional[AdapterResponse] = None,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Check whether this adapter can attempt session recovery for a failed execution."""
+        return False
+
+    def recover_session(
+        self,
+        terminal_event: Optional[AgentEvent] = None,
+        response: Optional[AdapterResponse] = None,
+        session_id: Optional[str] = None,
+        cwd: Optional[Path] = None,
+    ) -> Optional[Tuple[AgentEvent, AdapterResponse]]:
+        """Attempt to recover a failed execution from an external daemon or persistent session.
+
+        Returns:
+            Tuple of (recovered_terminal_event, recovered_response) if recovery succeeded,
+            or None if recovery failed or was not possible.
+        """
+        return None
 
     @staticmethod
     def _decode_stream(stream: Any) -> str:

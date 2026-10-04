@@ -1,5 +1,5 @@
 """Forge - CLI-First Multi-Agent Orchestration Framework."""
 
-__version__ = "0.1.0b5"
+__version__ = "0.1.0b6"
 
 

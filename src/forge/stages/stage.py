@@ -330,8 +330,15 @@ class Stage:
                         )
                         continue
 
+                    # Check whether this ERROR event might be recoverable before dispatching to listener
+                    is_recoverable_error = (
+                        event.event_type == AgentEventType.ERROR
+                        and hasattr(self.adapter, "can_recover_session")
+                        and self.adapter.can_recover_session(terminal_event=event)
+                    )
+
                     # Dispatch event to listener with failure isolation
-                    if self.event_listener is not None:
+                    if self.event_listener is not None and not is_recoverable_error:
                         try:
                             if "stage_name" not in event.data:
                                 event.data["stage_name"] = self.role.name
@@ -517,6 +524,45 @@ class Stage:
             timeout=timeout,
             idle_timeout=idle_timeout,
         )
+
+        # 3.1 Session recovery for recoverable adapter transport disconnects
+        if terminal_event.event_type == AgentEventType.ERROR:
+            if hasattr(self.adapter, "can_recover_session") and self.adapter.can_recover_session(
+                terminal_event=terminal_event,
+                response=response,
+            ):
+                logger.info(
+                    "Attempting session recovery for adapter '%s' in stage '%s'...",
+                    getattr(self.adapter, "name", type(self.adapter).__name__),
+                    self.role.name,
+                )
+                recovered = self.adapter.recover_session(
+                    terminal_event=terminal_event,
+                    response=response,
+                    cwd=context.project_root,
+                )
+                if recovered is not None:
+                    terminal_event, response = recovered
+                    if self.event_listener is not None:
+                        try:
+                            if "stage_name" not in terminal_event.data:
+                                terminal_event.data["stage_name"] = self.role.name
+                            if "sequence_number" not in terminal_event.data:
+                                terminal_event.data["sequence_number"] = self.role.sequence_number
+                            self.event_listener(terminal_event)
+                        except Exception:
+                            pass
+                else:
+                    # Recovery failed: dispatch the deferred ERROR event with diagnostic metadata
+                    if self.event_listener is not None:
+                        try:
+                            if "stage_name" not in terminal_event.data:
+                                terminal_event.data["stage_name"] = self.role.name
+                            if "sequence_number" not in terminal_event.data:
+                                terminal_event.data["sequence_number"] = self.role.sequence_number
+                            self.event_listener(terminal_event)
+                        except Exception:
+                            pass
 
         # 4. Validate / Parse protocol
         # Parse the machine report ONLY after a COMPLETE event.

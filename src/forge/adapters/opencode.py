@@ -112,6 +112,140 @@ def is_windows_executable(path_str: str) -> bool:
     return False
 
 
+def _clean_session_id(val: Any) -> Optional[str]:
+    """Validate and clean a session ID string, rejecting null/undefined pseudo-strings."""
+    if not isinstance(val, str):
+        return None
+    s = val.strip()
+    if not s or s.lower() in ("none", "null", "undefined"):
+        return None
+    return s
+
+
+def is_recoverable_opencode_error(
+    error: Union[str, AgentEvent, AdapterResponse, Dict[str, Any], None] = None,
+    *,
+    stderr: Optional[str] = None,
+    raw_output: Optional[str] = None,
+) -> bool:
+    """Classify whether an OpenCode error represents a recoverable provider transport disconnect.
+
+    Returns True only when there is explicit evidence of network or socket disconnect:
+    - provider.transport
+    - ECONNRESET, ECONNREFUSED, ETIMEDOUT, EPIPE
+    - 'connection lost while reading the response'
+    - 'socket connection was closed unexpectedly'
+    - 'unexpected EOF' / premature stream termination
+
+    Returns False for:
+    - User interrupt (SIGINT, exit code 130)
+    - Forge timeout (exit code 124)
+    - Authentication / permission errors (401, 403, invalid_api_key)
+    - Rate limits / quota exhaustion (429, rate_limit)
+    - Context window overflow
+    - Content moderation
+    - Tool execution failures
+    - General exit code 1 without transport failure evidence
+    """
+    if error is None and not stderr and not raw_output:
+        return False
+
+    # Check exit codes if available
+    if isinstance(error, AgentEvent) and error.result and error.result.exit_code in (124, 130):
+        return False
+    if isinstance(error, AdapterResponse) and error.exit_code in (124, 130):
+        return False
+
+    text_parts: List[str] = []
+
+    if isinstance(error, str):
+        text_parts.append(error)
+    elif isinstance(error, dict):
+        if error.get("type") == "provider.transport":
+            return True
+        for key in ("message", "type", "error", "reason"):
+            val = error.get(key)
+            if isinstance(val, str):
+                text_parts.append(val)
+            elif isinstance(val, dict):
+                text_parts.append(str(val.get("message") or val.get("type") or ""))
+    elif isinstance(error, AgentEvent):
+        if error.text:
+            text_parts.append(error.text)
+        if error.result:
+            if error.result.stderr:
+                text_parts.append(error.result.stderr)
+            if error.result.raw_output:
+                text_parts.append(error.result.raw_output)
+            meta = error.result.metadata or {}
+            if meta.get("error_type") == "provider.transport":
+                return True
+            for k in ("error", "diagnostic", "error_type", "message"):
+                v = meta.get(k)
+                if isinstance(v, str):
+                    text_parts.append(v)
+    elif isinstance(error, AdapterResponse):
+        if error.stderr:
+            text_parts.append(error.stderr)
+        if error.raw_output:
+            text_parts.append(error.raw_output)
+        if error.stdout:
+            text_parts.append(error.stdout)
+
+    if stderr:
+        text_parts.append(stderr)
+    if raw_output:
+        text_parts.append(raw_output)
+
+    combined = " ".join(text_parts).lower()
+    if not combined.strip():
+        return False
+
+    non_recoverable_patterns = (
+        "unauthorized",
+        "forbidden",
+        "invalid_api_key",
+        "authentication",
+        "auth_error",
+        "rate_limit",
+        "rate limit",
+        "insufficient_quota",
+        "quota_exceeded",
+        "context_length_exceeded",
+        "maximum context length",
+        "content_filter",
+        "content policy",
+        "wslwindowsbinarycompatibilityerror",
+        "interrupted by user",
+        "sigint",
+        "model_not_found",
+        "invalid_model",
+        "invalid_request",
+        "tool_error",
+        "permission_denied",
+    )
+    if any(p in combined for p in non_recoverable_patterns):
+        return False
+
+    recoverable_patterns = (
+        "provider.transport",
+        "econnreset",
+        "econnrefused",
+        "etimedout",
+        "epipe",
+        "connection lost while reading the response",
+        "the socket connection was closed unexpectedly",
+        "socket connection was closed unexpectedly",
+        "socket hang up",
+        "unexpected eof",
+        "premature stream termination",
+        "connection reset by peer",
+        "broken pipe",
+        "network error",
+    )
+    return any(p in combined for p in recoverable_patterns)
+
+
 class OpenCodeAdapter(BaseAdapter):
     CAPABILITIES: Set[str] = {
         Capability.CODE_READ,
@@ -125,6 +259,9 @@ class OpenCodeAdapter(BaseAdapter):
     DEFAULT_EFFORT: Optional[str] = None
 
     OPENCODE_METADATA_TIMEOUT: float = 3.0
+    DEFAULT_RECOVERY_TIMEOUT: float = 300.0
+    DEFAULT_RECOVERY_POLL_INTERVAL: float = 2.0
+    INTERNAL_EXTRA_FLAGS: Set[str] = {"recovery_timeout", "recovery_poll_interval"}
     _model_variants_cache: Optional[Dict[str, Set[str]]] = None
     _metadata_query_failed: bool = False
 
@@ -149,6 +286,46 @@ class OpenCodeAdapter(BaseAdapter):
             extra_flags=extra_flags,
         )
         self._availability_error: Optional[str] = None
+        self._session_id: Optional[str] = None
+
+        # Robustly parse and bound recovery_timeout (default 300.0s, clamped 1.0s to 3600.0s)
+        raw_timeout = None
+        if self.extra_flags:
+            raw_timeout = self.extra_flags.get("recovery_timeout")
+            if raw_timeout is None:
+                raw_timeout = self.extra_flags.get("recovery-timeout")
+        try:
+            val = float(raw_timeout) if raw_timeout is not None else self.DEFAULT_RECOVERY_TIMEOUT
+            self.recovery_timeout = max(1.0, min(3600.0, val))
+        except (ValueError, TypeError):
+            self.recovery_timeout = self.DEFAULT_RECOVERY_TIMEOUT
+
+        # Robustly parse and bound recovery_poll_interval (default 2.0s, clamped 0.5s to recovery_timeout)
+        raw_poll = None
+        if self.extra_flags:
+            raw_poll = self.extra_flags.get("recovery_poll_interval")
+            if raw_poll is None:
+                raw_poll = self.extra_flags.get("recovery-poll-interval")
+        try:
+            val = float(raw_poll) if raw_poll is not None else self.DEFAULT_RECOVERY_POLL_INTERVAL
+            self.recovery_poll_interval = max(0.5, min(self.recovery_timeout, val))
+        except (ValueError, TypeError):
+            self.recovery_poll_interval = self.DEFAULT_RECOVERY_POLL_INTERVAL
+
+    def _render_extra_flags(self) -> List[str]:
+        """Render extra flags to argv list, filtering out internal adapter configurations."""
+        internal_normalized = {"recovery_timeout", "recovery_poll_interval"}
+        filtered = {
+            k: v
+            for k, v in self.extra_flags.items()
+            if str(k).lstrip("-").replace("-", "_") not in internal_normalized
+        }
+        return self.render_flags(filtered)
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """Return the active OpenCode session ID if one was captured during execution."""
+        return self._session_id
 
     def _fetch_model_variants(self) -> Dict[str, Set[str]]:
         """Query and cache available model variants from OpenCode CLI.
@@ -389,6 +566,8 @@ class OpenCodeAdapter(BaseAdapter):
         cwd: Optional[Path] = None,
         timeout: Optional[int] = None,
     ) -> AdapterResponse:
+        self._session_id = None
+        self._cancel_requested = False
         work_dir = cwd or Path.cwd()
         bin_path, err = self._resolve_binary()
         if err:
@@ -657,8 +836,16 @@ class OpenCodeAdapter(BaseAdapter):
                 continue
 
             event_type = payload.get("type") or payload.get("event")
-            if not session_id:
-                session_id = payload.get("sessionID") or payload.get("session_id")
+            raw_sid = (
+                payload.get("sessionID")
+                or payload.get("session_id")
+                or (payload.get("data", {}).get("sessionID") if isinstance(payload.get("data"), dict) else None)
+                or (payload.get("data", {}).get("session_id") if isinstance(payload.get("data"), dict) else None)
+            )
+            cleaned_sid = _clean_session_id(raw_sid)
+            if cleaned_sid:
+                session_id = cleaned_sid
+                self._session_id = session_id
 
             raw_ts = payload.get("timestamp")
             if isinstance(raw_ts, (int, float)):
@@ -724,6 +911,9 @@ class OpenCodeAdapter(BaseAdapter):
                     duration = time.time() - start_time
                     stderr_out = get_stderr() if get_stderr else ""
                     err_msg = part.get("error") or payload.get("error") or f"Step finished with error: {reason}"
+                    err_meta: Dict[str, Any] = {"error": str(err_msg)}
+                    if session_id:
+                        err_meta["session_id"] = session_id
                     yield self._build_error_event(
                         ts=ts,
                         duration=duration,
@@ -732,7 +922,7 @@ class OpenCodeAdapter(BaseAdapter):
                         stderr=stderr_out,
                         raw_output=accumulated_raw,
                         token_usage=token_usage,
-                        metadata={"error": str(err_msg)},
+                        metadata=err_meta,
                     )
                 else:
                     logger.warning(
@@ -774,6 +964,15 @@ class OpenCodeAdapter(BaseAdapter):
                 stderr_out = get_stderr() if get_stderr else ""
                 err_data = payload.get("error") or payload.get("message") or "OpenCode error event"
                 err_msg = err_data.get("message") if isinstance(err_data, dict) else str(err_data)
+                err_meta: Dict[str, Any] = {"error": str(err_msg)}
+                if session_id:
+                    err_meta["session_id"] = session_id
+                if isinstance(err_data, dict):
+                    err_type = err_data.get("type")
+                    if err_type:
+                        err_meta["error_type"] = str(err_type)
+                    if "status" in err_data:
+                        err_meta["error_status"] = err_data.get("status")
                 yield self._build_error_event(
                     ts=ts,
                     duration=duration,
@@ -782,7 +981,7 @@ class OpenCodeAdapter(BaseAdapter):
                     stderr=stderr_out,
                     raw_output=accumulated_raw,
                     token_usage=token_usage,
-                    metadata={"error": str(err_msg)},
+                    metadata=err_meta,
                 )
                 continue
 
@@ -815,6 +1014,9 @@ class OpenCodeAdapter(BaseAdapter):
             if proc_code is not None and proc_code != 0:
                 terminal_event_emitted = True
                 err_msg = stderr_out or f"OpenCode process exited with non-zero exit code: {proc_code}"
+                err_meta: Dict[str, Any] = {"diagnostic": f"Process exited with code {proc_code}"}
+                if session_id:
+                    err_meta["session_id"] = session_id
                 yield self._build_error_event(
                     ts=time.time(),
                     duration=duration,
@@ -823,7 +1025,7 @@ class OpenCodeAdapter(BaseAdapter):
                     stderr=stderr_out or err_msg,
                     raw_output=accumulated_raw,
                     token_usage=token_usage,
-                    metadata={"diagnostic": f"Process exited with code {proc_code}"},
+                    metadata=err_meta,
                     exit_code=proc_code,
                 )
             elif has_stopped_step and (proc_code is None or proc_code == 0):
@@ -842,6 +1044,11 @@ class OpenCodeAdapter(BaseAdapter):
                 exit_code = proc_code if (proc_code is not None and proc_code != 0) else 1
                 diag_msg = "Unexpected EOF before terminal event."
                 terminal_event_emitted = True
+                err_meta: Dict[str, Any] = {
+                    "diagnostic": "Provider stream terminated prematurely without emitting COMPLETE or ERROR."
+                }
+                if session_id:
+                    err_meta["session_id"] = session_id
                 yield self._build_error_event(
                     ts=time.time(),
                     duration=duration,
@@ -850,7 +1057,7 @@ class OpenCodeAdapter(BaseAdapter):
                     stderr=stderr_out or diag_msg,
                     raw_output=accumulated_raw,
                     token_usage=token_usage,
-                    metadata={"diagnostic": "Provider stream terminated prematurely without emitting COMPLETE or ERROR."},
+                    metadata=err_meta,
                     exit_code=exit_code,
                 )
 
@@ -865,6 +1072,8 @@ class OpenCodeAdapter(BaseAdapter):
         Spawns opencode with `--format json` and translates NDJSON stream events into
         canonical Forge AgentEvents (CHUNK, TOOL_START, TOOL_FINISH, COMPLETE, ERROR).
         """
+        self._session_id = None
+        self._cancel_requested = False
         work_dir = cwd or Path.cwd()
         bin_path, err = self._resolve_binary()
         if err:
@@ -1021,3 +1230,339 @@ class OpenCodeAdapter(BaseAdapter):
                 self._unregister_proc(proc, instance=self)
 
     execute_events = iter_events
+
+    def _query_daemon_api(
+        self,
+        endpoint: str,
+        method: str = "GET",
+        cwd: Optional[Path] = None,
+        timeout: float = 10.0,
+    ) -> Optional[Dict[str, Any]]:
+        """Query the local OpenCode daemon via the 'opencode api' CLI interface."""
+        bin_path, err = self._resolve_binary()
+        if err or not bin_path:
+            logger.debug("Cannot query OpenCode daemon: binary not resolved (%s)", err)
+            return None
+
+        cmd = [bin_path, "api", method, endpoint]
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=cwd or Path.cwd(),
+                timeout=timeout,
+                check=False,
+            )
+            if res.returncode != 0:
+                err_detail = (res.stderr or res.stdout or "").strip()
+                logger.debug(
+                    "OpenCode API query returned code %d (%s %s): %s",
+                    res.returncode,
+                    method,
+                    endpoint,
+                    err_detail,
+                )
+                return None
+            return json.loads(res.stdout)
+        except Exception as exc:
+            logger.debug("OpenCode API query error (%s %s): %s", method, endpoint, exc)
+            return None
+
+    def can_recover_session(
+        self,
+        terminal_event: Optional[AgentEvent] = None,
+        response: Optional[AdapterResponse] = None,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Determine if this adapter can attempt session recovery for a failed execution."""
+        # 1. Resolve session ID
+        raw_sid = session_id or self._session_id
+        if not raw_sid and terminal_event:
+            if terminal_event.result and terminal_event.result.metadata:
+                raw_sid = terminal_event.result.metadata.get("session_id")
+            if not raw_sid and terminal_event.data:
+                raw_sid = terminal_event.data.get("session_id")
+        sid = _clean_session_id(raw_sid)
+        if not sid:
+            return False
+
+        # 2. Check if terminal event is an ERROR event (or response has non-zero exit)
+        if terminal_event is not None and terminal_event.event_type != AgentEventType.ERROR:
+            return False
+
+        target = terminal_event or response
+        if target is None:
+            return False
+
+        return is_recoverable_opencode_error(target)
+
+    def recover_session(
+        self,
+        terminal_event: Optional[AgentEvent] = None,
+        response: Optional[AdapterResponse] = None,
+        session_id: Optional[str] = None,
+        cwd: Optional[Path] = None,
+    ) -> Optional[Tuple[AgentEvent, AdapterResponse]]:
+        """Poll the local OpenCode daemon and recover output if the daemon succeeded."""
+        self._cancel_requested = False
+        raw_sid = session_id or self._session_id
+        if not raw_sid and terminal_event:
+            if terminal_event.result and terminal_event.result.metadata:
+                raw_sid = terminal_event.result.metadata.get("session_id")
+            if not raw_sid and terminal_event.data:
+                raw_sid = terminal_event.data.get("session_id")
+
+        sid = _clean_session_id(raw_sid)
+        if not sid:
+            reason = "No session ID available for recovery."
+            logger.warning("OpenCode session recovery aborted: %s", reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+        bin_path, err = self._resolve_binary()
+        if err or not bin_path:
+            reason = f"OpenCode binary unavailable for session recovery: {err or 'not in PATH'}"
+            logger.warning("OpenCode session recovery aborted: %s", reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+        start_recovery_time = time.time()
+        poll_deadline = start_recovery_time + self.recovery_timeout
+        poll_interval = max(0.5, self.recovery_poll_interval)
+
+        logger.info(
+            "Polling OpenCode daemon for session %s (timeout: %.1fs, interval: %.1fs)...",
+            sid,
+            self.recovery_timeout,
+            poll_interval,
+        )
+
+        try:
+            while time.time() < poll_deadline:
+                if getattr(self, "_cancel_requested", False):
+                    reason = "Session recovery cancelled by user or stage shutdown."
+                    logger.info(reason)
+                    self._record_recovery_failure(terminal_event, response, reason)
+                    return None
+
+                session_resp = self._query_daemon_api(f"/api/session/{sid}", cwd=cwd)
+
+                if session_resp is not None:
+                    data = (
+                        session_resp.get("data")
+                        if isinstance(session_resp.get("data"), dict)
+                        else session_resp
+                    )
+                    outcome = data.get("outcome")
+
+                    if outcome == "succeeded":
+                        logger.info(
+                            "OpenCode daemon reported session %s succeeded; retrieving final output.",
+                            sid,
+                        )
+                        return self._retrieve_and_build_recovered_result(
+                            sid=sid,
+                            session_data=data,
+                            terminal_event=terminal_event,
+                            response=response,
+                            start_recovery_time=start_recovery_time,
+                            cwd=cwd,
+                        )
+
+                    elif outcome in ("failed", "interrupted"):
+                        reason = f"OpenCode daemon reported session outcome as '{outcome}'."
+                        logger.warning("Session recovery failed for %s: %s", sid, reason)
+                        self._record_recovery_failure(terminal_event, response, reason)
+                        return None
+
+                    else:
+                        logger.debug(
+                            "Session %s still in progress on OpenCode daemon (outcome: %s)...",
+                            sid,
+                            outcome,
+                        )
+                else:
+                    logger.debug(
+                        "Could not query OpenCode daemon for session %s (daemon may be busy)...",
+                        sid,
+                    )
+
+                # Responsive sleep checking for cancellation
+                sleep_end = time.time() + poll_interval
+                while time.time() < sleep_end:
+                    if getattr(self, "_cancel_requested", False):
+                        reason = "Session recovery cancelled by user or stage shutdown."
+                        self._record_recovery_failure(terminal_event, response, reason)
+                        return None
+                    time.sleep(min(0.2, max(0.01, sleep_end - time.time())))
+
+            reason = f"OpenCode daemon session did not complete within recovery timeout ({self.recovery_timeout}s)."
+            logger.warning("Session recovery timed out for %s: %s", sid, reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+        except KeyboardInterrupt:
+            reason = "Session recovery interrupted by user (SIGINT)."
+            logger.warning(reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+        except Exception as exc:
+            reason = f"Unexpected error during session recovery: {exc}"
+            logger.warning(reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+    def _retrieve_and_build_recovered_result(
+        self,
+        sid: str,
+        session_data: Dict[str, Any],
+        terminal_event: Optional[AgentEvent],
+        response: Optional[AdapterResponse],
+        start_recovery_time: float,
+        cwd: Optional[Path],
+    ) -> Optional[Tuple[AgentEvent, AdapterResponse]]:
+        """Retrieve latest assistant message from daemon and construct a COMPLETE event and response."""
+        msg_resp = self._query_daemon_api(
+            f"/api/session/{sid}/message?type=assistant&order=desc&limit=1",
+            cwd=cwd,
+        )
+        if msg_resp is None:
+            reason = "Failed to query daemon for final assistant message."
+            logger.warning("Session recovery failed for %s: %s", sid, reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+        raw_items = msg_resp.get("data") if isinstance(msg_resp.get("data"), list) else []
+        if not raw_items and isinstance(msg_resp, list):
+            raw_items = msg_resp
+        if not raw_items:
+            reason = "No assistant message returned by OpenCode daemon for session."
+            logger.warning("Session recovery failed for %s: %s", sid, reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+        latest_msg = raw_items[0] if isinstance(raw_items[0], dict) else {}
+        msg_role = latest_msg.get("role", "assistant")
+        if msg_role != "assistant":
+            reason = f"Latest message in session had role '{msg_role}', expected 'assistant'."
+            logger.warning("Session recovery failed for %s: %s", sid, reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+        finish_reason = latest_msg.get("finish")
+        if finish_reason in ("error", "failed", "aborted", "cancelled"):
+            reason = f"Final assistant message finish status was '{finish_reason}'."
+            logger.warning("Session recovery failed for %s: %s", sid, reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+        content = latest_msg.get("content", [])
+
+        text_blocks: List[str] = []
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    b_type = block.get("type")
+                    if b_type == "text" or (b_type is None and "text" in block):
+                        t = block.get("text", "")
+                        if t:
+                            text_blocks.append(str(t))
+                elif isinstance(block, str):
+                    if block:
+                        text_blocks.append(block)
+        elif isinstance(content, str):
+            text_blocks.append(content)
+
+        recovered_text = "".join(text_blocks)
+        if not recovered_text.strip():
+            reason = "Final assistant message contained empty text content."
+            logger.warning("Session recovery failed for %s: %s", sid, reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+        token_usage: Dict[str, int] = {}
+        raw_tokens = session_data.get("tokens") or latest_msg.get("tokens") or {}
+        if isinstance(raw_tokens, dict):
+            for k, v in raw_tokens.items():
+                if isinstance(v, int):
+                    token_usage[k] = v
+
+        orig_duration = 0.0
+        if terminal_event and terminal_event.result:
+            orig_duration = terminal_event.result.duration_seconds
+        elif response:
+            orig_duration = response.duration_seconds
+
+        time_info = session_data.get("time") if isinstance(session_data.get("time"), dict) else {}
+        created_ms = time_info.get("created")
+        idle_ms = time_info.get("idle") or time_info.get("updated")
+        if isinstance(created_ms, (int, float)) and isinstance(idle_ms, (int, float)) and idle_ms > created_ms:
+            daemon_duration = (idle_ms - created_ms) / 1000.0
+            total_duration = max(daemon_duration, orig_duration)
+        else:
+            total_duration = orig_duration + (time.time() - start_recovery_time)
+
+        recovered_result = ExecutionResult(
+            exit_code=0,
+            duration_seconds=total_duration,
+            stdout=recovered_text,
+            stderr="",
+            raw_output=recovered_text,
+            token_usage=token_usage,
+            metadata={
+                "session_id": sid,
+                "recovered": True,
+                "recovery_mechanism": "opencode_daemon_poll",
+                "recovered_message_id": latest_msg.get("id"),
+            },
+        )
+
+        recovered_event = AgentEvent(
+            event_type=AgentEventType.COMPLETE,
+            timestamp=time.time(),
+            text=recovered_text,
+            result=recovered_result,
+            data={"session_id": sid, "recovered": True},
+        )
+
+        recovered_response = AdapterResponse(
+            stdout=recovered_text,
+            stderr="",
+            exit_code=0,
+            duration_seconds=total_duration,
+            raw_output=recovered_text,
+        )
+
+        logger.info(
+            "Successfully recovered OpenCode session %s (message ID: %s, %d bytes).",
+            sid,
+            latest_msg.get("id"),
+            len(recovered_text),
+        )
+        return recovered_event, recovered_response
+
+    @staticmethod
+    def _record_recovery_failure(
+        terminal_event: Optional[AgentEvent],
+        response: Optional[AdapterResponse],
+        reason: str,
+    ) -> None:
+        """Annotate terminal event and response with diagnostic metadata when recovery fails."""
+        diag_msg = f"[Session Recovery Attempted: Failed - {reason}]"
+        if terminal_event and terminal_event.result:
+            if not isinstance(terminal_event.result.metadata, dict):
+                terminal_event.result.metadata = {}
+            terminal_event.result.metadata["recovery_attempted"] = True
+            terminal_event.result.metadata["recovery_failed"] = True
+            terminal_event.result.metadata["recovery_failure_reason"] = reason
+            if terminal_event.result.stderr:
+                terminal_event.result.stderr = f"{terminal_event.result.stderr}\n{diag_msg}"
+            else:
+                terminal_event.result.stderr = diag_msg
+
+        if response:
+            if response.stderr:
+                response.stderr = f"{response.stderr}\n{diag_msg}"
+            else:
+                response.stderr = diag_msg
