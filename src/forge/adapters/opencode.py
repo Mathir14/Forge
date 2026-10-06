@@ -146,8 +146,12 @@ def is_recoverable_opencode_error(
     - Content moderation
     - Tool execution failures
     - General exit code 1 without transport failure evidence
+
+    CRUCIAL: Cumulative model/tool/conversational raw_output or stdout is NEVER
+    inspected for non-recoverable patterns to prevent false rejections from arbitrary
+    model output (e.g. documentation containing the word 'authentication').
     """
-    if error is None and not stderr and not raw_output:
+    if error is None and not stderr:
         return False
 
     # Check exit codes if available
@@ -163,39 +167,36 @@ def is_recoverable_opencode_error(
     elif isinstance(error, dict):
         if error.get("type") == "provider.transport":
             return True
-        for key in ("message", "type", "error", "reason"):
+        for key in ("message", "type", "error", "reason", "diagnostic"):
             val = error.get(key)
             if isinstance(val, str):
                 text_parts.append(val)
             elif isinstance(val, dict):
-                text_parts.append(str(val.get("message") or val.get("type") or ""))
+                text_parts.append(str(val.get("message") or val.get("type") or val.get("error") or ""))
     elif isinstance(error, AgentEvent):
         if error.text:
             text_parts.append(error.text)
         if error.result:
             if error.result.stderr:
                 text_parts.append(error.result.stderr)
-            if error.result.raw_output:
-                text_parts.append(error.result.raw_output)
             meta = error.result.metadata or {}
             if meta.get("error_type") == "provider.transport":
                 return True
-            for k in ("error", "diagnostic", "error_type", "message"):
+            for k in ("error", "diagnostic", "error_type", "message", "reason"):
                 v = meta.get(k)
+                if isinstance(v, str):
+                    text_parts.append(v)
+        if error.data and isinstance(error.data, dict):
+            for k in ("error", "diagnostic", "error_type", "message", "reason"):
+                v = error.data.get(k)
                 if isinstance(v, str):
                     text_parts.append(v)
     elif isinstance(error, AdapterResponse):
         if error.stderr:
             text_parts.append(error.stderr)
-        if error.raw_output:
-            text_parts.append(error.raw_output)
-        if error.stdout:
-            text_parts.append(error.stdout)
 
     if stderr:
         text_parts.append(stderr)
-    if raw_output:
-        text_parts.append(raw_output)
 
     combined = " ".join(text_parts).lower()
     if not combined.strip():
@@ -239,11 +240,13 @@ def is_recoverable_opencode_error(
         "socket hang up",
         "unexpected eof",
         "premature stream termination",
+        "provider stream terminated prematurely",
         "connection reset by peer",
         "broken pipe",
         "network error",
     )
     return any(p in combined for p in recoverable_patterns)
+
 
 
 class OpenCodeAdapter(BaseAdapter):
@@ -287,6 +290,8 @@ class OpenCodeAdapter(BaseAdapter):
         )
         self._availability_error: Optional[str] = None
         self._session_id: Optional[str] = None
+        self._current_cwd: Optional[Path] = None
+        self._interrupted_sessions: Set[str] = set()
 
         # Robustly parse and bound recovery_timeout (default 300.0s, clamped 1.0s to 3600.0s)
         raw_timeout = None
@@ -569,6 +574,7 @@ class OpenCodeAdapter(BaseAdapter):
         self._session_id = None
         self._cancel_requested = False
         work_dir = cwd or Path.cwd()
+        self._current_cwd = work_dir
         bin_path, err = self._resolve_binary()
         if err:
             logger.error("OpenCode WSL compatibility error: %s", err)
@@ -1013,8 +1019,13 @@ class OpenCodeAdapter(BaseAdapter):
 
             if proc_code is not None and proc_code != 0:
                 terminal_event_emitted = True
-                err_msg = stderr_out or f"OpenCode process exited with non-zero exit code: {proc_code}"
-                err_meta: Dict[str, Any] = {"diagnostic": f"Process exited with code {proc_code}"}
+                base_msg = stderr_out or f"OpenCode process exited with non-zero exit code: {proc_code}"
+                err_msg = base_msg
+                diag_msg = f"Unexpected EOF before terminal event: {base_msg}"
+                err_meta: Dict[str, Any] = {
+                    "diagnostic": diag_msg,
+                    "reason": "Unexpected EOF before terminal event.",
+                }
                 if session_id:
                     err_meta["session_id"] = session_id
                 yield self._build_error_event(
@@ -1075,6 +1086,7 @@ class OpenCodeAdapter(BaseAdapter):
         self._session_id = None
         self._cancel_requested = False
         work_dir = cwd or Path.cwd()
+        self._current_cwd = work_dir
         bin_path, err = self._resolve_binary()
         if err:
             logger.error("OpenCode WSL compatibility error: %s", err)
@@ -1231,6 +1243,51 @@ class OpenCodeAdapter(BaseAdapter):
 
     execute_events = iter_events
 
+    def cancel(self) -> None:
+        """Terminate active server-side session and local subprocesses.
+
+        Ensures that when Forge cancels or times out an OpenCode stage:
+        1. The specific server-side OpenCode daemon session owned by this adapter
+           is explicitly interrupted via POST /api/session/{sid}/interrupt.
+        2. Local CLI processes and child process groups are forcefully cleaned up
+           via super().cancel().
+        3. Background worker threads and daemon LLM/tool execution halt before
+           subsequent stages or resumed runs proceed.
+        """
+        sid = _clean_session_id(self._session_id)
+        if sid and sid not in getattr(self, "_interrupted_sessions", set()):
+            if not hasattr(self, "_interrupted_sessions"):
+                self._interrupted_sessions = set()
+            self._interrupted_sessions.add(sid)
+            try:
+                logger.info("Interrupting OpenCode daemon session: %s", sid)
+                res = self._query_daemon_api(
+                    f"/api/session/{sid}/interrupt",
+                    method="POST",
+                    cwd=getattr(self, "_current_cwd", None),
+                    timeout=5.0,
+                )
+                if res and res.get("interrupted"):
+                    logger.info("Successfully interrupted OpenCode daemon session %s", sid)
+                elif res is not None:
+                    logger.debug(
+                        "OpenCode daemon session %s interrupt response: %s",
+                        sid,
+                        res,
+                    )
+                else:
+                    logger.debug(
+                        "OpenCode daemon session %s interrupt query returned no response",
+                        sid,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to interrupt OpenCode daemon session %s: %s",
+                    sid,
+                    exc,
+                )
+        super().cancel()
+
     def _query_daemon_api(
         self,
         endpoint: str,
@@ -1308,9 +1365,9 @@ class OpenCodeAdapter(BaseAdapter):
         self._cancel_requested = False
         raw_sid = session_id or self._session_id
         if not raw_sid and terminal_event:
-            if terminal_event.result and terminal_event.result.metadata:
+            if hasattr(terminal_event, "result") and terminal_event.result and terminal_event.result.metadata:
                 raw_sid = terminal_event.result.metadata.get("session_id")
-            if not raw_sid and terminal_event.data:
+            if not raw_sid and hasattr(terminal_event, "data") and terminal_event.data:
                 raw_sid = terminal_event.data.get("session_id")
 
         sid = _clean_session_id(raw_sid)
@@ -1319,6 +1376,11 @@ class OpenCodeAdapter(BaseAdapter):
             logger.warning("OpenCode session recovery aborted: %s", reason)
             self._record_recovery_failure(terminal_event, response, reason)
             return None
+
+        if not self._session_id:
+            self._session_id = sid
+        if cwd:
+            self._current_cwd = cwd
 
         bin_path, err = self._resolve_binary()
         if err or not bin_path:

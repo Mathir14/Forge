@@ -4,6 +4,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from forge.dashboard.state import DashboardState
+from forge.stages.definition import StageOrder
 
 
 def render_timeline(state: DashboardState) -> Panel:
@@ -23,10 +24,10 @@ def render_timeline(state: DashboardState) -> Panel:
         status = stage.display_status
 
         # Determine icon and color
-        if status in ("APPROVED", "VERIFIED", "SUCCESS", "DONE"):
+        if StageOrder.is_success_status(status, stage.role_name):
             icon = Text("✓", style="bold green")
             status_style = "green"
-        elif status in ("FAILED", "CHANGES_REQUIRED", "BLOCKED", "ERROR"):
+        elif status in ("FAILED", "CHANGES_REQUIRED", "BLOCKED", "ERROR", "REJECTED", "FAIL"):
             icon = Text("!", style="bold red")
             status_style = "red"
         elif status in ("RUNNING", "IN_PROGRESS"):

@@ -4,6 +4,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from forge.dashboard.state import DashboardState
+from forge.stages.definition import StageOrder
 
 
 def render_footer(state: DashboardState) -> Panel:
@@ -34,8 +35,21 @@ def render_footer(state: DashboardState) -> Panel:
     status = Text()
     pane_name = "SIDEBAR" if state.focused_pane == "timeline" else "CONTENT"
     status.append(f"Focus: {pane_name}  ", style="bold yellow")
-    mode_text = " LIVE ATTACH " if state.run.is_active else " OBSERVER "
-    mode_style = "bold black on green" if state.run.is_active else "bold white on blue"
+    if state.terminal_status:
+        term_stat = state.terminal_status.upper()
+        if StageOrder.is_success_status(term_stat):
+            mode_text = " COMPLETED "
+            mode_style = "bold white on green"
+
+        elif term_stat in ("CANCELLED", "ABORTED"):
+            mode_text = " CANCELLED "
+            mode_style = "bold white on yellow"
+        else:
+            mode_text = " HALTED "
+            mode_style = "bold white on red"
+    else:
+        mode_text = " LIVE ATTACH " if state.run.is_active else " OBSERVER "
+        mode_style = "bold black on green" if state.run.is_active else "bold white on blue"
     status.append(mode_text, style=mode_style)
 
     grid.add_row(hints, status)

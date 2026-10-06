@@ -31,6 +31,38 @@ class Run:
     def metadata_file(self) -> Path:
         return self.run_dir / "metadata.json"
 
+    @property
+    def summary(self) -> Optional["RunSummary"]:
+        from forge.core.summary import RunSummary
+        if "summary" in self.metadata and isinstance(self.metadata["summary"], dict):
+            return RunSummary.from_dict(self.metadata["summary"])
+        return None
+
+    @summary.setter
+    def summary(self, val: Optional["RunSummary"]) -> None:
+        if val is None:
+            self.metadata.pop("summary", None)
+        else:
+            self.metadata["summary"] = val.to_dict()
+
+    def get_or_create_summary(self, planned_stages: Optional[List[str]] = None) -> "RunSummary":
+        from forge.core.summary import RunSummary
+        s = self.summary
+        if s is None:
+            s = RunSummary(run_id=self.run_id)
+            if planned_stages:
+                for name in planned_stages:
+                    s.record_stage(name=name, status="—", execution_state="NOT REACHED")
+            self.summary = s
+            self.save_metadata()
+        elif planned_stages:
+            for name in planned_stages:
+                if not s.get_stage(name):
+                    s.record_stage(name=name, status="—", execution_state="NOT REACHED")
+            self.summary = s
+            self.save_metadata()
+        return s
+
     def lock(self) -> Any:
         """Obtain a RunLock instance for this run."""
         from forge.storage.run_lock import RunLock

@@ -22,4 +22,5 @@ class Context:
     baseline: Optional["GitBaseline"] = None
     repair_feedback: Optional[str] = None
     event_listener: Optional[Any] = None
+    abort_event: Optional[Any] = None
 

@@ -94,7 +94,7 @@ STAGE_DEFINITIONS: Tuple[StageDefinition, ...] = (
         preposition="for task:",
         role_type="producer",
         is_producer=True,
-        success_statuses=frozenset({"SUCCESS", "APPROVED", "COMPLETED"}),
+        success_statuses=frozenset({"SUCCESS", "APPROVED", "COMPLETED", "COMPLETE"}),
     ),
     StageDefinition(
         name="tester",
@@ -266,12 +266,58 @@ class StageOrder:
             return [cls.get_closing_critic()]
         return []
 
+    ALL_SUCCESS_STATUSES: FrozenSet[str] = frozenset({
+        "APPROVED",
+        "VERIFIED",
+        "SUCCESS",
+        "DONE",
+        "CRITIQUE_COMPLETE",
+        "READY",
+        "PASSED",
+        "PASS",
+        "COMPLETED",
+        "COMPLETE",
+        "COMMITTED",
+        "NOT_TESTABLE",
+    })
+
+    @classmethod
+    def is_success_status(cls, status: str, role_name: Optional[str] = None) -> bool:
+        """Check if a status represents successful completion."""
+        if not status:
+            return False
+        clean = status.upper().strip()
+        if role_name:
+            role_successes = cls.get_success_statuses(role_name)
+            if clean in role_successes:
+                return True
+        return clean in cls.ALL_SUCCESS_STATUSES
+
     @classmethod
     def autonomous_loop_stages(cls, no_critic: bool = False) -> List[StageDefinition]:
         """Return stage definitions for autonomous loop (pre-loop + loop + post-loop)."""
         stages = list(cls.pre_loop_stages()) + [cls.change_producer()] + cls.verification_stages()
         stages.extend(cls.post_loop_stages(no_critic=no_critic))
         return sorted(stages, key=lambda s: s.sequence_number)
+
+    @classmethod
+    def full_autonomous_stages(cls, no_critic: bool = False, has_pre_critic: bool = True) -> List[StageDefinition]:
+        """Return full canonical autonomous stages in execution sequence order:
+        [critic (0)], architect (1), planner (2), executor (3), tester (4), reviewer (5), [closing critic (6)].
+        """
+        stages = []
+        if has_pre_critic:
+            stages.append(cls.get_pre_run_critic())
+        stages.extend([
+            cls.get_architect(),
+            cls.get_planner(),
+            cls.change_producer(),
+            *cls.verification_stages(),
+        ])
+        if not no_critic:
+            stages.append(cls.get_closing_critic())
+        return stages
+
 
     @classmethod
     def resolve_definition(

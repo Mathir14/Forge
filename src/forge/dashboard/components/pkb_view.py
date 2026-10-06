@@ -7,6 +7,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from forge.dashboard.state import DashboardState
+from forge.dashboard.components.navigation import render_tab_navigation
 from forge.storage.knowledge import KnowledgeStore
 from forge.core.knowledge import KnowledgeFact
 
@@ -15,8 +16,9 @@ def render_pkb_view(state: DashboardState, project_root: Optional[Path] = None, 
     """Render the Project Knowledge Base facts, filters, and status badges."""
     is_focused = (state.focused_pane == "content")
     border_color = "cyan" if is_focused else "dim"
+    title_markup = render_tab_navigation(state)
 
-    root = project_root or Path.cwd()
+    root = project_root or getattr(state, "project_root", None) or Path.cwd()
     store = KnowledgeStore(root)
 
     try:
@@ -32,11 +34,12 @@ def render_pkb_view(state: DashboardState, project_root: Optional[Path] = None, 
         )
         return Panel(
             body,
-            title=" [4: Project Knowledge Base] ",
+            title=title_markup,
             title_align="left",
             border_style=border_color,
             style="white",
         )
+
 
     # Apply filters
     facts = list(all_facts.values())
@@ -103,9 +106,6 @@ def render_pkb_view(state: DashboardState, project_root: Optional[Path] = None, 
     content_grid.add_row(filter_bar)
     content_grid.add_row(Text("─" * 60, style="dim"))
     content_grid.add_row(table)
-
-    focus_badge = " [Active] " if is_focused else " "
-    title_markup = f" [1: Console]  [2: Artifact]  [3: Tester]  [bold cyan][4: PKB][/]  [5: Compare]{focus_badge}"
 
     return Panel(
         content_grid,

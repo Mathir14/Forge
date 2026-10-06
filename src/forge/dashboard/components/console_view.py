@@ -5,6 +5,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from forge.dashboard.state import DashboardState
+from forge.dashboard.components.navigation import render_tab_navigation
 
 
 def render_console_view(state: DashboardState, max_lines: int = 35) -> Panel:
@@ -51,8 +52,7 @@ def render_console_view(state: DashboardState, max_lines: int = 35) -> Panel:
                 text.append(line + "\n")
         body = text
 
-    focus_badge = " [Active] " if is_focused else " "
-    title_markup = f" [bold cyan][1: Console][/]  [2: Artifact]  [3: Tester]  [4: PKB]  [5: Compare]{focus_badge}"
+    title_markup = render_tab_navigation(state)
 
     return Panel(
         body,

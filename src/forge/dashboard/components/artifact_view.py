@@ -8,26 +8,24 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from forge.dashboard.state import DashboardState
+from forge.dashboard.components.navigation import render_tab_navigation
 
 
 def render_artifact_view(state: DashboardState, max_lines: int = 40) -> Panel:
     """Render the central artifact viewport (Human Report or Machine Report)."""
+    title_markup = render_tab_navigation(state)
     stage = state.current_stage
     if not stage:
         return Panel(
             Text("No stage selected.", style="dim italic"),
-            title=" Deliverable ",
+            title=title_markup,
+            title_align="left",
             border_style="dim",
+            style="white",
         )
 
     is_focused = (state.focused_pane == "content")
     border_color = "cyan" if is_focused else "dim"
-
-    # Header tab indicators
-    tab_human = "[bold cyan][H: Human][/]" if state.active_content_tab == "human" else "[dim]H: Human[/]"
-    tab_machine = "[bold cyan][M: Machine][/]" if state.active_content_tab == "machine" else "[dim]M: Machine[/]"
-    focus_badge = " [Active] " if is_focused else " "
-    title_markup = f" [1: Console]  [bold cyan][2: Artifact][/] ({tab_human} {tab_machine})  [3: Tester]  [4: PKB]  [5: Compare]{focus_badge}"
 
     if state.active_content_tab == "human":
         body = _render_human_report(stage, state.scroll_offset, max_lines)
@@ -41,6 +39,7 @@ def render_artifact_view(state: DashboardState, max_lines: int = 40) -> Panel:
         border_style=border_color,
         style="white",
     )
+
 
 
 def _render_human_report(stage, scroll_offset: int, max_lines: int) -> RenderableType:

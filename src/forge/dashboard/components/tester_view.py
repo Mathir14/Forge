@@ -8,12 +8,14 @@ from rich.table import Table
 from rich.text import Text
 from rich.syntax import Syntax
 from forge.dashboard.state import DashboardState
+from forge.dashboard.components.navigation import render_tab_navigation
 
 
 def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
     """Render the test execution matrix, behavioral evidence, and failure inspector."""
     is_focused = (state.focused_pane == "content")
     border_color = "cyan" if is_focused else "dim"
+    title_markup = render_tab_navigation(state)
 
     # Find tester stage
     tester_stage = state.run.get_stage("tester") or state.run.get_stage("04_tester")
@@ -31,11 +33,12 @@ def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
         )
         return Panel(
             body,
-            title=" [3: Tester & Evidence] ",
+            title=title_markup,
             title_align="left",
             border_style=border_color,
             style="white",
         )
+
 
     # Parse test matrix and journeys from tester metadata and markdown
     summary, journeys, failure_details = _extract_tester_data(tester_stage)
@@ -94,9 +97,6 @@ def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
     if failure_details:
         content_grid.add_row(Text("\nFailure Inspector & Evidence:", style="bold red"))
         content_grid.add_row(Text(failure_details[:1000], style="dim red"))
-
-    focus_badge = " [Active] " if is_focused else " "
-    title_markup = f" [1: Console]  [2: Artifact]  [bold cyan][3: Tester][/]  [4: PKB]  [5: Compare]{focus_badge}"
 
     return Panel(
         content_grid,

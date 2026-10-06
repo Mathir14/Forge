@@ -19,15 +19,46 @@ class DashboardState:
     pkb_status_filter: Optional[str] = None
     compare_run_id: Optional[str] = None
     compare_run_model: Optional[RunModel] = None
+    terminal_status: Optional[str] = None
+    terminal_stage: Optional[str] = None
+    terminal_reason: Optional[str] = None
+    user_has_selected_stage: bool = False
+    project_root: Optional[Any] = None
+
+    def __post_init__(self) -> None:
+        if not self.user_has_selected_stage:
+            if self.run.active_stage_name:
+                self.follow_active_stage(self.run.active_stage_name)
+            else:
+                for idx, s in enumerate(self.run.stages):
+                    if s.status in ("RUNNING", "IN_PROGRESS"):
+                        self.selected_stage_index = idx
+                        break
+
+    def follow_active_stage(self, stage_name: Optional[str] = None) -> None:
+        """Update selected_stage_index to follow active stage unless user manually navigated."""
+        if self.user_has_selected_stage:
+            return
+        target = (stage_name or self.run.active_stage_name or "").lower().strip()
+        if not target:
+            return
+        for idx, s in enumerate(self.run.stages):
+            if s.stage_name.lower() == target or s.role_name.lower() == target:
+                self.selected_stage_index = idx
+                self.scroll_offset = 0
+                break
 
     @property
     def current_stage(self) -> Optional[StageModel]:
         if not self.run.stages:
             return None
+        if not self.user_has_selected_stage and self.run.active_stage_name:
+            self.follow_active_stage(self.run.active_stage_name)
         idx = max(0, min(self.selected_stage_index, len(self.run.stages) - 1))
         return self.run.stages[idx]
 
     def select_next_stage(self) -> None:
+        self.user_has_selected_stage = True
         if not self.run.stages:
             return
         if self.selected_stage_index < len(self.run.stages) - 1:
@@ -35,6 +66,7 @@ class DashboardState:
             self.scroll_offset = 0
 
     def select_prev_stage(self) -> None:
+        self.user_has_selected_stage = True
         if not self.run.stages:
             return
         if self.selected_stage_index > 0:
@@ -77,3 +109,22 @@ class DashboardState:
 
     def page_down(self, page_size: int = 15, max_lines: int = 1000) -> None:
         self.scroll_down(lines=page_size, max_lines=max_lines)
+
+    def get_run_summary(self) -> Any:
+        """Return the canonical RunSummary, ensuring terminal status and reason are synchronized."""
+        from forge.core.summary import RunSummary
+        if getattr(self.run, "summary", None) is not None:
+            summary = self.run.summary
+        else:
+            summary = RunSummary(run_id=self.run.run_id)
+            self.run.summary = summary
+
+        if self.terminal_status:
+            summary.final_status = self.terminal_status
+        elif self.run.status and self.run.status not in ("PENDING", "UNKNOWN", "IN_PROGRESS", "RUNNING"):
+            summary.final_status = self.run.status
+
+        if self.terminal_reason:
+            summary.reason = self.terminal_reason
+
+        return summary

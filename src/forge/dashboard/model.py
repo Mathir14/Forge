@@ -5,12 +5,13 @@ Provides a clean abstraction between raw disk artifacts / AgentEvents and the UI
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Set
 import json
 import re
 
 from forge.protocol.parser import MachineReportParser
 from forge.core.events import AgentEvent, AgentEventType
+from forge.stages.definition import StageOrder
 
 
 @dataclass
@@ -84,15 +85,23 @@ class RunModel:
     console_logs: List[str] = field(default_factory=list)
     active_stage_name: Optional[str] = None
     stage_start_times: Dict[str, float] = field(default_factory=dict)
+    summary: Optional[Any] = None
 
     @property
     def stage_names(self) -> List[str]:
         return [s.stage_name for s in self.stages]
 
-    def get_stage(self, name_or_role: str) -> Optional[StageModel]:
+    def get_stage(self, name_or_role: str, sequence_number: Optional[int] = None) -> Optional[StageModel]:
         target = name_or_role.lower().strip()
+        if sequence_number is not None:
+            for s in self.stages:
+                if s.sequence_number == sequence_number:
+                    return s
         for s in self.stages:
-            if s.stage_name.lower() == target or s.role_name.lower() == target:
+            if s.stage_name.lower() == target:
+                return s
+        for s in self.stages:
+            if s.role_name.lower() == target:
                 return s
         return None
 
@@ -106,20 +115,33 @@ class RunModel:
         # 1. Lifecycle: stage_start
         if lifecycle == "stage_start":
             s_name = ev_data.get("stage_name") or ev_data.get("role_name")
+            seq = ev_data.get("sequence_number")
             if s_name:
-                stage = self.get_stage(s_name)
+                stage = self.get_stage(s_name, sequence_number=seq)
                 if not stage:
-                    seq = ev_data.get("sequence_number", len(self.stages) + 1)
+                    seq_val = seq if seq is not None else len(self.stages) + 1
                     stage = StageModel(
                         stage_name=s_name,
                         role_name=ev_data.get("role_name", s_name),
-                        sequence_number=seq,
+                        sequence_number=seq_val,
                         status="RUNNING",
                     )
                     self.stages.append(stage)
                     self.stages.sort(key=lambda s: (s.sequence_number, s.stage_name))
                 else:
-                    if stage.status in ("APPROVED", "FAILED", "CHANGES_REQUIRED", "BLOCKED", "REJECTED") or stage.duration_seconds > 0:
+                    if stage.status in (
+                        "APPROVED",
+                        "FAILED",
+                        "CHANGES_REQUIRED",
+                        "BLOCKED",
+                        "REJECTED",
+                        "CRITIQUE_COMPLETE",
+                        "READY",
+                        "PASSED",
+                        "COMPLETED",
+                        "SUCCESS",
+                        "DONE",
+                    ) or stage.duration_seconds > 0:
                         att_num = len(stage.attempts) + 1
                         stage.attempts.append(StageAttemptModel(
                             attempt_number=att_num,
@@ -143,11 +165,41 @@ class RunModel:
                 self._add_log(f"▶ [{stage.stage_name}]{prefix} Stage execution started")
             return
 
+        # 1b. Lifecycle: stage_record_update
+        if lifecycle == "stage_record_update":
+            if self.summary is not None:
+                self.summary.record_stage(
+                    name=ev_data.get("name", ""),
+                    status=ev_data.get("status", "—"),
+                    execution_state=ev_data.get("execution_state", "COMPLETED"),
+                    duration_seconds=float(ev_data.get("duration_seconds", 0.0)),
+                    role_name=ev_data.get("role_name"),
+                    sequence_number=ev_data.get("sequence_number"),
+                )
+            return
+
+        # 1c. Lifecycle: stage_skipped
+        if lifecycle == "stage_skipped":
+            s_name = ev_data.get("stage_name") or ev_data.get("role_name") or ev_data.get("display_name")
+            sk_status = ev_data.get("status", "APPROVED")
+            disp_name = ev_data.get("display_name") or (s_name.capitalize() if s_name else "Stage")
+            if self.summary is not None and s_name:
+                self.summary.record_stage(
+                    name=disp_name,
+                    status=str(sk_status).upper(),
+                    execution_state="SKIPPED",
+                    role_name=ev_data.get("role_name"),
+                    sequence_number=ev_data.get("sequence_number"),
+                )
+            self._add_log(f"⏭ [{disp_name}] Skipped (already completed with status '{sk_status}')")
+            return
+
         # 2. Lifecycle: stage_finish
         if lifecycle == "stage_finish":
             s_name = ev_data.get("stage_name") or ev_data.get("role_name")
+            seq = ev_data.get("sequence_number")
             if s_name:
-                stage = self.get_stage(s_name)
+                stage = self.get_stage(s_name, sequence_number=seq)
                 if stage:
                     fin_status = ev_data.get("status")
                     if fin_status:
@@ -155,19 +207,38 @@ class RunModel:
                     dur = ev_data.get("duration_seconds")
                     if dur is not None:
                         stage.duration_seconds = float(dur)
+                    if self.summary is not None:
+                        clean_disp = stage.stage_name
+                        m = re.match(r"^(\d+)_([a-zA-Z0-9_\-]+)$", stage.stage_name)
+                        if m:
+                            clean_disp = m.group(2).capitalize()
+                        elif stage.role_name:
+                            clean_disp = stage.role_name.capitalize()
+                        if clean_disp.lower() == "critic":
+                            clean_disp = "Critic"
+                        self.summary.record_stage(
+                            name=clean_disp,
+                            status=stage.status,
+                            execution_state="COMPLETED",
+                            duration_seconds=stage.duration_seconds,
+                            role_name=stage.role_name,
+                            sequence_number=stage.sequence_number,
+                        )
                     self._add_log(f"✓ [{stage.stage_name}] Finished with status: {stage.status} ({stage.duration_seconds:.1f}s)")
             return
 
         # 3. Locate active stage for stream events
         target_stage = None
         s_name = ev_data.get("stage_name") or ev_data.get("role_name") or self.active_stage_name
+        seq = ev_data.get("sequence_number")
         if s_name:
-            target_stage = self.get_stage(s_name)
+            target_stage = self.get_stage(s_name, sequence_number=seq)
         if not target_stage and self.stages:
             for s in self.stages:
                 if s.status == "RUNNING":
                     target_stage = s
                     break
+
 
         # 4. Stream Event: CHUNK
         if event.event_type == AgentEventType.CHUNK:
@@ -331,60 +402,143 @@ class RunModel:
             else:
                 base_stages[key] = files
 
-        # Also populate canonical stage slots if they don't exist yet on disk
-        # (Allows displaying pending stages in sequence)
-        sorted_keys = sorted(base_stages.keys())
+        # Determine whether to reconcile the full canonical autonomous pipeline
+        has_pre_critic = "00_critic" in base_stages or any(k.startswith("00_") for k in base_stages)
+        is_only_critic = has_pre_critic and all(k == "00_critic" or k.startswith("00_") for k in base_stages)
+        should_reconcile = (
+            not base_stages
+            or is_only_critic
+            or is_active
+            or status in ("PENDING", "RUNNING", "IN_PROGRESS", "UNKNOWN")
+            or meta_dict.get("reconcile_canonical", False)
+        )
 
-        # If no stage files found on disk, seed with default canonical stages
-        if not sorted_keys:
-            default_stages = [
-                ("01_architect", "architect", 1),
-                ("02_planner", "planner", 2),
-                ("03_executor", "executor", 3),
-                ("04_tester", "tester", 4),
-                ("05_reviewer", "reviewer", 5),
-                ("06_critic", "critic", 6),
-            ]
-            stages = [
-                StageModel(
-                    stage_name=name,
-                    role_name=role,
-                    sequence_number=seq,
-                    status="PENDING",
+        no_critic = meta_dict.get("no_critic", False)
+        if not no_critic and isinstance(meta_dict.get("config"), dict):
+            no_critic = meta_dict["config"].get("execution", {}).get("no_critic", False)
+
+        if should_reconcile:
+            canonical_stage_defs = StageOrder.full_autonomous_stages(no_critic=no_critic, has_pre_critic=has_pre_critic)
+
+            stages: List[StageModel] = []
+            total_duration = 0.0
+            handled_keys: Set[str] = set()
+
+            for c_def in canonical_stage_defs:
+                target_key = c_def.artifact_prefix
+                if target_key in base_stages:
+                    files = base_stages[target_key]
+                    stage = cls._parse_stage_files(target_key, files, adapters_used)
+                    if target_key in attempts_map:
+                        stage.attempts = sorted(attempts_map[target_key], key=lambda a: a.attempt_number)
+                    handled_keys.add(target_key)
+                else:
+                    alt_key = None
+                    for k in base_stages:
+                        if k not in handled_keys:
+                            k_lower = k.lower()
+                            if k_lower == target_key.lower() or k_lower == c_def.name.lower():
+                                alt_key = k
+                                break
+                    if alt_key:
+                        files = base_stages[alt_key]
+                        stage = cls._parse_stage_files(alt_key, files, adapters_used)
+                        stage.sequence_number = c_def.sequence_number
+                        if alt_key in attempts_map:
+                            stage.attempts = sorted(attempts_map[alt_key], key=lambda a: a.attempt_number)
+                        handled_keys.add(alt_key)
+                    else:
+                        stage = StageModel(
+                            stage_name=target_key,
+                            role_name=c_def.name,
+                            sequence_number=c_def.sequence_number,
+                            status="PENDING",
+                        )
+                stages.append(stage)
+                total_duration += stage.duration_seconds
+
+            # Also include any non-canonical or extra stages discovered on disk
+            for key in sorted(base_stages.keys()):
+                if key not in handled_keys:
+                    files = base_stages[key]
+                    stage = cls._parse_stage_files(key, files, adapters_used)
+                    if key in attempts_map:
+                        stage.attempts = sorted(attempts_map[key], key=lambda a: a.attempt_number)
+                    stages.append(stage)
+                    total_duration += stage.duration_seconds
+
+            stages.sort(key=lambda s: (s.sequence_number, s.stage_name))
+            final_status = status if (status != "UNKNOWN" or base_stages) else "PENDING"
+        else:
+            stages = []
+            total_duration = 0.0
+            for key in sorted(base_stages.keys()):
+                files = base_stages[key]
+                stage = cls._parse_stage_files(key, files, adapters_used)
+                if key in attempts_map:
+                    stage.attempts = sorted(attempts_map[key], key=lambda a: a.attempt_number)
+                stages.append(stage)
+                total_duration += stage.duration_seconds
+            stages.sort(key=lambda s: (s.sequence_number, s.stage_name))
+            final_status = status
+
+        from forge.core.summary import RunSummary
+        summary = None
+        if "metadata" in meta_dict and isinstance(meta_dict["metadata"], dict) and "summary" in meta_dict["metadata"]:
+            try:
+                summary = RunSummary.from_dict(meta_dict["metadata"]["summary"])
+            except Exception:
+                pass
+        elif "summary" in meta_dict and isinstance(meta_dict["summary"], dict):
+            try:
+                summary = RunSummary.from_dict(meta_dict["summary"])
+            except Exception:
+                pass
+
+        if summary is None:
+            summary = RunSummary(run_id=run_id, final_status=final_status)
+            for s in stages:
+                clean_name = s.stage_name
+                m = re.match(r"^(\d+)_([a-zA-Z0-9_\-]+)$", s.stage_name)
+                if m:
+                    clean_name = m.group(2).capitalize()
+                elif s.role_name:
+                    clean_name = s.role_name.capitalize()
+                if clean_name.lower() == "critic":
+                    clean_name = "Critic"
+
+                if s.duration_seconds > 0 or s.status not in ("PENDING", "UNKNOWN") or s.machine_report or s.attempts:
+                    summary.record_stage(
+                        name=clean_name,
+                        status=s.display_status,
+                        execution_state="COMPLETED",
+                        duration_seconds=s.duration_seconds,
+                        role_name=s.role_name,
+                        sequence_number=s.sequence_number,
+                    )
+                else:
+                    summary.record_stage(
+                        name=clean_name,
+                        status="—",
+                        execution_state="NOT REACHED",
+                        duration_seconds=0.0,
+                        role_name=s.role_name,
+                        sequence_number=s.sequence_number,
+                    )
+
+            if meta_dict.get("auto_commit") or (isinstance(meta_dict.get("config"), dict) and meta_dict["config"].get("execution", {}).get("auto_commit")):
+                summary.record_stage(
+                    name="Commit",
+                    status="—",
+                    execution_state="NOT REACHED",
+                    role_name="commit",
+                    sequence_number=99,
                 )
-                for name, role, seq in default_stages
-            ]
-            return cls(
-                run_id=run_id,
-                task=task,
-                status=status if status != "UNKNOWN" else "PENDING",
-                created_at=created_at,
-                run_dir=run_dir,
-                stages=stages,
-                adapters_used=adapters_used,
-                total_duration_seconds=0.0,
-                metadata=meta_dict,
-                is_active=is_active,
-            )
-
-        stages: List[StageModel] = []
-        total_duration = 0.0
-
-        for key in sorted_keys:
-            files = base_stages[key]
-            stage = cls._parse_stage_files(key, files, adapters_used)
-            if key in attempts_map:
-                stage.attempts = sorted(attempts_map[key], key=lambda a: a.attempt_number)
-            stages.append(stage)
-            total_duration += stage.duration_seconds
-
-        # Sort stages by sequence_number, then stage_name
-        stages.sort(key=lambda s: (s.sequence_number, s.stage_name))
 
         return cls(
             run_id=run_id,
             task=task,
-            status=status,
+            status=final_status,
             created_at=created_at,
             run_dir=run_dir,
             stages=stages,
@@ -392,7 +546,10 @@ class RunModel:
             total_duration_seconds=total_duration,
             metadata=meta_dict,
             is_active=is_active,
+            summary=summary,
         )
+
+
 
     @classmethod
     def _parse_stage_files(

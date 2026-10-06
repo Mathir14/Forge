@@ -13,7 +13,7 @@ from forge.core.git import GitService, GitBaseline
 from forge.core.role import Role
 from forge.core.run import Run
 from forge.core.context import Context
-from forge.stages.result import StageResult
+from forge.stages.result import StageResult, AutonomousHalt
 from forge.adapters.base import BaseAdapter
 from forge.adapters.antigravity import AntigravityAdapter
 from forge.adapters.registry import AdapterRegistry
@@ -200,12 +200,22 @@ def execute_stage(
         sequence_number=stage_def.sequence_number,
         phase=stage_def.phase,
     )
+    abort_ev = getattr(context, "abort_event", None)
+    if abort_ev is not None and abort_ev.is_set():
+        raise AutonomousHalt(
+            status="CANCELLED",
+            exit_code=130,
+            reason="Autonomous pipeline cancelled by user.",
+            stage_name=stage_def.display_name,
+        )
+
     stage = Stage(
         role=role,
         adapter=adapter,
         run_manager=run_mgr,
         timeout=stage_cfg.timeout,
         event_listener=getattr(context, "event_listener", None),
+        abort_event=abort_ev,
     )
 
     if getattr(context, "event_listener", None) is not None:
@@ -230,6 +240,15 @@ def execute_stage(
     click.echo(f"\n{prefix_str}▶ Executing Stage: {stage_def.artifact_prefix.upper()} ({adapter.name})...")
     result = stage.run(context)
 
+    if (abort_ev is not None and abort_ev.is_set()) or (result.response and result.response.exit_code == 130):
+        raise AutonomousHalt(
+            status="CANCELLED",
+            exit_code=130,
+            reason="Autonomous pipeline cancelled by user.",
+            stage_name=stage_def.display_name,
+            stage_result=result,
+        )
+
     if getattr(context, "event_listener", None) is not None:
         try:
             from forge.core.events import AgentEvent, AgentEventType
@@ -249,6 +268,74 @@ def execute_stage(
             pass
 
     return result
+
+
+def _record_stage_transition(
+    run: Any,
+    name: str,
+    status: str,
+    execution_state: str,
+    duration: float = 0.0,
+    role_name: Optional[str] = None,
+    seq: Optional[int] = None,
+    reason: Optional[str] = None,
+    context: Optional[Any] = None,
+) -> None:
+    """Record a stage transition in the run's canonical RunSummary model."""
+    from forge.core.summary import RunSummary
+    summary = run.summary or RunSummary(run_id=run.run_id)
+    summary.record_stage(
+        name=name,
+        status=status,
+        execution_state=execution_state,
+        duration_seconds=duration,
+        role_name=role_name,
+        sequence_number=seq,
+        reason=reason,
+    )
+    run.summary = summary
+    run.save_metadata()
+
+    if context and getattr(context, "event_listener", None) is not None:
+        try:
+            from forge.core.events import AgentEvent, AgentEventType
+            context.event_listener(AgentEvent(
+                event_type=AgentEventType.HEARTBEAT,
+                timestamp=time.time(),
+                data={
+                    "lifecycle": "stage_record_update" if execution_state != "SKIPPED" else "stage_skipped",
+                    "name": name,
+                    "stage_name": name,
+                    "display_name": name,
+                    "status": status,
+                    "execution_state": execution_state,
+                    "duration_seconds": duration,
+                    "role_name": role_name,
+                    "sequence_number": seq,
+                },
+            ))
+        except Exception:
+            pass
+
+
+def _record_final_halt(run: Any, status: str, reason: Optional[str]) -> None:
+    """Record terminal failure or halt state in run's RunSummary."""
+    from forge.core.summary import RunSummary
+    summary = run.summary or RunSummary(run_id=run.run_id)
+    summary.final_status = status
+    summary.reason = reason
+    run.summary = summary
+    run.save_metadata()
+
+
+def _record_final_success(run: Any) -> None:
+    """Record terminal approved success state in run's RunSummary."""
+    from forge.core.summary import RunSummary
+    summary = run.summary or RunSummary(run_id=run.run_id)
+    summary.final_status = "APPROVED"
+    summary.reason = None
+    run.summary = summary
+    run.save_metadata()
 
 
 def _run_stage(
@@ -332,14 +419,30 @@ def _run_stage(
 
             result = stage.run(context)
             _print_stage_summary(result, run.run_id, stage_name, role.sequence_number)
+            d_name = "Critic" if stage_name.lower() == "critic" else stage_name.capitalize()
+            _record_stage_transition(
+                run,
+                d_name,
+                result.status,
+                "COMPLETED",
+                duration=result.duration_seconds,
+                role_name=stage_name,
+                seq=role.sequence_number,
+                context=context,
+            )
 
             if not result.success or not result.machine_report.is_valid or result.status in ("REJECTED", "BLOCKED", "FAILED", "UNKNOWN", "CHANGES_REQUIRED"):
                 click.secho(f"\n⚠️ Stage '{stage_name}' finished with non-success status '{result.status}'.", fg="red")
                 run.status = result.status if result.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED") else "FAILED"
+                reason = result.machine_report.reason or ("; ".join(result.machine_report.validation_errors) if result.machine_report.validation_errors else None) or f"Stage '{stage_name}' finished with status '{result.status}'"
+                _record_final_halt(run, run.status, reason)
                 run.save_metadata()
                 sys.exit(1)
 
             run.status = result.status
+            if run.summary:
+                run.summary.final_status = result.status
+                run.summary.reason = None
             run.save_metadata()
     except RunOwnershipError as e:
         click.echo(e.format_diagnostic(), err=True)
@@ -708,7 +811,7 @@ def dashboard_cmd(run_id: Optional[str], render_once: bool):
         target_dir = latest_run.run_dir
 
     from forge.dashboard.app import DashboardApp
-    app = DashboardApp(target_dir)
+    app = DashboardApp(target_dir, project_root=root)
 
     if render_once:
         click.echo(app.render_once(), nl=False)
@@ -856,24 +959,62 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
 
             stages_to_run = StageOrder.standard_pipeline_stages(no_critic=no_critic)
 
+            planned_stage_defs = []
+            for s in stages_to_run:
+                d_name = "Critic" if s.name.lower() == "critic" else s.name.capitalize()
+                planned_stage_defs.append((d_name, s.name, s.sequence_number))
+            if auto_commit or config.execution.auto_commit:
+                planned_stage_defs.append(("Commit", "commit", 99))
+
+            from forge.core.summary import RunSummary
+            if run.summary is None:
+                sum_obj = RunSummary(run_id=run.run_id)
+                for d_name, r_name, seq in planned_stage_defs:
+                    sum_obj.record_stage(
+                        name=d_name,
+                        status="—",
+                        execution_state="NOT REACHED",
+                        role_name=r_name,
+                        sequence_number=seq,
+                    )
+                run.summary = sum_obj
+                run.save_metadata()
+            else:
+                sum_obj = run.summary
+                for d_name, r_name, seq in planned_stage_defs:
+                    if not sum_obj.get_stage(d_name):
+                        sum_obj.record_stage(
+                            name=d_name,
+                            status="—",
+                            execution_state="NOT REACHED",
+                            role_name=r_name,
+                            sequence_number=seq,
+                        )
+                run.summary = sum_obj
+                run.save_metadata()
+
             click.echo(f"\n🚀 [Run: {run.run_id}] Starting Standard Forge Pipeline:")
             click.secho(f"   \"{run.task}\"\n", bold=True)
 
             for stage_def in stages_to_run:
+                d_name = "Critic" if stage_def.name.lower() == "critic" else stage_def.name.capitalize()
                 # If resuming an existing run for the same task, skip stages that already completed successfully
                 if is_resumed_same_task:
                     completed, prior_status = is_stage_completed(run, stage_def, run_mgr)
                     if completed:
                         click.echo(f"  ⏭ Skipping Stage: {stage_def.name.capitalize()} (already completed with status '{prior_status}')")
+                        _record_stage_transition(run, d_name, prior_status or "APPROVED", "SKIPPED", role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
                         continue
 
                 result = execute_stage(stage_def, context, run_mgr)
+                _record_stage_transition(run, d_name, result.status, "COMPLETED", duration=result.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
 
                 click.echo(f"  ✓ {stage_def.name.capitalize()} completed | Status: {result.status} ({result.duration_seconds:.1f}s)")
 
                 if not result.success or not result.machine_report.is_valid or result.status in ("REJECTED", "BLOCKED", "FAILED", "UNKNOWN", "CHANGES_REQUIRED"):
                     click.secho(f"\n⚠️ Pipeline halted at stage '{stage_def.name}' due to status '{result.status}' (Valid: {result.machine_report.is_valid}).", fg="red")
                     run.status = result.status if result.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED") else "FAILED"
+                    _record_final_halt(run, run.status, f"Pipeline halted at stage '{stage_def.name}' due to status '{result.status}'")
                     run.save_metadata()
                     sys.exit(1)
 
@@ -882,10 +1023,12 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
                     if not click.confirm(f"\nProceed to next stage ({next_stage_def.name.upper()})?", default=True):
                         click.echo("Pipeline paused by user.")
                         run.status = f"PAUSED_AFTER_{stage_def.name.upper()}"
+                        _record_final_halt(run, run.status, "Pipeline paused by user.")
                         run.save_metadata()
                         return
 
             run.status = "APPROVED"
+            _record_final_success(run)
             run.save_metadata()
 
             # Auto-commit if approved and requested
@@ -895,8 +1038,10 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
                 if git.is_git_repo():
                     if auto_commit_run(git=git, task_summary=task_summary, baseline=git_baseline, run=run):
                         click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'", fg="green")
+                        _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context)
                     else:
                         click.secho("  ⚠️ Auto-commit skipped: no changes or git commit error.", fg="yellow")
+                        _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
 
             # Reconcile PKB knowledge proposals
             reconcile_run_knowledge(root, run.run_id, run.run_dir)
@@ -1040,26 +1185,92 @@ def auto_pipeline(
                 nonlocal task
                 total_stages = StageOrder.total_stages_count(no_critic=no_critic)
 
+                planned_stage_names = []
+                for s_def in StageOrder.pre_loop_stages():
+                    planned_stage_names.append((s_def.display_name, s_def.name, s_def.sequence_number))
+                prod_def = StageOrder.change_producer()
+                planned_stage_names.append((prod_def.display_name, prod_def.name, prod_def.sequence_number))
+                for v_def in StageOrder.verification_stages():
+                    planned_stage_names.append((v_def.display_name, v_def.name, v_def.sequence_number))
+                for c_def in StageOrder.post_loop_stages(no_critic=no_critic):
+                    planned_stage_names.append(("Critic", c_def.name, c_def.sequence_number))
+                if auto_commit or config.execution.auto_commit:
+                    planned_stage_names.append(("Commit", "commit", 99))
+
+                from forge.core.summary import RunSummary
+                if run.summary is None:
+                    sum_obj = RunSummary(run_id=run.run_id)
+                    for d_name, r_name, seq in planned_stage_names:
+                        sum_obj.record_stage(
+                            name=d_name,
+                            status="—",
+                            execution_state="NOT REACHED",
+                            role_name=r_name,
+                            sequence_number=seq,
+                        )
+                    run.summary = sum_obj
+                    run.save_metadata()
+                else:
+                    sum_obj = run.summary
+                    for d_name, r_name, seq in planned_stage_names:
+                        if not sum_obj.get_stage(d_name):
+                            sum_obj.record_stage(
+                                name=d_name,
+                                status="—",
+                                execution_state="NOT REACHED",
+                                role_name=r_name,
+                                sequence_number=seq,
+                            )
+                    run.summary = sum_obj
+                    run.save_metadata()
+
+                def _check_abort() -> None:
+                    abort_ev = getattr(context, "abort_event", None)
+                    if abort_ev is not None and abort_ev.is_set():
+                        run.status = "CANCELLED"
+                        _record_final_halt(run, "CANCELLED", "Autonomous pipeline cancelled by user.")
+                        run.save_metadata()
+                        raise AutonomousHalt(
+                            status="CANCELLED",
+                            exit_code=130,
+                            reason="Autonomous pipeline cancelled by user.",
+                            stage_name="Pipeline",
+                        )
+
+                _check_abort()
+
                 click.echo(f"\n⚡ [Run: {run.run_id}] Starting Fully Autonomous Forge Loop:")
                 click.secho(f"   \"{task_summary}...\"\n", bold=True)
 
                 # Pre-loop stages: Architect, Planner
                 for stage_def in StageOrder.pre_loop_stages():
+                    _check_abort()
                     stage_done = False
                     if is_resumed_same_task:
                         stage_done, stage_status = is_stage_completed(run, stage_def, run_mgr)
                         if stage_done:
                             click.echo(f"  ⏭ Skipping {stage_def.display_name} (already completed with status '{stage_status}')")
+                            _record_stage_transition(run, stage_def.display_name, stage_status or "APPROVED", "SKIPPED", role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
                             continue
 
                     stage_res = execute_stage(stage_def, context, run_mgr, banner_prefix=f"[{stage_def.sequence_number}/{total_stages}]")
                     click.echo(f"  ✓ {stage_def.display_name} completed | Status: {stage_res.status} ({stage_res.duration_seconds:.1f}s)")
+                    _record_stage_transition(run, stage_def.display_name, stage_res.status, "COMPLETED", duration=stage_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
+                    _check_abort()
 
                     if not stage_res.success or not stage_res.machine_report.is_valid or stage_res.status in ("REJECTED", "BLOCKED", "FAILED", "UNKNOWN", "CHANGES_REQUIRED"):
                         click.secho(f"\n⚠️ Autonomous loop halted: {stage_def.display_name} finished with status '{stage_res.status}'.", fg="red")
                         run.status = stage_res.status if (stage_res.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED")) else "FAILED"
+                        reason = stage_res.machine_report.reason or ("; ".join(stage_res.machine_report.validation_errors) if stage_res.machine_report.validation_errors else None) or f"{stage_def.display_name} finished with status '{stage_res.status}'"
+                        _record_final_halt(run, run.status, reason)
                         run.save_metadata()
-                        sys.exit(1)
+                        raise AutonomousHalt(
+                            status=run.status,
+                            exit_code=1,
+                            reason=reason,
+                            stage_name=stage_def.display_name,
+                            stage_result=stage_res,
+                        )
 
                 # Implementation / Verification loop: Change Producer -> Verification Gate(s)
                 producer_def = StageOrder.change_producer()
@@ -1078,6 +1289,11 @@ def auto_pipeline(
                     if all_verifiers_approved:
                         verifiers_label = " & ".join(v.display_name for v in verifier_defs)
                         click.echo(f"  ⏭ Skipping {producer_def.display_name} & {verifiers_label} (already approved)")
+                        p_done, p_status = is_stage_completed(run, producer_def, run_mgr)
+                        _record_stage_transition(run, producer_def.display_name, p_status or "COMPLETE", "SKIPPED", role_name=producer_def.name, seq=producer_def.sequence_number, context=context)
+                        for v_def in verifier_defs:
+                            _, v_status = is_stage_completed(run, v_def, run_mgr)
+                            _record_stage_transition(run, v_def.display_name, v_status or "APPROVED", "SKIPPED", role_name=v_def.name, seq=v_def.sequence_number, context=context)
                         approved = True
 
                 if not approved:
@@ -1085,9 +1301,12 @@ def auto_pipeline(
                     for iteration in range(1, max_retries_val + 1):
                         iter_label = f" (Attempt {iteration}/{max_retries_val})" if max_retries_val > 1 else ""
 
+                        _check_abort()
                         # 1. Execute Change Producer (e.g. Executor)
                         producer_res = execute_stage(producer_def, context, run_mgr, banner_prefix=f"[{producer_def.sequence_number}/{total_stages}]{iter_label}")
                         click.echo(f"  ✓ {producer_def.display_name} finished | Status: {producer_res.status} ({producer_res.duration_seconds:.1f}s)")
+                        _record_stage_transition(run, producer_def.display_name, producer_res.status, "COMPLETED", duration=producer_res.duration_seconds, role_name=producer_def.name, seq=producer_def.sequence_number, context=context)
+                        _check_abort()
 
                         # Preserve historical attempt artifact
                         attempt_prod_md = run.run_dir / f"{producer_def.artifact_prefix}_attempt_{iteration}.md"
@@ -1100,8 +1319,16 @@ def auto_pipeline(
                             if producer_res.status == "BLOCKED":
                                 click.secho(f"\n⚠️ {producer_def.display_name} blocked: {producer_res.machine_report.reason or 'Requirements blocked'}.", fg="red")
                                 run.status = "BLOCKED"
+                                reason = producer_res.machine_report.reason or "Requirements blocked"
+                                _record_final_halt(run, run.status, reason)
                                 run.save_metadata()
-                                sys.exit(1)
+                                raise AutonomousHalt(
+                                    status="BLOCKED",
+                                    exit_code=1,
+                                    reason=reason,
+                                    stage_name=producer_def.display_name,
+                                    stage_result=producer_res,
+                                )
                             if iteration < max_retries_val:
                                 click.secho(f"\n🔄 {producer_def.display_name} failed with status '{producer_res.status}'. Retrying execution (iteration {iteration + 1})...", fg="yellow")
                                 context.repair_feedback = (
@@ -1114,16 +1341,27 @@ def auto_pipeline(
                             else:
                                 click.secho(f"\n⚠️ {producer_def.display_name} failed on final attempt with status '{producer_res.status}'.", fg="red")
                                 run.status = producer_res.status if producer_res.status != "UNKNOWN" else "FAILED"
+                                reason = producer_res.machine_report.reason or f"{producer_def.display_name} failed on final attempt"
+                                _record_final_halt(run, run.status, reason)
                                 run.save_metadata()
-                                sys.exit(1)
+                                raise AutonomousHalt(
+                                    status=run.status,
+                                    exit_code=1,
+                                    reason=reason,
+                                    stage_name=producer_def.display_name,
+                                    stage_result=producer_res,
+                                )
 
                         # 2. Execute Verification Gates sequentially (e.g. Tester, Reviewer)
                         all_verifiers_passed = True
 
                         for verifier_def in verifier_defs:
+                            _check_abort()
                             verifier_res = execute_stage(verifier_def, context, run_mgr, banner_prefix=f"[{verifier_def.sequence_number}/{total_stages}]{iter_label}")
                             latest_verifier_res = verifier_res
                             click.echo(f"  ✓ {verifier_def.display_name} finished | Status: {verifier_res.status} ({verifier_res.duration_seconds:.1f}s)")
+                            _record_stage_transition(run, verifier_def.display_name, verifier_res.status, "COMPLETED", duration=verifier_res.duration_seconds, role_name=verifier_def.name, seq=verifier_def.sequence_number, context=context)
+                            _check_abort()
 
                             # Preserve historical verifier artifact
                             attempt_v_md = run.run_dir / f"{verifier_def.artifact_prefix}_attempt_{iteration}.md"
@@ -1139,8 +1377,16 @@ def auto_pipeline(
                                 if verifier_res.status == "BLOCKED":
                                     click.secho(f"\n⚠️ {verifier_def.display_name} blocked: {verifier_res.machine_report.reason or 'Requirements blocked'}.", fg="red")
                                     run.status = "BLOCKED"
+                                    reason = verifier_res.machine_report.reason or "Requirements blocked"
+                                    _record_final_halt(run, run.status, reason)
                                     run.save_metadata()
-                                    sys.exit(1)
+                                    raise AutonomousHalt(
+                                        status="BLOCKED",
+                                        exit_code=1,
+                                        reason=reason,
+                                        stage_name=verifier_def.display_name,
+                                        stage_result=verifier_res,
+                                    )
 
                                 if iteration < max_retries_val:
                                     if verifier_res.status == "CHANGES_REQUIRED":
@@ -1150,7 +1396,7 @@ def auto_pipeline(
                                     issues_lines = []
                                     if verifier_res.machine_report.issues:
                                         for sev, iss_list in verifier_res.machine_report.issues.items():
-                                            for iss in iss_list:
+                                             for iss in iss_list:
                                                 if isinstance(iss, dict):
                                                     desc = iss.get("DESCRIPTION") or iss.get("description") or str(iss)
                                                     repro = iss.get("STEPS_TO_REPRODUCE") or iss.get("steps")
@@ -1194,29 +1440,50 @@ def auto_pipeline(
                     final_status = latest_verifier_res.status if (latest_verifier_res and latest_verifier_res.status != "UNKNOWN") else "FAILED"
                     run.task = task
                     run.status = final_status
+                    reason = (latest_verifier_res.machine_report.reason if latest_verifier_res else None) or f"Finished without approval (Status: {run.status})"
+                    _record_final_halt(run, final_status, reason)
                     run.save_metadata()
                     click.secho(f"\n⚠️ Autonomous Loop finished without approval for {run.run_id} (Status: {run.status}).", fg="red")
-                    sys.exit(1)
+                    raise AutonomousHalt(
+                        status=final_status,
+                        exit_code=1,
+                        reason=reason,
+                        stage_name=latest_verifier_res.role.name if latest_verifier_res else "Verification",
+                        stage_result=latest_verifier_res,
+                    )
 
                 # Post-loop stages (e.g. Stage 6: Closing Critic Audit)
                 for stage_def in StageOrder.post_loop_stages(no_critic=no_critic):
+                    _check_abort()
                     stage_done = False
+                    d_name = "Critic" if stage_def.name.lower() == "critic" else stage_def.display_name
                     if is_resumed_same_task:
                         stage_done, stage_status = is_stage_completed(run, stage_def, run_mgr)
                         if stage_done:
                             click.echo(f"  ⏭ Skipping {stage_def.display_name} (already completed with status '{stage_status}')")
+                            _record_stage_transition(run, d_name, stage_status or "APPROVED", "SKIPPED", role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
                             continue
 
                     critic_res = execute_stage(stage_def, context, run_mgr, banner_prefix=f"[{stage_def.sequence_number}/{total_stages}]")
                     click.echo(f"  ✓ {stage_def.display_name} audit completed | Status: {critic_res.status} ({critic_res.duration_seconds:.1f}s)")
+                    _record_stage_transition(run, d_name, critic_res.status, "COMPLETED", duration=critic_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
+                    _check_abort()
 
                     if not critic_res.success or not critic_res.machine_report.is_valid or critic_res.status in ("BLOCKED", "FAILED", "REJECTED", "UNKNOWN"):
                         audit_label = "Closing Critic" if stage_def.is_closing_critic else stage_def.display_name
                         click.secho(f"\n⚠️ {audit_label} audit reported non-success status '{critic_res.status}'.", fg="red")
                         run.task = task
                         run.status = critic_res.status if (critic_res.status in ("BLOCKED", "REJECTED", "CHANGES_REQUIRED")) else "FAILED"
+                        reason = critic_res.machine_report.reason or ("; ".join(critic_res.machine_report.validation_errors) if critic_res.machine_report.validation_errors else None) or f"{audit_label} audit failed with status '{critic_res.status}'"
+                        _record_final_halt(run, run.status, reason)
                         run.save_metadata()
-                        sys.exit(1)
+                        raise AutonomousHalt(
+                            status=run.status,
+                            exit_code=1,
+                            reason=reason,
+                            stage_name=audit_label,
+                            stage_result=critic_res,
+                        )
 
                 # Auto-commit if approved and requested (only AFTER Critic audit)
                 if approved and (auto_commit or config.execution.auto_commit):
@@ -1224,11 +1491,14 @@ def auto_pipeline(
                     if git.is_git_repo():
                         if auto_commit_run(git=git, task_summary=task_summary, baseline=git_baseline, run=run):
                             click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'", fg="green")
+                            _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context)
                         else:
                             click.secho("  ⚠️ Auto-commit skipped: no changes or git commit error.", fg="yellow")
+                            _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
 
                 run.task = task
                 run.status = "APPROVED"
+                _record_final_success(run)
                 run.save_metadata()
 
                 # Reconcile PKB knowledge proposals
@@ -1238,7 +1508,10 @@ def auto_pipeline(
                 click.echo(f"   Artifacts saved in .forge/runs/{run.run_id}/\n")
 
             if not use_dashboard:
-                _run_autonomous_loop()
+                try:
+                    _run_autonomous_loop()
+                except AutonomousHalt as halt:
+                    sys.exit(halt.exit_code)
             else:
                 import queue
                 import threading
@@ -1248,6 +1521,7 @@ def auto_pipeline(
                 abort_event = threading.Event()
                 pipeline_exit_code = [0]
                 pipeline_exception = []
+                halt_holder: List[Optional[AutonomousHalt]] = [None]
 
                 def event_listener(event):
                     try:
@@ -1256,10 +1530,14 @@ def auto_pipeline(
                         pass
 
                 context.event_listener = event_listener
+                context.abort_event = abort_event
 
                 def _worker() -> None:
                     try:
                         _run_autonomous_loop()
+                    except AutonomousHalt as halt:
+                        halt_holder[0] = halt
+                        pipeline_exit_code[0] = halt.exit_code
                     except SystemExit as se:
                         code = se.code if isinstance(se.code, int) else (1 if se.code else 0)
                         pipeline_exit_code[0] = code
@@ -1283,6 +1561,7 @@ def auto_pipeline(
                     stop_event=stop_event,
                     abort_event=abort_event,
                     project_root=root,
+                    halt_holder=halt_holder,
                 )
                 try:
                     app.run()
@@ -1291,13 +1570,27 @@ def auto_pipeline(
                     pass
 
                 if worker_thread.is_alive():
-                    click.secho("\nDashboard detached. Execution continuing in background...", fg="cyan")
+                    click.secho("\nDashboard closed. Pipeline execution continues in foreground...", fg="cyan")
                     worker_thread.join()
+
+                if halt_holder[0] is not None:
+                    halt = halt_holder[0]
+                    if halt.status in ("CANCELLED", "ABORTED"):
+                        click.secho(f"\n⚠️ Autonomous loop cancelled by user.", fg="yellow", bold=True)
+                    else:
+                        click.secho(
+                            f"\n⚠️ Autonomous loop halted: {halt.stage_name} finished with status '{halt.status}'.",
+                            fg="red",
+                            bold=True,
+                        )
+                        if halt.reason:
+                            click.secho(f"   Reason: {halt.reason}", fg="red")
 
                 if pipeline_exception:
                     click.secho(f"\nExecution error: {pipeline_exception[0]}", fg="red")
                 if pipeline_exit_code[0] != 0:
                     sys.exit(pipeline_exit_code[0])
+
     except RunOwnershipError as e:
         click.echo(e.format_diagnostic(), err=True)
         sys.exit(1)

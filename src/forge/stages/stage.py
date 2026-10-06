@@ -37,6 +37,7 @@ class Stage:
         timeout: Optional[int] = None,
         idle_timeout: Optional[Union[int, float]] = None,
         event_listener: Optional[Any] = None,
+        abort_event: Optional[Any] = None,
     ):
         self.role = role
         self.adapter = adapter
@@ -44,6 +45,7 @@ class Stage:
         self.timeout = timeout
         self.idle_timeout = idle_timeout
         self.event_listener = event_listener
+        self.abort_event = abort_event
 
     @classmethod
     def get_required_capabilities(cls, stage_name: str) -> Set[str]:
@@ -259,6 +261,33 @@ class Stage:
             while True:
                 now = time.time()
 
+                # Check cancellation request from abort_event
+                if self.abort_event is not None and self.abort_event.is_set():
+                    stop_requested.set()
+                    if hasattr(self.adapter, "cancel"):
+                        try:
+                            self.adapter.cancel()
+                        except Exception:
+                            pass
+                    abort_reason = "Execution cancelled by user."
+                    duration = time.time() - start_time
+                    exec_res = ExecutionResult(
+                        exit_code=130,
+                        duration_seconds=duration,
+                        stdout=accumulated_stdout,
+                        stderr=abort_reason,
+                        raw_output=accumulated_raw or accumulated_stdout or abort_reason,
+                        token_usage=token_usage,
+                        metadata={"cancelled": True, "reason": abort_reason},
+                    )
+                    terminal_event = AgentEvent(
+                        event_type=AgentEventType.ERROR,
+                        timestamp=time.time(),
+                        text=abort_reason,
+                        result=exec_res,
+                    )
+                    break
+
                 # Check absolute deadline: hard ceiling, no event extends beyond it
                 if absolute_deadline is not None:
                     rem_abs = absolute_deadline - now
@@ -390,7 +419,11 @@ class Stage:
 
         finally:
             stop_requested.set()
-            if hasattr(self.adapter, "cancel"):
+            is_intentional_stop = bool(
+                timeout_type
+                or (self.abort_event is not None and self.abort_event.is_set())
+            )
+            if hasattr(self.adapter, "cancel") and (is_intentional_stop or worker_thread.is_alive()):
                 try:
                     self.adapter.cancel()
                 except Exception as exc:
@@ -418,6 +451,28 @@ class Stage:
                 event_type=AgentEventType.ERROR,
                 timestamp=time.time(),
                 text=timeout_reason,
+                result=exec_res,
+            )
+
+        # Handle cancellation if abort_event was set
+        if (self.abort_event is not None and self.abort_event.is_set()) and (
+            terminal_event is None or terminal_event.event_type != AgentEventType.COMPLETE
+        ):
+            abort_reason = "Execution cancelled by user."
+            duration = time.time() - start_time
+            exec_res = ExecutionResult(
+                exit_code=130,
+                duration_seconds=duration,
+                stdout=accumulated_stdout,
+                stderr=abort_reason,
+                raw_output=accumulated_raw or accumulated_stdout or abort_reason,
+                token_usage=token_usage,
+                metadata={"cancelled": True, "reason": abort_reason},
+            )
+            terminal_event = AgentEvent(
+                event_type=AgentEventType.ERROR,
+                timestamp=time.time(),
+                text=abort_reason,
                 result=exec_res,
             )
 
@@ -472,6 +527,8 @@ class Stage:
         """Execute full stage lifecycle: validate -> prepare -> execute -> validate -> save."""
         if self.event_listener is None and getattr(context, "event_listener", None) is not None:
             self.event_listener = context.event_listener
+        if self.abort_event is None and getattr(context, "abort_event", None) is not None:
+            self.abort_event = context.abort_event
 
         # 0. Validate compatibility and execution environment before any execution
         self.validate_compatibility()

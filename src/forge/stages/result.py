@@ -37,3 +37,30 @@ class StageResult:
             "prompt_hash": self.prompt.prompt_hash,
             "machine_report": self.machine_report.to_dict(),
         }
+
+
+class AutonomousHalt(Exception):
+    """Structured halt signal for the autonomous pipeline.
+
+    Carries status, exit code, human-readable reason, stage name, and stage result
+    without forcing worker threads to invoke sys.exit().
+    """
+
+    def __init__(
+        self,
+        status: str,
+        exit_code: int = 1,
+        reason: Optional[str] = None,
+        stage_name: Optional[str] = None,
+        stage_result: Optional[StageResult] = None,
+    ):
+        msg = f"Autonomous loop halted: {stage_name or 'stage'} finished with status '{status}' (exit code {exit_code})."
+        if reason:
+            msg += f" Reason: {reason}"
+        super().__init__(msg)
+        self.status = status
+        self.exit_code = exit_code
+        self.reason = reason
+        self.stage_name = stage_name
+        self.stage_result = stage_result
+

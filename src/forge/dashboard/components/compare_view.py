@@ -1,5 +1,4 @@
-"""Run Comparison View component comparing duration, retries, and stage outcomes between runs."""
-
+from pathlib import Path
 from typing import Optional, List
 from rich.console import RenderableType
 from rich.panel import Panel
@@ -7,19 +6,34 @@ from rich.table import Table
 from rich.text import Text
 from forge.dashboard.model import RunModel
 from forge.dashboard.state import DashboardState
+from forge.dashboard.components.navigation import render_tab_navigation
 from forge.storage.run_manager import RunManager
 
 
-def render_compare_view(state: DashboardState, max_lines: int = 35) -> Panel:
+def render_compare_view(
+    state: DashboardState,
+    project_root: Optional[Path] = None,
+    max_lines: int = 35,
+) -> Panel:
     """Render side-by-side run comparison of stage durations, retry counts, and statuses."""
     is_focused = (state.focused_pane == "content")
     border_color = "cyan" if is_focused else "dim"
+    title_markup = render_tab_navigation(state)
 
     run_a = state.run
 
-    # Resolve Run B (comparison target)
+    # Resolve Run B (comparison target) from actual project root
     if not state.compare_run_model:
-        run_mgr = RunManager(run_a.run_dir.parent.parent)
+        root = project_root or getattr(state, "project_root", None)
+        if root is None:
+            rd = run_a.run_dir
+            if rd.parent.name == "runs" and rd.parent.parent.name == ".forge":
+                root = rd.parent.parent.parent
+            elif rd.parent.name == ".forge":
+                root = rd.parent.parent
+            else:
+                root = rd.parent.parent
+        run_mgr = RunManager(root)
         available_runs = run_mgr.list_runs()
         # Pick the most recent run that is not Run A
         for r in reversed(available_runs):
@@ -40,11 +54,12 @@ def render_compare_view(state: DashboardState, max_lines: int = 35) -> Panel:
         )
         return Panel(
             body,
-            title=" [5: Run Comparison] ",
+            title=title_markup,
             title_align="left",
             border_style=border_color,
             style="white",
         )
+
 
     # 1. High-level Summary Comparison Table
     summary_table = Table(
@@ -55,8 +70,8 @@ def render_compare_view(state: DashboardState, max_lines: int = 35) -> Panel:
         expand=True,
     )
     summary_table.add_column("Metric", style="bold white", width=18)
-    summary_table.add_column(f"Run A [{run_a.run_id}]", ratio=1)
-    summary_table.add_column(f"Run B [{run_b.run_id}]", ratio=1)
+    summary_table.add_column(f"Run A ({run_a.run_id})", ratio=1)
+    summary_table.add_column(f"Run B ({run_b.run_id})", ratio=1)
     summary_table.add_column("Delta (A vs B)", justify="right", width=16)
 
     dur_a = run_a.total_duration_seconds
@@ -128,9 +143,6 @@ def render_compare_view(state: DashboardState, max_lines: int = 35) -> Panel:
     content_grid.add_row(summary_table)
     content_grid.add_row(Text("─" * 60, style="dim"))
     content_grid.add_row(stage_table)
-
-    focus_badge = " [Active] " if is_focused else " "
-    title_markup = f" [1: Console]  [2: Artifact]  [3: Tester]  [4: PKB]  [bold cyan][5: Compare][/] ({run_a.run_id} vs {run_b.run_id}){focus_badge}"
 
     return Panel(
         content_grid,

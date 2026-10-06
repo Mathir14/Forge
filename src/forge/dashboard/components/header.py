@@ -4,6 +4,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from forge.dashboard.state import DashboardState
+from forge.stages.definition import StageOrder
 
 
 def render_header(state: DashboardState) -> Panel:
@@ -12,9 +13,9 @@ def render_header(state: DashboardState) -> Panel:
 
     # Determine status badge styling
     status = (run.status or "UNKNOWN").upper()
-    if status in ("APPROVED", "VERIFIED", "SUCCESS", "DONE"):
+    if StageOrder.is_success_status(status):
         status_text = Text(f" {status} ", style="bold white on green")
-    elif status in ("FAILED", "CHANGES_REQUIRED", "BLOCKED", "ERROR"):
+    elif status in ("FAILED", "CHANGES_REQUIRED", "BLOCKED", "ERROR", "REJECTED", "FAIL"):
         status_text = Text(f" {status} ", style="bold white on red")
     elif status in ("IN_PROGRESS", "RUNNING"):
         status_text = Text(" RUNNING ", style="bold black on yellow")
@@ -26,7 +27,10 @@ def render_header(state: DashboardState) -> Panel:
     secs = int(run.total_duration_seconds % 60)
     duration_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
 
-    completed_stages = sum(1 for s in run.stages if s.status in ("APPROVED", "VERIFIED", "SUCCESS", "CHANGES_REQUIRED", "FAILED"))
+    completed_stages = sum(
+        1 for s in run.stages
+        if StageOrder.is_success_status(s.status, s.role_name) or s.status in ("CHANGES_REQUIRED", "FAILED", "BLOCKED", "REJECTED", "FAIL")
+    )
     total_stages = len(run.stages)
     stages_str = f"{completed_stages}/{total_stages} completed"
 

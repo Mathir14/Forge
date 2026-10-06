@@ -8,6 +8,7 @@ from forge.dashboard.components.tester_view import render_tester_view
 from forge.dashboard.components.pkb_view import render_pkb_view
 from forge.dashboard.components.compare_view import render_compare_view
 from forge.dashboard.components.footer import render_footer
+from forge.dashboard.components.navigation import render_tab_navigation
 
 __all__ = [
     "render_header",
@@ -18,4 +19,5 @@ __all__ = [
     "render_pkb_view",
     "render_compare_view",
     "render_footer",
+    "render_tab_navigation",
 ]
