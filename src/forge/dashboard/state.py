@@ -1,7 +1,7 @@
 """DashboardState: In-memory navigation, selection, and scroll state."""
 
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Any
 from forge.dashboard.model import RunModel, StageModel
 
 
