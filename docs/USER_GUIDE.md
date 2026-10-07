@@ -68,50 +68,52 @@ pip install -e ".[dev]"
 
 ### Windows Users
 
-Forge supports both **Native Windows** and **WSL2**:
+Forge officially supports both **Native Windows** and **WSL2** as first-class development environments:
 
-#### Option A: Native Windows
+#### Native Windows
 
-- Open PowerShell or Command Prompt (Windows Terminal recommended for optimal dashboard rendering).
-- Ensure Python (>= 3.10) and Git are installed and available in your Windows `PATH`.
-- Install Forge:
+Forge runs natively on Windows NT (Windows 10, Windows 11, and Windows Server 2019+):
 
-```powershell
-pip install forge-orchestrator
-```
+- **Environment Prerequisites**:
+  - Python (>= 3.10) and Git (>= 2.25) installed and available in your system `PATH`.
+  - Windows Terminal (default in Windows 11) is recommended for truecolor ANSI rendering and box-drawing in the interactive dashboard.
+- **Install Forge**:
+  ```powershell
+  pip install forge-orchestrator
+  ```
+  For development from source:
+  ```powershell
+  git clone https://github.com/Mathir14/Forge.git
+  cd Forge
+  pip install -e ".[dev]"
+  ```
+- **CLI Agent Tools on Windows**:
+  - Install your desired AI coding tools (e.g. OpenCode via `npm install -g opencode`, Google Antigravity, or OpenAI Codex) directly in your Windows environment.
+  - Tools installed via npm place `.cmd` and `.ps1` shims in `%APPDATA%\npm`. Ensure this directory is included in your user or system `PATH`.
+- **Built-in Windows Abstractions**:
+  - **Process Trees & Cleanup**: Forge launches child processes within isolated Windows process groups (`CREATE_NEW_PROCESS_GROUP`) and cleanly tears down entire subprocess trees using native `taskkill /F /T /PID`, with protective guards preventing Forge from terminating itself or system PIDs.
+  - **Script Wrapping**: Executes `.cmd` and `.bat` wrappers automatically through `cmd.exe /c` without hanging or leaking file handles.
+  - **Kernel Run Locking**: Enforces process mutual exclusion using native Windows `msvcrt.locking`, preserving full diagnostic readability of run owner metadata.
+  - **Filesystem & Paths**: Seamlessly handles backslashes, drive letters (`C:\`), paths containing spaces, and semicolon (`;`) `PATH` delimiters.
 
-For development:
+#### WSL2 (Windows Subsystem for Linux)
 
-```powershell
-git clone https://github.com/Mathir14/Forge.git
-cd Forge
-pip install -e ".[dev]"
-```
+If you prefer operating inside a Linux container or distribution on Windows:
 
-- When running natively on Windows, install CLI agent tools (such as OpenCode via `npm install -g opencode`, Antigravity, or Codex) in your Windows environment so their `.cmd` or `.exe` binaries are available in `PATH`.
-- Forge automatically executes `.cmd`/`.bat` wrappers via `cmd.exe /c`, uses Windows process groups (`CREATE_NEW_PROCESS_GROUP`) with `taskkill` process-tree cleanup, and uses native `msvcrt` file locking.
-
-#### Option B: WSL2 (Windows Subsystem for Linux)
-
-If you prefer running in a Linux environment on Windows:
-
-- Open your WSL2 terminal.
-- Install Forge inside the WSL2 Linux environment:
-
-```bash
-pip install forge-orchestrator
-```
-
-For development inside WSL2:
-
-```bash
-git clone https://github.com/Mathir14/Forge.git
-cd Forge
-pip install -e ".[dev]"
-```
-
-> [!IMPORTANT]
-> **CLI Agent Tools in WSL2**: When running Forge inside WSL2, all CLI agent tools you use (such as **OpenCode**, **Antigravity**, or **Codex**) must be installed natively within the WSL2 Linux distribution (e.g. using `npm install -g opencode` inside your WSL shell). Running Windows-installed agent binaries or npm wrappers exposed across the WSL mount (such as `/mnt/c/Users/.../AppData/Roaming/npm/opencode`) is not supported and will be rejected with an informative error. Make sure your Linux `$PATH` places native Linux binaries before any Windows PATH entries.
+- **Run as Linux**: Forge runs as a standard Linux process inside your WSL2 distribution (e.g., Ubuntu).
+- **Install Forge inside WSL2**:
+  ```bash
+  pip install forge-orchestrator
+  ```
+  For development inside WSL2:
+  ```bash
+  git clone https://github.com/Mathir14/Forge.git
+  cd Forge
+  pip install -e ".[dev]"
+  ```
+- **Agent Tool Isolation**:
+  > [!IMPORTANT]
+  > **CLI Agent Tools in WSL2**: When running Forge inside WSL2, all CLI agent tools you use (**OpenCode**, **Antigravity**, or **Codex**) must be installed natively within the WSL2 Linux distribution (e.g. `npm install -g opencode` inside your WSL bash shell). Running Windows-installed agent binaries or npm wrappers exposed across the Windows mount (such as `/mnt/c/Users/.../AppData/Roaming/npm/opencode` or `.cmd` files) is not supported for the Linux Forge process and will be rejected with an informative diagnostic error. Ensure your Linux `$PATH` places native Linux binary directories (`/home/<user>/.opencode/bin`, `/usr/local/bin`) before any `/mnt/c/` PATH entries.
 
 ### Browser Automation Setup (Optional)
 
@@ -740,6 +742,12 @@ The Forge terminal dashboard (`forge dashboard`) provides an interactive interfa
 | `q` | Quit dashboard |
 | `Ctrl+C` | Abort running process (in live mode) or exit dashboard |
 
+### Terminal Compatibility & Windows Environment
+
+- **Recommended Terminal**: On Windows, modern **Windows Terminal** (or VS Code's integrated terminal) is strongly recommended. Windows Terminal natively supports truecolor 24-bit ANSI escape codes, full UTF-8 Unicode glyphs, and box-drawing characters used by Rich.
+- **Legacy Console (`conhost.exe`)**: Traditional `cmd.exe` or PowerShell running in legacy Windows Console Host (`conhost.exe`) may experience degraded rendering, character clipping, or font fallback issues for box-drawing glyphs. If running inside a legacy console, ensure your console code page is UTF-8 (`chcp 65001`) and a TrueType font (such as Cascadia Code or Consolas) is selected.
+- **Cancellation & Navigation**: Press `q` to cleanly exit inspection mode at any time without affecting run state. In live execution mode, pressing `Ctrl+C` sends a cancellation signal to the active run, cleanly terminating running agent subprocesses before exiting.
+
 ---
 
 ## 9. Adapters
@@ -995,8 +1003,10 @@ forge auto --file specs/webhook_system.md --max-retries 4 --auto-commit
 - **Cause**: Another running process is executing on that run directory, or a previous run crashed without releasing its kernel lock.
 - **Resolution**:
   - Check the owner details printed in the terminal error (PID, Hostname, User, Started timestamp).
-  - If the process is still running, wait for it to finish or terminate it cleanly (`kill <PID>`).
-  - If the process terminated abnormally, simply re-running the command will automatically detect the dead PID and recover the stale lock safely.
+  - If the process is still running, wait for it to finish or terminate it cleanly:
+    - **Linux/macOS/WSL2**: `kill <PID>`
+    - **Native Windows**: `taskkill /F /PID <PID>` (or inspect active processes via `tasklist | findstr forge`)
+  - If the process terminated abnormally or the recorded PID no longer exists, simply re-running your command will automatically detect the dead PID and safely recover the stale lock without manual file deletion.
 
 ### 2. Non-Interactive Execution Deadlock (`StageValidationError`)
 

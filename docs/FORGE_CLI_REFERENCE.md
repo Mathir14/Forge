@@ -1,8 +1,8 @@
 # Forge CLI Complete Reference Manual
 
-**Forge Version Inspected:** `0.1.0b5`  
-**Inspection Date:** 2026-10-04  
-**Target Repository:** `/home/mathir/Stress-Testing-Framework`  
+**Forge Version Inspected:** `0.1.0b10`  
+**Inspection Date:** 2026-10-07  
+**Target Repository:** `/home/mathir/Forge`  
 **Verified Source Files:**
 - `src/forge/cli.py` (Command routing, argument parser, CLI error handling)
 - `src/forge/core/config.py` (Configuration cascade, schema, validation, inheritance)
@@ -68,13 +68,13 @@ forge [OPTIONS] COMMAND [ARGS]...
 
 | Option | Type | Description |
 |---|---|---|
-| `--version` | Flag | Displays the installed Forge version (`forge, version 0.1.0b5`) and exits immediately. |
+| `--version` | Flag | Displays the installed Forge version (`forge, version 0.1.0b10`) and exits immediately. |
 | `--help` | Flag | Displays top-level command list and usage summary. |
 
 ### Fundamental Design Principle: CLI Flags vs. Configuration
 
 > [!IMPORTANT]
-> In Forge v0.1.0b5, individual stage commands (`architect`, `planner`, `execute`, `test`, `review`, `critic`) **do not accept inline `--adapter`, `--model`, `--effort`, or `--timeout` flags**.
+> In Forge v0.1.0b10, individual stage commands (`architect`, `planner`, `execute`, `test`, `review`, `critic`) **do not accept inline `--adapter`, `--model`, `--effort`, or `--timeout` flags**.
 > 
 > Stage runtime settings (adapter selection, model IDs, reasoning effort, timeout limits, and approval policies) are configured declaratively in `forge.yaml` (or via `forge config set stages.<stage>.<property> <value>`).
 > 
@@ -573,17 +573,20 @@ Proceed to next stage (PLANNER)? [Y/n]:
 - If declined (`n`), pauses the pipeline, saves status `PAUSED_AFTER_<STAGE>` in `metadata.json`, and exits cleanly with exit code 0.
 - The paused run can be resumed at any time using: `forge run --run <RUN_ID>`. Stages already completed in that run will be skipped automatically (`⏭ Skipping Stage: Architect (already completed with status 'APPROVED')`).
 
-#### Permutations
+#### Permutations & Compatibility Rules
 
 | Invocation | Classification | Description |
 |---|---|---|
 | `forge run "Refactor database models"` | **Valid** | Starts new interactive pipeline for the specified task. |
-| `forge run -c` | **Conditionally Valid** | Starts new pipeline addressing issues identified in the latest Critic report. |
-| `forge run -c "Fix only security vulnerabilities"` | **Valid** | Links to latest Critic report but overrides the task summary. |
+| `forge run -c` | **Conditionally Valid** | Starts new pipeline addressing issues identified in the latest Critic report. Requires an existing run with Critic output. |
+| `forge run -c "Fix only security vulnerabilities"` | **Valid** | Links to latest Critic report but overrides the task summary with custom instructions. |
 | `forge run --run run-002` | **Conditionally Valid** | Resumes paused or incomplete run `run-002`, skipping already passed stages. |
-| `forge run --auto-commit "Fix bug"` | **Valid / Mutating** | Executes pipeline and commits pure Forge-owned changes if approved. |
+| `forge run --auto-commit "Fix bug"` | **Valid / Mutating** | Executes pipeline and automatically git-commits pure Forge-owned changes if approved. |
 | `forge run --no-critic "Quick fix"` | **Valid** | Runs stages 01 through 05, skipping post-execution Critic (Stage 06). |
-| `forge run` | **Invalid** | Error: Missing TASK. Please provide a task or use --from-critic (-c). |
+| `forge run` | **Invalid** | Error: Missing `TASK`. Please provide a task argument or use `--from-critic` (`-c`). |
+| `forge run -d "Task"` / `forge run --dashboard` | **Invalid** | Error: Unrecognized option `-d` / `--dashboard`. Live dashboard execution is exclusive to `forge auto`. Use `forge dashboard [RUN_ID]` separately to view runs. |
+| `forge run -f spec.md` / `forge run --file spec.md` | **Invalid** | Error: Unrecognized option `-f` / `--file`. File specification loading is exclusive to `forge auto`. |
+| `forge run -r 5` / `forge run --max-retries 5` | **Invalid** | Error: Unrecognized option `-r` / `--max-retries`. Retry loops are exclusive to `forge auto` (in `forge run`, confirmation gates are manual). |
 
 ---
 
@@ -618,18 +621,26 @@ During self-repair iterations, intermediate outputs are never overwritten. For a
 - `.forge/runs/run-XXX/04_tester_attempt_N.md` & `.json`
 - `.forge/runs/run-XXX/05_reviewer_attempt_N.md` & `.json`
 
-#### Permutations
+#### Permutations & Compatibility Rules
 
 | Invocation | Classification | Description |
 |---|---|---|
 | `forge auto "Implement rate limiting middleware"` | **Valid** | Fully autonomous loop with default 3 repair retries. |
 | `forge auto -f specs/auth.md` | **Valid** | Loads task prompt directly from Markdown file. |
-| `forge auto -c` | **Conditionally Valid** | Autonomous repair loop targeting issues from latest Critic audit. |
+| `forge auto -c` | **Conditionally Valid** | Autonomous repair loop targeting issues from latest Critic audit. Requires an existing run with Critic output. |
 | `forge auto -c -r 5 --auto-commit` | **Valid** | Autonomous Critic repair with up to 5 attempts and automatic Git commit upon success. |
-| `forge auto --run run-002` | **Conditionally Valid** | Resumes run `run-002` in autonomous mode. |
 | `forge auto -d "Optimize SQL queries"` | **Valid / Interactive** | Launches live terminal dashboard while autonomous pipeline executes. |
-| `forge auto -r 0 "Task"` | **Invalid** | Rejected by CLI: `max-retries` must satisfy `x >= 1`. |
-| `forge auto` | **Invalid** | Error: Missing TASK. Provide a task string, --file spec.md, or --from-critic (-c). |
+| `forge auto -cd --auto-commit` | **Valid / Interactive** | Bundled flags: resumes from Critic (`-c`), opens live dashboard (`-d`), and enables auto-commit. |
+| `forge auto -f specs/api.md -d -r 5` | **Valid / Interactive** | Autonomous run loaded from spec file with live dashboard and 5 retries. |
+| `forge auto --run run-002` | **Conditionally Valid** | Resumes run `run-002` in autonomous mode. |
+| `forge auto -r 0 "Task"` | **Invalid** | Rejected by CLI parser: `max-retries` must satisfy `x >= 1`. |
+| `forge auto` | **Invalid** | Error: Missing `TASK`. Provide a task string, `--file spec.md` (`-f`), or `--from-critic` (`-c`). |
+| `forge auto --model gpt-4o "Task"` | **Invalid** | Error: Unrecognized option `--model`. Adapter and model parameters are configured in `forge.yaml` or via `forge config set`. |
+
+#### Option Compatibility & Exclusivity Rules:
+1. **Task Input Priority**: Provide exactly one primary task source: a positional `TASK` string, `--file` (`-f`), or `--from-critic` (`-c`). If both `-c` and a `TASK` string are supplied, Forge links to the Critic run history while using the custom task string.
+2. **Dashboard Mode (`-d`)**: Exclusive to `forge auto`. In `forge run`, interactive confirmation prompts conflict with full-screen TUI rendering. For post-run inspection of any run, use standalone `forge dashboard [RUN_ID]`.
+3. **Resumption Semantics**: `--run <RUN_ID>` resumes an existing run from its last incomplete stage. When resuming, the task description from the run's original `metadata.json` is preserved.
 
 ---
 
@@ -809,7 +820,7 @@ Forge provides a provider-agnostic semantic abstraction for reasoning effort: `l
 | **Explicit Variant Precedence** | Suffix `#variant` in model string (e.g. `model#custom`) takes precedence over semantic effort. | N/A | N/A |
 | **Auto-Approval Flag** | `--auto` | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` |
 | **Timeout Flag** | Subprocess timeout enforcement | Subprocess timeout + `--print-timeout <N>s` | Subprocess timeout enforcement |
-| **Process Group Isolation** | POSIX `start_new_session=True` with tracked PID/PGID cancellation | POSIX `start_new_session=True` with tracked PID/PGID cancellation | Standard subprocess handling |
+| **Process Group Isolation & OS Abstraction** | POSIX: `start_new_session=True` with tracked PID/PGID cancellation (`os.killpg`).<br>Windows: `CREATE_NEW_PROCESS_GROUP`, `.cmd`/`.bat` wrapping via `cmd.exe /c`, and tree cleanup via `taskkill /F /T /PID` with PID self-termination guards. | POSIX: `start_new_session=True` with tracked PID/PGID cancellation.<br>Windows: `CREATE_NEW_PROCESS_GROUP`, `.cmd`/`.bat` wrapping via `cmd.exe /c`, and tree cleanup via `taskkill /F /T /PID`. | Standard subprocess handling with platform-appropriate process tree supervision. |
 
 ---
 
@@ -918,10 +929,11 @@ Every pipeline run creates an isolated directory in `.forge/runs/run-XXX/`:
 ### Exclusive Run Locking (`run.lock`)
 
 To prevent concurrent processes from clobbering run artifacts:
-- When a run is executed or resumed, Forge acquires an exclusive non-blocking file lock on `run.lock`.
+- When a run is executed or resumed, Forge acquires an exclusive non-blocking kernel lock on `run.lock` (`flock` on Linux/macOS, `msvcrt.locking` on Windows).
+- On Windows, kernel locking operates cleanly to ensure owner metadata remains readable by concurrent processes for diagnostic inspection while preventing simultaneous execution.
 - `run.lock` stores owner metadata: PID, process group ID (PGID), hostname, username, command line, start timestamp, and Forge version.
 - If another process attempts to access the same run, Forge raises `RunOwnershipError` and displays owner details.
-- Stale locks from crashed processes are automatically detected and recovered if the owning PID is no longer alive.
+- Stale locks from crashed or terminated processes are automatically detected and safely recovered when the owning PID is no longer alive.
 
 ### Safe Git Auto-Commit Behavior
 
@@ -982,17 +994,22 @@ When `--auto-commit` is enabled:
 
 #### 3. Run Ownership Conflict (`RunOwnershipError`)
 - **Symptom**: `❌ Run Ownership Conflict: Run 'run-XXX' is currently locked by an active Forge process.`
-- **Cause**: Another terminal or background task is operating on `run-XXX`, or a previous process was forcefully killed (`SIGKILL`) leaving an unexpired lock.
-- **Resolution**: Verify if a Forge process is running:
-  ```bash
-  ps aux | grep forge
-  ```
-  If no process is running, verify the owning PID shown in the diagnostic message and rerun; Forge will automatically recover the stale lock.
+- **Cause**: Another terminal or background task is operating on `run-XXX`, or a previous process was forcefully killed leaving an unexpired lock.
+- **Resolution**: Verify if a Forge process is actively running:
+  - **Linux / macOS / WSL2**:
+    ```bash
+    ps aux | grep forge
+    ```
+  - **Native Windows**:
+    ```powershell
+    tasklist | findstr forge
+    ```
+  If no process is running, verify the owning PID shown in the diagnostic message and rerun; Forge will automatically recover the stale lock safely.
 
 #### 4. WSL2 Windows Binary Incompatibility
 - **Symptom**: `OpenCode resolved to a Windows installation while Forge is running inside WSL2`.
 - **Cause**: Forge inside WSL2 found `opencode.cmd` or `opencode.exe` on Windows PATH instead of a native Linux binary.
-- **Resolution**: Install OpenCode natively inside WSL Linux (`npm install -g opencode` or curl installer) and ensure `/home/<user>/.opencode/bin` precedes Windows PATH in `~/.bashrc`.
+- **Resolution**: Install OpenCode natively inside WSL Linux (`npm install -g opencode` or curl installer) and ensure `/home/<user>/.opencode/bin` precedes Windows PATH in `~/.bashrc`. Note: On Native Windows, `.cmd` and `.bat` wrappers (such as `%APPDATA%\npm\opencode.cmd`) are natively supported and executed transparently via `cmd.exe /c`.
 
 #### 5. Reviewer Requests Changes (`CHANGES_REQUIRED`)
 - **Symptom**: Stage 05 (`reviewer`) halts with non-success status `CHANGES_REQUIRED`.
@@ -1112,6 +1129,10 @@ forge auto -c -r 5 --auto-commit
 
 # Autonomous loop with live terminal dashboard attached
 forge auto -d "Implement Redis cache layer"
+
+# Autonomous loop with bundled flags (Critic resume, live dashboard, auto-commit)
+forge auto -cd --auto-commit
+
 ```
 
 ### Configuration Management

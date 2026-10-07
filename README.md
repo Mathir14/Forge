@@ -13,7 +13,7 @@ Forge is an open-source, CLI-first multi-agent orchestration framework for auton
 - **Project Knowledge Base (PKB)**: Automatically discovers and tracks persistent repository knowledge across runs in `.forge/knowledge/` (`architecture.yaml`, `features.yaml`, `decisions.yaml`, `unresolved.yaml`) with role-based permissions and human locking.
 - **Terminal User Interface Dashboard**: Interactive terminal dashboard (`forge dashboard`) to monitor live runs or inspect historical runs with timeline navigation, streaming console output, stage artifacts, test evidence, and knowledge base browser.
 - **Git Safety & Change Attribution**: Captures unified diffs with automatic filtering of `.forge/` runtime data and `.env*` secrets, intelligently attributing changes to avoid committing mixed-ownership files containing pre-existing user edits.
-- **Process-Level Run Locking**: Kernel-backed exclusive run locking (`flock`) prevents concurrent process conflicts on the same run directory with automatic stale-lock recovery.
+- **Process-Level Run Locking**: Kernel-backed exclusive run locking (`flock` on POSIX, `msvcrt` on Windows) prevents concurrent process conflicts on the same run directory with automatic stale-lock recovery.
 
 ## Requirements
 
@@ -28,14 +28,14 @@ Forge is an open-source, CLI-first multi-agent orchestration framework for auton
 
 ## Platform Support
 
-Forge supports Linux, WSL2, macOS, and native Windows.
+Forge officially supports Linux, macOS, WSL2, and Native Windows as first-class platforms:
 
-| Platform | Status | Notes |
+| Platform | Status | Operating Characteristics |
 | :--- | :--- | :--- |
-| **Linux** | Supported | Primary development and reference testing platform. |
-| **WSL2** | Supported | Full compatibility with all pipeline stages and process supervision. Note: CLI agent tools (e.g. OpenCode) must be installed natively inside the WSL2 Linux environment; Windows host binaries exposed via WSL PATH are not supported. |
-| **macOS** | Supported | Compatible with POSIX process isolation and standard pipeline execution. |
-| **Native Windows** | Supported | Native Windows process trees (`CREATE_NEW_PROCESS_GROUP`, `taskkill`), file locking (`msvcrt`), and `.cmd`/`.bat` wrappers for agent CLIs. Windows Terminal is recommended for interactive dashboard display. |
+| **Linux** | Supported | Reference development platform with POSIX process group isolation and `flock` run locking. |
+| **WSL2** | Supported | Runs as native Linux inside WSL2. Agent CLIs must be installed natively inside the WSL2 Linux distribution (Windows-host binaries exposed via `/mnt/c` are not supported). |
+| **macOS** | Supported | Full POSIX compatibility with process group isolation and `flock` run locking. |
+| **Native Windows** | Supported | Full autonomous and interactive pipeline support. Uses Windows process trees (`CREATE_NEW_PROCESS_GROUP`, `taskkill`), kernel file locking (`msvcrt`), and transparent `.cmd`/`.bat` agent CLI execution. Windows Terminal is recommended for optimal interactive dashboard rendering. |
 
 ## Installation
 

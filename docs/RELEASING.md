@@ -30,7 +30,7 @@ GitHub Actions (.github/workflows/release.yml)
   │
   ├─ Job 1: test-and-build
   │    ├─ Validate version tag format (PEP 440)
-  │    ├─ Run full pytest suite (540+ tests)
+  │    ├─ Run full pytest suite (650+ tests)
   │    ├─ Single Build: build wheel and sdist (python -m build)
   │    ├─ Validate with twine check --strict dist/*
   │    └─ Upload dist/ artifacts to workflow run storage

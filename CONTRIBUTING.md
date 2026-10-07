@@ -4,7 +4,7 @@ Thank you for contributing to Forge! Forge is an open-source, CLI-first multi-ag
 
 ## Development Setup
 
-Forge requires Python 3.10 or higher and Git 2.25 or higher. Development and testing are conducted on Linux; for Windows contributors, WSL2 is the recommended environment (Native Windows is not supported due to process management requirements).
+Forge requires Python 3.10 or higher and Git 2.25 or higher. Forge officially supports Linux, WSL2, macOS, and Native Windows. Windows contributors can develop and test natively (using PowerShell or Command Prompt) or within WSL2. All pull requests are automatically validated across both Ubuntu and Windows CI runners.
 
 1. Clone the repository:
    ```bash
@@ -56,7 +56,7 @@ pytest -v
 pytest tests/test_config.py
 ```
 
-Ensure all tests pass before submitting a pull request.
+Ensure all tests pass before submitting a pull request. The CI matrix validates all PRs across both Ubuntu and Windows runners on Python 3.10, 3.11, 3.12, and 3.13.
 
 ## Coding Guidelines
 
