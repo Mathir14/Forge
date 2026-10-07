@@ -188,6 +188,7 @@ def test_codex_adapter_timeout_preserves_partial_output():
     assert partial_text in res.raw_output
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows subprocess pipe reader threads do not guarantee partial buffer drain on immediate timeout")
 def test_real_subprocess_timeout_captures_partial_output(tmp_path):
     """Verify a real OS child process timing out has its pre-timeout output captured non-blockingly."""
     # Subprocess writes a unique token, flushes immediately, then sleeps longer than timeout

@@ -20,6 +20,7 @@ from forge.stages.stage import Stage
 from forge.storage.run_manager import RunManager
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX killpg/getpgid specific behavior")
 def test_kill_process_group_rejects_caller_pgid_and_pid():
     """Verify _kill_process_group never signals os.getpgrp() or os.getpid()."""
     mock_proc_same_pgid = MagicMock()
@@ -43,6 +44,7 @@ def test_kill_process_group_rejects_caller_pgid_and_pid():
         mock_safe_kill.assert_called_once_with(mock_proc_child)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX killpg/getpgid specific behavior")
 def test_kill_process_group_signals_isolated_child_pgid():
     """Verify _kill_process_group signals genuine isolated child process groups."""
     caller_pgid = os.getpgrp()
@@ -122,11 +124,20 @@ def test_dashboard_app_reraises_system_exit(tmp_path, monkeypatch):
     app = DashboardApp(run.run_dir)
 
     monkeypatch.setattr(sys.stdin, "fileno", lambda: 0)
-    with patch("sys.stdin.isatty", return_value=True), \
-         patch("termios.tcgetattr", return_value=[]), \
-         patch("termios.tcsetattr"), \
-         patch("tty.setcbreak"), \
-         patch.object(app, "create_layout", side_effect=SystemExit(143)):
+    from contextlib import ExitStack
+    patches = [
+        patch("sys.stdin.isatty", return_value=True),
+        patch.object(app, "create_layout", side_effect=SystemExit(143)),
+    ]
+    if sys.platform != "win32":
+        patches.extend([
+            patch("termios.tcgetattr", return_value=[]),
+            patch("termios.tcsetattr"),
+            patch("tty.setcbreak"),
+        ])
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         with pytest.raises(SystemExit) as exc_info:
             app.run()
         assert exc_info.value.code == 143

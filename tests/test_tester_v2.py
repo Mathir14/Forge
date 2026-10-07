@@ -15,6 +15,7 @@ Validates:
 """
 
 import json
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -115,7 +116,7 @@ def test_runtime_supervisor_lifecycle(tmp_path):
     )
 
     # Launch a simple Python background process that prints to stdout/stderr
-    cmd = "python3 -c 'import sys, time; print(\"READY\"); sys.stdout.flush(); sys.stderr.write(\"ERR_TEST\\n\"); sys.stderr.flush(); time.sleep(10)'"
+    cmd = f'"{sys.executable}" -c "import sys, time; print(\\"READY\\"); sys.stdout.flush(); sys.stderr.write(\\"ERR_TEST\\\\n\\"); sys.stderr.flush(); time.sleep(10)"'
     started = supervisor.start(command=cmd, timeout=5.0)
     assert started is True
     assert supervisor.is_running() is True
@@ -326,7 +327,7 @@ def test_cli_interaction_driver_detects_traceback(tmp_path):
         description="Execute command that raises Python traceback",
         priority=1,
         steps=[
-            JourneyStep(action=ActionType.CLI_COMMAND, target="python3 -c 'raise KeyError(\"missing_key\")'"),
+            JourneyStep(action=ActionType.CLI_COMMAND, target=f'"{sys.executable}" -c "raise KeyError(\\"missing_key\\")"'),
         ],
     )
 

@@ -2,6 +2,7 @@
 
 import io
 import json
+import sys
 from pathlib import Path
 from unittest.mock import patch
 from click.testing import CliRunner
@@ -537,14 +538,32 @@ def test_interactive_dashboard_exit_emits_summary(tmp_path: Path):
     expected_text = summary.format_text()
 
     fake_out = io.StringIO()
-    with patch("sys.stdin.isatty", return_value=True), \
-         patch("sys.stdin.fileno", return_value=0), \
-         patch("termios.tcgetattr", return_value=[]), \
-         patch("termios.tcsetattr"), \
-         patch("tty.setcbreak"), \
-         patch("sys.__stdout__", fake_out), \
-         patch("select.select", side_effect=[([0], [], []), ([], [], [])]), \
-         patch.object(app, "_read_key", side_effect=["q"]):
+    from contextlib import ExitStack
+    patches = [
+        patch("sys.stdin.isatty", return_value=True),
+        patch("sys.stdin.fileno", return_value=0),
+        patch("sys.__stdout__", fake_out),
+    ]
+    if sys.platform != "win32":
+        patches.extend([
+            patch("termios.tcgetattr", return_value=[]),
+            patch("termios.tcsetattr"),
+            patch("tty.setcbreak"),
+            patch("select.select", side_effect=[([0], [], []), ([], [], [])]),
+            patch.object(app, "_read_key", side_effect=["q"]),
+        ])
+    else:
+        try:
+            import msvcrt
+            patches.extend([
+                patch("msvcrt.kbhit", side_effect=[True, False]),
+                patch("msvcrt.getwch", side_effect=["q"]),
+            ])
+        except ImportError:
+            pass
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         exit_code = app.run()
         assert exit_code == 0
         output = fake_out.getvalue()

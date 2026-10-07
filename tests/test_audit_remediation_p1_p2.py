@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -380,9 +381,11 @@ def test_p2_03_git_filenames_with_quotes_and_spaces(tmp_path):
     subprocess.run(["git", "config", "user.name", "Forge Test"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@forge.ai"], cwd=tmp_path, check=True)
 
-    # Create files with quotes and spaces in filenames
-    f1 = tmp_path / 'file"with"quotes.py'
-    f1.write_text("content 1", encoding="utf-8")
+    # Create files with special characters and spaces in filenames
+    # Note: Double quote characters are prohibited by the Windows NTFS kernel
+    if sys.platform != "win32":
+        f1 = tmp_path / 'file"with"quotes.py'
+        f1.write_text("content 1", encoding="utf-8")
 
     f2 = tmp_path / "file with spaces.py"
     f2.write_text("content 2", encoding="utf-8")
@@ -391,17 +394,20 @@ def test_p2_03_git_filenames_with_quotes_and_spaces(tmp_path):
     changed = git.changed_files()
 
     # Filenames should be matched bit-exactly
-    assert 'file"with"quotes.py' in changed
+    if sys.platform != "win32":
+        assert 'file"with"quotes.py' in changed
     assert "file with spaces.py" in changed
 
     # Test baseline capture and change attribution
     baseline = git.capture_baseline()
-    assert 'file"with"quotes.py' in baseline.dirty_files
+    if sys.platform != "win32":
+        assert 'file"with"quotes.py' in baseline.dirty_files
     assert "file with spaces.py" in baseline.dirty_files
 
     attr = git.attribute_changes(baseline)
     assert len(attr.pure_forge_changes) == 0
-    assert len(attr.preexisting_unchanged) == 2
+    expected_count = 2 if sys.platform != "win32" else 1
+    assert len(attr.preexisting_unchanged) == expected_count
 
 
 # ==============================================================================
@@ -414,7 +420,7 @@ def test_p2_04_adapter_subprocess_process_group():
     # Script that spawns a sleep child and waits
     code = (
         "import subprocess, sys, time\n"
-        "p = subprocess.Popen(['sleep', '10'])\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])\n"
         "time.sleep(10)\n"
     )
     with pytest.raises(subprocess.TimeoutExpired):

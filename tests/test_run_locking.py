@@ -338,6 +338,7 @@ def test_cleanup_on_system_exit(tmp_path):
     assert not lock_file.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX SIGTERM delivery across detached subprocesses is not supported on Windows")
 def test_cleanup_on_sigterm_cli_subprocess(tmp_path):
     """Verify that receiving SIGTERM at the CLI boundary cleans up the lock file before process terminates."""
     run_mgr = RunManager(tmp_path)
@@ -356,11 +357,17 @@ lock.acquire()
 print("ACQUIRED", flush=True)
 time.sleep(30)
 """
+    popen_kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+
     proc = subprocess.Popen(
         [sys.executable, "-c", code],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        **popen_kwargs,
     )
 
     try:
@@ -370,8 +377,11 @@ time.sleep(30)
         assert lock_file.exists()
         assert RunLock.is_run_locked(run.run_dir) is True
 
-        # Send SIGTERM
-        proc.terminate()
+        # Send termination signal
+        if sys.platform == "win32":
+            proc.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
+        else:
+            proc.terminate()
         proc.wait(timeout=5)
 
         # File must be cleaned up gracefully!
@@ -473,6 +483,7 @@ def test_reentrant_lock_acquisition_same_thread(tmp_path):
     assert not lock_file.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX SIGINT delivery across detached subprocesses is not supported on Windows")
 def test_cleanup_on_sigint_subprocess(tmp_path):
     """Verify that receiving SIGINT (Ctrl+C) cleans up the lock file."""
     run_mgr = RunManager(tmp_path)
@@ -480,9 +491,15 @@ def test_cleanup_on_sigint_subprocess(tmp_path):
     lock_file = run.run_dir / "run.lock"
 
     code = f"""
-import time, sys
+import time, sys, signal
 from pathlib import Path
 from forge.storage.run_lock import RunLock
+
+def _break_handler(signum, frame):
+    sys.exit(130)
+
+if hasattr(signal, "SIGBREAK"):
+    signal.signal(signal.SIGBREAK, _break_handler)
 
 try:
     with RunLock(Path({repr(str(run.run_dir))}), run_id="{run.run_id}"):
@@ -491,11 +508,17 @@ try:
 except KeyboardInterrupt:
     sys.exit(130)
 """
+    popen_kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+
     proc = subprocess.Popen(
         [sys.executable, "-c", code],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        **popen_kwargs,
     )
 
     try:
@@ -503,8 +526,11 @@ except KeyboardInterrupt:
         assert line == "ACQUIRED"
         assert lock_file.exists()
 
-        # Send SIGINT (Ctrl+C)
-        proc.send_signal(signal.SIGINT)
+        # Send interrupt (SIGINT on POSIX, CTRL_BREAK_EVENT on Windows)
+        if sys.platform == "win32":
+            proc.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
+        else:
+            proc.send_signal(signal.SIGINT)
         proc.wait(timeout=5)
 
         assert not lock_file.exists()

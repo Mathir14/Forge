@@ -367,7 +367,7 @@ def test_adp01_process_group_cleanup_kills_descendants():
 
     code = (
         "import subprocess, sys, time\n"
-        f"p = subprocess.Popen(['sleep', '60'])\n"
+        f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
         f"with open(r'{pid_file}', 'w') as f: f.write(str(p.pid))\n"
         "time.sleep(60)\n"
     )
@@ -383,12 +383,8 @@ def test_adp01_process_group_cleanup_kills_descendants():
     pid_file.unlink(missing_ok=True)
 
     # Verify child_pid is dead
-    is_alive = False
-    try:
-        os.kill(child_pid, 0)
-        is_alive = True
-    except OSError:
-        is_alive = False
+    from forge.core.platform import is_pid_alive
+    is_alive = is_pid_alive(child_pid)
 
     assert not is_alive, f"Descendant process {child_pid} was not terminated on timeout!"
 

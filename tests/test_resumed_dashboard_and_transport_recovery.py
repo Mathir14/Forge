@@ -13,6 +13,7 @@ Covers:
 """
 
 import json
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -599,9 +600,13 @@ def test_stage_timeout_triggers_both_daemon_interrupt_and_local_process_cleanup(
     from forge.storage.run_manager import RunManager
     from forge.adapters.base import AdapterResponse
 
-    fake_bin = tmp_path / "opencode"
-    fake_bin.write_text("#!/bin/sh\nsleep 30\n")
-    fake_bin.chmod(0o755)
+    if sys.platform == "win32":
+        fake_bin = tmp_path / "opencode.cmd"
+        fake_bin.write_text(f'@echo off\n"{sys.executable}" -c "import time; time.sleep(30)"\n')
+    else:
+        fake_bin = tmp_path / "opencode"
+        fake_bin.write_text("#!/bin/sh\nsleep 30\n")
+        fake_bin.chmod(0o755)
 
     adapter = OpenCodeAdapter(auto_approve=True)
     run_mgr = RunManager(tmp_path)

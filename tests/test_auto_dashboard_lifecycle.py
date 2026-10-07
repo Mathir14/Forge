@@ -240,6 +240,7 @@ def test_q_does_not_claim_detachment_when_joining():
     assert "Dashboard closed. Pipeline execution continues in foreground..." in content
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX killpg/getpgid specific behavior")
 def test_process_group_safety_guards_against_parent_signalling():
     """Test 7: BaseAdapter._kill_process_group never signals parent or invalid/system process groups."""
     # Test PID None

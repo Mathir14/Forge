@@ -540,6 +540,7 @@ def test_executor_configured_opencode_model_none():
 def test_opencode_windows_executable_resolution():
     """Regression Finding 4: OpenCodeAdapter resolves executable via shutil.which() with fallback to 'opencode'."""
     from unittest.mock import patch, MagicMock
+    import sys
 
     adapter = OpenCodeAdapter()
 
@@ -552,8 +553,12 @@ def test_opencode_windows_executable_resolution():
             res = adapter.execute(prompt="hello")
             mock_run.assert_called_once()
             called_cmd = mock_run.call_args[0][0]
-            assert called_cmd[0] == windows_cmd_path
-            assert called_cmd[1] == "run"
+            if sys.platform == "win32":
+                assert windows_cmd_path in called_cmd
+                assert "run" in called_cmd
+            else:
+                assert called_cmd[0] == windows_cmd_path
+                assert called_cmd[1] == "run"
             assert res.exit_code == 0
 
     # When shutil.which returns None (lookup fails), fall back to "opencode"

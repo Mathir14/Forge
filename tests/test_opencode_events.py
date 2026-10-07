@@ -3,6 +3,7 @@
 import json
 import logging
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional, List
@@ -710,6 +711,7 @@ def test_provider_specific_effort_flags_matrix():
         assert "--variant" not in oc_cmd
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX killpg/getpgid specific behavior")
 def test_kill_process_group_safely_ignores_mock_and_invalid_pids():
     """Verify _kill_process_group does not invoke os.killpg for mock, non-integer, or <= 1 PIDs/PGIDs."""
     import signal
@@ -1012,9 +1014,13 @@ def test_stage_timeout_cancels_opencode_subprocess_and_unblocks_worker(tmp_path)
     from forge.core.git import GitService
     from forge.storage.run_manager import RunManager
 
-    fake_bin = tmp_path / "opencode"
-    fake_bin.write_text("#!/bin/sh\nsleep 30\n")
-    fake_bin.chmod(0o755)
+    if sys.platform == "win32":
+        fake_bin = tmp_path / "opencode.cmd"
+        fake_bin.write_text(f'@echo off\n"{sys.executable}" -c "import time; time.sleep(30)"\n')
+    else:
+        fake_bin = tmp_path / "opencode"
+        fake_bin.write_text("#!/bin/sh\nsleep 30\n")
+        fake_bin.chmod(0o755)
 
     adapter = OpenCodeAdapter()
     run_mgr = RunManager(tmp_path)
