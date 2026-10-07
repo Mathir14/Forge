@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from forge import __version__
+from forge.core.platform import WINDOWS_LOCK_OFFSET
 
 try:
     import fcntl
@@ -32,6 +33,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Byte offset used for Windows mandatory file locking.
+# On Windows NT, byte-range locks applied via msvcrt.locking are kernel-enforced
+# and mandatory for the file handle. If byte 0 is locked, any external read of
+# the lock file (e.g. diagnostic inspection of owner metadata via Path.read_text())
+# fails with PermissionError (ERROR_LOCK_VIOLATION).
+# By locking a single byte at a high offset beyond the file content (1 GiB),
+# the lock file metadata in bytes [0, file_size) remains freely readable by
+# diagnostic readers while mutual exclusion is fully preserved across processes.
 # Thread-local storage for re-entrant lock tracking
 _local_state = threading.local()
 
@@ -169,11 +178,9 @@ class RunLock:
                     return True
             elif msvcrt is not None:
                 try:
-                    if os.fstat(fd).st_size == 0:
-                        return False
-                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.lseek(fd, WINDOWS_LOCK_OFFSET, os.SEEK_SET)
                     msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.lseek(fd, WINDOWS_LOCK_OFFSET, os.SEEK_SET)
                     msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
                     return False
                 except OSError:
@@ -238,10 +245,7 @@ class RunLock:
                     locked = False
             elif msvcrt is not None:
                 try:
-                    if os.fstat(fd).st_size == 0:
-                        os.write(fd, b" ")
-                        os.lseek(fd, 0, os.SEEK_SET)
-                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.lseek(fd, WINDOWS_LOCK_OFFSET, os.SEEK_SET)
                     msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                     locked = True
                 except OSError:
@@ -329,7 +333,7 @@ class RunLock:
                     if fcntl is not None:
                         fcntl.flock(fd, fcntl.LOCK_UN)
                     elif msvcrt is not None:
-                        os.lseek(fd, 0, os.SEEK_SET)
+                        os.lseek(fd, WINDOWS_LOCK_OFFSET, os.SEEK_SET)
                         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
                 except OSError:
                     pass
@@ -376,7 +380,7 @@ class RunLock:
         if sys.platform == "win32":
             if msvcrt is not None:
                 try:
-                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.lseek(fd, WINDOWS_LOCK_OFFSET, os.SEEK_SET)
                     msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
                 except OSError:
                     pass

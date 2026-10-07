@@ -27,6 +27,10 @@ IS_POSIX: bool = (os.name == "posix")
 IS_DARWIN: bool = (sys.platform == "darwin")
 IS_LINUX: bool = (sys.platform == "linux")
 
+# Byte offset used for Windows mandatory file locking (1 GiB).
+# Offsetting locks avoids blocking diagnostic reads of metadata at offset 0.
+WINDOWS_LOCK_OFFSET: int = 1073741824
+
 
 # ============================================================================
 # 1. PROCESS SPAWNING & LIFECYCLE

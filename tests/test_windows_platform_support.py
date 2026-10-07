@@ -450,3 +450,91 @@ def test_dashboard_app_windows_session_quit_key(tmp_path, monkeypatch):
          patch.dict("sys.modules", {"msvcrt": mock_msvcrt}):
         exit_code = app.run()
         assert exit_code == 0
+
+
+# ============================================================================
+# 10. WINDOWS RUNLOCK MANDATORY LOCKING & METADATA READ INTEGRITY
+# ============================================================================
+
+def test_windows_run_lock_uses_windows_lock_offset(tmp_path, monkeypatch):
+    """Regression: On Windows, RunLock must lock at WINDOWS_LOCK_OFFSET and allow metadata reads."""
+    from forge.core.platform import WINDOWS_LOCK_OFFSET
+    from forge.storage.run_lock import RunOwnershipError
+
+    run_dir = tmp_path / "run-win-lock"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = run_dir / "run.lock"
+
+    locked_fds = set()
+    mock_msvcrt = MagicMock()
+
+    def mock_locking(fd, mode, nbytes):
+        # mode LK_NBLCK = 2, LK_UNLCK = 0
+        curr_offset = os.lseek(fd, 0, os.SEEK_CUR)
+        assert curr_offset == WINDOWS_LOCK_OFFSET, (
+            f"msvcrt.locking called at offset {curr_offset}, expected {WINDOWS_LOCK_OFFSET}"
+        )
+        if mode == getattr(mock_msvcrt, "LK_NBLCK", 2):
+            if locked_fds:
+                raise OSError(13, "Permission denied")
+            locked_fds.add(fd)
+        elif mode == getattr(mock_msvcrt, "LK_UNLCK", 0):
+            locked_fds.discard(fd)
+
+    mock_msvcrt.LK_NBLCK = 2
+    mock_msvcrt.LK_UNLCK = 0
+    mock_msvcrt.locking.side_effect = mock_locking
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr("forge.storage.run_lock.fcntl", None)
+    monkeypatch.setattr("forge.storage.run_lock.msvcrt", mock_msvcrt)
+
+    with patch.dict("sys.modules", {"msvcrt": mock_msvcrt}):
+        lock = RunLock(run_dir, run_id="run-win-lock")
+        lock.acquire()
+
+        try:
+            assert lock.is_locked is True
+            assert lock_file.exists()
+
+            # 1. Verify msvcrt.locking was called
+            assert mock_msvcrt.locking.called
+
+            # 2. Crucial test: lock_file metadata is at offset 0 and can be read while locked
+            import json
+            content = lock_file.read_text(encoding="utf-8")
+            meta = json.loads(content)
+            assert meta["pid"] == os.getpid()
+
+            # 3. Verify read_owner_metadata succeeds while lock is active
+            owner_meta = RunLock.read_owner_metadata(lock_file)
+            assert owner_meta["pid"] == os.getpid()
+
+            # 4. Duplicate acquisition from another thread/process must fail with RunOwnershipError
+            # and must successfully populate owner_info
+            import threading
+            err_holder = []
+
+            def acquire_other():
+                try:
+                    lock2 = RunLock(run_dir, run_id="run-win-lock")
+                    lock2.acquire(timeout=0.0)
+                except Exception as e:
+                    err_holder.append(e)
+
+            t = threading.Thread(target=acquire_other)
+            t.start()
+            t.join()
+
+            assert len(err_holder) == 1
+            assert isinstance(err_holder[0], RunOwnershipError)
+            assert err_holder[0].owner_info.get("pid") == os.getpid()
+
+            # 5. is_run_locked returns True
+            assert RunLock.is_run_locked(run_dir) is True
+        finally:
+            lock.release()
+
+        assert lock.is_locked is False
+        assert not lock_file.exists()
+        assert RunLock.is_run_locked(run_dir) is False
