@@ -68,9 +68,32 @@ pip install -e ".[dev]"
 
 ### Windows Users
 
-Forge is primarily developed on Linux. Native Windows is not supported because Forge relies on Linux/WSL-compatible process management for runtime supervision and testing.
+Forge supports both **Native Windows** and **WSL2**:
 
-WSL2 is the recommended environment for Windows users:
+#### Option A: Native Windows
+
+- Open PowerShell or Command Prompt (Windows Terminal recommended for optimal dashboard rendering).
+- Ensure Python (>= 3.10) and Git are installed and available in your Windows `PATH`.
+- Install Forge:
+
+```powershell
+pip install forge-orchestrator
+```
+
+For development:
+
+```powershell
+git clone https://github.com/Mathir14/Forge.git
+cd Forge
+pip install -e ".[dev]"
+```
+
+- When running natively on Windows, install CLI agent tools (such as OpenCode via `npm install -g opencode`, Antigravity, or Codex) in your Windows environment so their `.cmd` or `.exe` binaries are available in `PATH`.
+- Forge automatically executes `.cmd`/`.bat` wrappers via `cmd.exe /c`, uses Windows process groups (`CREATE_NEW_PROCESS_GROUP`) with `taskkill` process-tree cleanup, and uses native `msvcrt` file locking.
+
+#### Option B: WSL2 (Windows Subsystem for Linux)
+
+If you prefer running in a Linux environment on Windows:
 
 - Open your WSL2 terminal.
 - Install Forge inside the WSL2 Linux environment:
@@ -86,8 +109,6 @@ git clone https://github.com/Mathir14/Forge.git
 cd Forge
 pip install -e ".[dev]"
 ```
-
-Installation inside WSL2 follows the normal Linux installation process.
 
 > [!IMPORTANT]
 > **CLI Agent Tools in WSL2**: When running Forge inside WSL2, all CLI agent tools you use (such as **OpenCode**, **Antigravity**, or **Codex**) must be installed natively within the WSL2 Linux distribution (e.g. using `npm install -g opencode` inside your WSL shell). Running Windows-installed agent binaries or npm wrappers exposed across the WSL mount (such as `/mnt/c/Users/.../AppData/Roaming/npm/opencode`) is not supported and will be rejected with an informative error. Make sure your Linux `$PATH` places native Linux binaries before any Windows PATH entries.
@@ -116,7 +137,7 @@ forge doctor
 
 | Component | Requirement | Details |
 | :--- | :--- | :--- |
-| **Operating System** | Linux, WSL2 (recommended for Windows), macOS | Uses standard POSIX process groups and file locking (`flock`). Native Windows is not supported. |
+| **Operating System** | Linux, WSL2, macOS, Native Windows | Uses standard POSIX process groups and file locking (`flock`) on Linux/macOS, and Windows process trees (`CREATE_NEW_PROCESS_GROUP`, `taskkill`) and file locking (`msvcrt`) on Windows. |
 | **Python** | `>= 3.10` | Standard CPython interpreter. |
 | **Git** | `>= 2.25` | Must be available in `PATH` for baseline tracking, diff generation, and commits. |
 | **CLI Agent Tools** | At least one installed | • **OpenCode** (`opencode`)<br>• **Google Antigravity** (`agy` or `antigravity`)<br>• **OpenAI Codex** (`codex`) |
@@ -1051,10 +1072,12 @@ All runs, reports, and evidence are stored in the `.forge/` directory in your pr
 No. Forge's Git service enforces exclusions that ignore `.env`, `.env*`, and `.forge/` from diffs, changed file lists, staging, and automated commits.
 
 ### How does Forge handle concurrent execution?
-Forge enforces kernel-backed file locking (`run.lock`) using `flock` on Linux/macOS. Only one process can execute against a specific run directory at a time. If an active process holds the lock, subsequent commands abort immediately with owner diagnostic information.
+Forge enforces kernel-backed file locking (`run.lock`) using `flock` on Linux/macOS and `msvcrt` on Windows. Only one process can execute against a specific run directory at a time. If an active process holds the lock, subsequent commands abort immediately with owner diagnostic information.
 
 ### What happens if a run is interrupted?
 Run state and stage artifacts are written atomically to disk using temporary files and filesystem renames. If a run is interrupted, all completed stages are safely preserved. You can resume at any time using `forge run --run <run_id>` or `forge auto --run <run_id>`.
 
 ### Does Forge support Windows?
-Forge is primarily developed and tested on Linux. Native Windows is not supported because Forge relies on Linux/WSL-compatible process management for runtime supervision and testing. For Windows users, WSL2 is the recommended environment, where all Forge features and pipeline stages work normally. When running inside WSL2, ensure all AI agent CLI tools (such as OpenCode) are also installed natively within your WSL Linux distribution; Windows host binaries exposed via `/mnt/c` are not supported.
+Yes. Forge supports both **Native Windows** and **WSL2**.
+- On **Native Windows**, Forge manages processes using Windows process groups and `taskkill` process-tree termination, locks runs using `msvcrt.locking`, and runs agent CLI wrappers (`.cmd`/`.bat`) seamlessly via `cmd.exe /c`. For the best terminal dashboard experience, Windows Terminal is recommended.
+- On **WSL2**, Forge runs as a Linux process. Note that when running inside WSL2, AI agent CLI tools (such as OpenCode) must be installed natively within your WSL Linux distribution; Windows host binaries exposed via `/mnt/c` are not supported.

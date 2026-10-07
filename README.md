@@ -28,14 +28,14 @@ Forge is an open-source, CLI-first multi-agent orchestration framework for auton
 
 ## Platform Support
 
-Forge is primarily developed and tested on Linux. For Windows users, WSL2 is the recommended environment.
+Forge supports Linux, WSL2, macOS, and native Windows.
 
 | Platform | Status | Notes |
 | :--- | :--- | :--- |
-| **Linux** | Supported | Primary development and testing platform. |
-| **WSL2** | Supported (Recommended for Windows) | Full compatibility with all pipeline stages and process supervision. Note: CLI agent tools (e.g. OpenCode) must also be installed natively inside the WSL2 Linux environment; Windows host binaries exposed via WSL PATH are not supported. |
+| **Linux** | Supported | Primary development and reference testing platform. |
+| **WSL2** | Supported | Full compatibility with all pipeline stages and process supervision. Note: CLI agent tools (e.g. OpenCode) must be installed natively inside the WSL2 Linux environment; Windows host binaries exposed via WSL PATH are not supported. |
 | **macOS** | Supported | Compatible with POSIX process isolation and standard pipeline execution. |
-| **Native Windows** | Not Supported | Forge relies on Linux/WSL-compatible process management for runtime supervision and testing. |
+| **Native Windows** | Supported | Native Windows process trees (`CREATE_NEW_PROCESS_GROUP`, `taskkill`), file locking (`msvcrt`), and `.cmd`/`.bat` wrappers for agent CLIs. Windows Terminal is recommended for interactive dashboard display. |
 
 ## Installation
 
