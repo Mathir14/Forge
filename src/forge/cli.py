@@ -978,7 +978,6 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
                         sequence_number=seq,
                     )
                 run.summary = sum_obj
-                run.save_metadata()
             else:
                 sum_obj = run.summary
                 for d_name, r_name, seq in planned_stage_defs:
@@ -990,8 +989,13 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
                             role_name=r_name,
                             sequence_number=seq,
                         )
+                sum_obj.final_status = "RUNNING"
+                sum_obj.reason = None
                 run.summary = sum_obj
-                run.save_metadata()
+            run.status = "RUNNING"
+            run.metadata["pipeline_type"] = "pipeline"
+            run.metadata["reconcile_canonical"] = True
+            run.save_metadata()
 
             click.echo(f"\n🚀 [Run: {run.run_id}] Starting Standard Forge Pipeline:")
             click.secho(f"   \"{run.task}\"\n", bold=True)
@@ -1014,7 +1018,13 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
                 if not result.success or not result.machine_report.is_valid or result.status in ("REJECTED", "BLOCKED", "FAILED", "UNKNOWN", "CHANGES_REQUIRED"):
                     click.secho(f"\n⚠️ Pipeline halted at stage '{stage_def.name}' due to status '{result.status}' (Valid: {result.machine_report.is_valid}).", fg="red")
                     run.status = result.status if result.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED") else "FAILED"
-                    _record_final_halt(run, run.status, f"Pipeline halted at stage '{stage_def.name}' due to status '{result.status}'")
+                    if not result.machine_report.is_valid:
+                        val_err = "; ".join(result.machine_report.validation_errors) if result.machine_report.validation_errors else "Invalid machine report"
+                        reason = f"{stage_def.display_name} validation error: {val_err}"
+                    else:
+                        reason = result.machine_report.reason or f"Pipeline halted at stage '{stage_def.name}' due to status '{result.status}'"
+                    _record_stage_transition(run, d_name, run.status, "COMPLETED", duration=result.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, reason=reason, context=context)
+                    _record_final_halt(run, run.status, reason)
                     run.save_metadata()
                     sys.exit(1)
 
@@ -1209,7 +1219,6 @@ def auto_pipeline(
                             sequence_number=seq,
                         )
                     run.summary = sum_obj
-                    run.save_metadata()
                 else:
                     sum_obj = run.summary
                     for d_name, r_name, seq in planned_stage_names:
@@ -1221,8 +1230,13 @@ def auto_pipeline(
                                 role_name=r_name,
                                 sequence_number=seq,
                             )
+                    sum_obj.final_status = "RUNNING"
+                    sum_obj.reason = None
                     run.summary = sum_obj
-                    run.save_metadata()
+                run.status = "RUNNING"
+                run.metadata["pipeline_type"] = "auto"
+                run.metadata["reconcile_canonical"] = True
+                run.save_metadata()
 
                 def _check_abort() -> None:
                     abort_ev = getattr(context, "abort_event", None)
@@ -1261,7 +1275,12 @@ def auto_pipeline(
                     if not stage_res.success or not stage_res.machine_report.is_valid or stage_res.status in ("REJECTED", "BLOCKED", "FAILED", "UNKNOWN", "CHANGES_REQUIRED"):
                         click.secho(f"\n⚠️ Autonomous loop halted: {stage_def.display_name} finished with status '{stage_res.status}'.", fg="red")
                         run.status = stage_res.status if (stage_res.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED")) else "FAILED"
-                        reason = stage_res.machine_report.reason or ("; ".join(stage_res.machine_report.validation_errors) if stage_res.machine_report.validation_errors else None) or f"{stage_def.display_name} finished with status '{stage_res.status}'"
+                        if not stage_res.machine_report.is_valid:
+                            val_err = "; ".join(stage_res.machine_report.validation_errors) if stage_res.machine_report.validation_errors else "Invalid machine report"
+                            reason = f"{stage_def.display_name} validation error: {val_err}"
+                        else:
+                            reason = stage_res.machine_report.reason or f"{stage_def.display_name} finished with status '{stage_res.status}'"
+                        _record_stage_transition(run, stage_def.display_name, run.status, "COMPLETED", duration=stage_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, reason=reason, context=context)
                         _record_final_halt(run, run.status, reason)
                         run.save_metadata()
                         raise AutonomousHalt(
@@ -1315,17 +1334,24 @@ def auto_pipeline(
                         with open(attempt_prod_json, "w", encoding="utf-8") as f:
                             json.dump(producer_res.to_dict(), f, indent=2)
 
-                        if not producer_res.success or producer_res.status in ("FAILED", "BLOCKED", "UNKNOWN", "REJECTED"):
+                        if not producer_res.success or not producer_res.machine_report.is_valid or producer_res.status in ("FAILED", "BLOCKED", "UNKNOWN", "REJECTED"):
+                            p_status = producer_res.status if (producer_res.status in ("BLOCKED", "REJECTED")) else "FAILED"
+                            if not producer_res.machine_report.is_valid:
+                                val_err = "; ".join(producer_res.machine_report.validation_errors) if producer_res.machine_report.validation_errors else "Invalid machine report"
+                                p_reason = f"{producer_def.display_name} validation error: {val_err}"
+                            else:
+                                p_reason = producer_res.machine_report.reason or f"{producer_def.display_name} failed with status '{producer_res.status}'"
+
                             if producer_res.status == "BLOCKED":
-                                click.secho(f"\n⚠️ {producer_def.display_name} blocked: {producer_res.machine_report.reason or 'Requirements blocked'}.", fg="red")
+                                click.secho(f"\n⚠️ {producer_def.display_name} blocked: {p_reason}.", fg="red")
                                 run.status = "BLOCKED"
-                                reason = producer_res.machine_report.reason or "Requirements blocked"
-                                _record_final_halt(run, run.status, reason)
+                                _record_stage_transition(run, producer_def.display_name, run.status, "COMPLETED", duration=producer_res.duration_seconds, role_name=producer_def.name, seq=producer_def.sequence_number, reason=p_reason, context=context)
+                                _record_final_halt(run, run.status, p_reason)
                                 run.save_metadata()
                                 raise AutonomousHalt(
                                     status="BLOCKED",
                                     exit_code=1,
-                                    reason=reason,
+                                    reason=p_reason,
                                     stage_name=producer_def.display_name,
                                     stage_result=producer_res,
                                 )
@@ -1340,14 +1366,14 @@ def auto_pipeline(
                                 continue
                             else:
                                 click.secho(f"\n⚠️ {producer_def.display_name} failed on final attempt with status '{producer_res.status}'.", fg="red")
-                                run.status = producer_res.status if producer_res.status != "UNKNOWN" else "FAILED"
-                                reason = producer_res.machine_report.reason or f"{producer_def.display_name} failed on final attempt"
-                                _record_final_halt(run, run.status, reason)
+                                run.status = p_status
+                                _record_stage_transition(run, producer_def.display_name, run.status, "COMPLETED", duration=producer_res.duration_seconds, role_name=producer_def.name, seq=producer_def.sequence_number, reason=p_reason, context=context)
+                                _record_final_halt(run, run.status, p_reason)
                                 run.save_metadata()
                                 raise AutonomousHalt(
                                     status=run.status,
                                     exit_code=1,
-                                    reason=reason,
+                                    reason=p_reason,
                                     stage_name=producer_def.display_name,
                                     stage_result=producer_res,
                                 )
@@ -1440,7 +1466,14 @@ def auto_pipeline(
                     final_status = latest_verifier_res.status if (latest_verifier_res and latest_verifier_res.status != "UNKNOWN") else "FAILED"
                     run.task = task
                     run.status = final_status
-                    reason = (latest_verifier_res.machine_report.reason if latest_verifier_res else None) or f"Finished without approval (Status: {run.status})"
+                    if latest_verifier_res and not latest_verifier_res.machine_report.is_valid:
+                        val_err = "; ".join(latest_verifier_res.machine_report.validation_errors) if latest_verifier_res.machine_report.validation_errors else "Invalid machine report"
+                        reason = f"{latest_verifier_res.role.name.capitalize()} validation error: {val_err}"
+                    else:
+                        reason = (latest_verifier_res.machine_report.reason if latest_verifier_res else None) or f"Finished without approval (Status: {run.status})"
+                    if latest_verifier_res:
+                        seq_val = getattr(latest_verifier_res.role, "sequence_number", None)
+                        _record_stage_transition(run, latest_verifier_res.role.name.capitalize(), run.status, "COMPLETED", duration=latest_verifier_res.duration_seconds, role_name=latest_verifier_res.role.name, seq=seq_val, reason=reason, context=context)
                     _record_final_halt(run, final_status, reason)
                     run.save_metadata()
                     click.secho(f"\n⚠️ Autonomous Loop finished without approval for {run.run_id} (Status: {run.status}).", fg="red")
@@ -1474,7 +1507,12 @@ def auto_pipeline(
                         click.secho(f"\n⚠️ {audit_label} audit reported non-success status '{critic_res.status}'.", fg="red")
                         run.task = task
                         run.status = critic_res.status if (critic_res.status in ("BLOCKED", "REJECTED", "CHANGES_REQUIRED")) else "FAILED"
-                        reason = critic_res.machine_report.reason or ("; ".join(critic_res.machine_report.validation_errors) if critic_res.machine_report.validation_errors else None) or f"{audit_label} audit failed with status '{critic_res.status}'"
+                        if not critic_res.machine_report.is_valid:
+                            val_err = "; ".join(critic_res.machine_report.validation_errors) if critic_res.machine_report.validation_errors else "Invalid machine report"
+                            reason = f"{audit_label} validation error: {val_err}"
+                        else:
+                            reason = critic_res.machine_report.reason or f"{audit_label} audit failed with status '{critic_res.status}'"
+                        _record_stage_transition(run, d_name, run.status, "COMPLETED", duration=critic_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, reason=reason, context=context)
                         _record_final_halt(run, run.status, reason)
                         run.save_metadata()
                         raise AutonomousHalt(
@@ -1544,6 +1582,9 @@ def auto_pipeline(
                     except Exception as exc:
                         pipeline_exception.append(exc)
                         pipeline_exit_code[0] = 1
+                    except BaseException as be:
+                        pipeline_exception.append(be)
+                        pipeline_exit_code[0] = 130 if isinstance(be, KeyboardInterrupt) else 1
                     finally:
                         stop_event.set()
 

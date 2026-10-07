@@ -83,12 +83,13 @@ class MachineReportValidator:
         normalized_data = {str(k).upper(): v for k, v in data.items()}
 
         # 1. Role validation
-        role = str(normalized_data.get("ROLE", expected_role)).upper()
-        if role != expected_role.upper():
-            errors.append(f"Expected role '{expected_role.upper()}', got '{role}'")
+        emitted_role = str(normalized_data.get("ROLE", expected_role)).upper()
+        if emitted_role != expected_role.upper():
+            errors.append(f"Expected role '{expected_role.upper()}', got '{emitted_role}'")
+        role = expected_role.upper()
 
         # 1.1 Enforce ADR-002 Score-Free policy for TESTER
-        if expected_role.upper() == "TESTER" or role == "TESTER":
+        if expected_role.upper() == "TESTER" or emitted_role == "TESTER":
             if "SCORES" in normalized_data or "SCORE" in normalized_data:
                 errors.append(
                     "Tester machine report strictly disallows 'SCORES' or subjective numeric ratings. "
@@ -214,6 +215,10 @@ class MachineReportValidator:
                 custom_fields[k] = v
 
         is_valid = len(errors) == 0
+        if not is_valid:
+            from forge.stages.definition import StageOrder
+            if StageOrder.is_success_status(status, expected_role.lower()):
+                status = "FAILED"
         return MachineReport(
             role=role,
             status=status,

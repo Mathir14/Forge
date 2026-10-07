@@ -423,7 +423,7 @@ class Stage:
                 timeout_type
                 or (self.abort_event is not None and self.abort_event.is_set())
             )
-            if hasattr(self.adapter, "cancel") and (is_intentional_stop or worker_thread.is_alive()):
+            if hasattr(self.adapter, "cancel") and is_intentional_stop:
                 try:
                     self.adapter.cancel()
                 except Exception as exc:

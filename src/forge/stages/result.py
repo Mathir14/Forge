@@ -20,6 +20,10 @@ class StageResult:
 
     @property
     def status(self) -> str:
+        if not self.machine_report.is_valid:
+            from forge.stages.definition import StageOrder
+            if StageOrder.is_success_status(self.machine_report.status, self.role.name):
+                return "FAILED"
         return self.machine_report.status
 
     @property

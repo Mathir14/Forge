@@ -416,8 +416,15 @@ class BaseAdapter(ABC):
                     cls._safe_kill(proc)
                     return
 
-                # Guard against protected/system process groups or non-integer PGIDs.
-                if type(pgid) is not int or pgid <= 1:
+                # Guard against protected/system process groups, caller's own process group, or PID.
+                current_pgid = os.getpgrp() if hasattr(os, "getpgrp") else None
+                current_pid = os.getpid()
+                if (
+                    type(pgid) is not int
+                    or pgid <= 1
+                    or (current_pgid is not None and pgid == current_pgid)
+                    or pgid == current_pid
+                ):
                     cls._safe_kill(proc)
                     return
 

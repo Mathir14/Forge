@@ -123,7 +123,10 @@ class DashboardApp:
             self.state.terminal_status = failed_stage.status
             self.state.terminal_stage = failed_stage.stage_name
             reason = None
-            if failed_stage.machine_report and failed_stage.machine_report.reason:
+            if failed_stage.machine_report and not failed_stage.machine_report.is_valid:
+                val_err = "; ".join(failed_stage.machine_report.validation_errors) if failed_stage.machine_report.validation_errors else "Invalid machine report"
+                reason = f"{failed_stage.stage_name} validation error: {val_err}"
+            elif failed_stage.machine_report and failed_stage.machine_report.reason:
                 reason = failed_stage.machine_report.reason
             elif failed_stage.exit_code == 124:
                 reason = "Execution timed out (exit code 124)."
@@ -414,8 +417,10 @@ class DashboardApp:
                         self.handle_key(key)
                         live.update(self.create_layout(), refresh=True)
 
-        except (KeyboardInterrupt, SystemExit):
+        except KeyboardInterrupt:
             pass
+        except SystemExit:
+            raise
         finally:
             try:
                 # Restore cursor and original screen buffer

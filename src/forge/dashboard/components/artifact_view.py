@@ -78,12 +78,14 @@ def _render_machine_report(stage, scroll_offset: int, max_lines: int) -> Rendera
 
     # 1. Properties Table
     grid = Table.grid(padding=(0, 2))
-    grid.add_column("Key", style="bold cyan", width=14)
+    grid.add_column("Key", style="bold cyan", width=20)
     grid.add_column("Value", ratio=1)
 
-    status_style = "bold green" if mr.status in ("APPROVED", "VERIFIED", "SUCCESS") else "bold red"
-    grid.add_row("ROLE:", Text(mr.role or stage.role_name.upper()))
+    status_style = "bold green" if (mr.status in ("APPROVED", "VERIFIED", "SUCCESS", "PASS", "READY", "CRITIQUE_COMPLETE") and mr.is_valid) else "bold red"
+    grid.add_row("ROLE:", Text(stage.role_name.upper()))
     grid.add_row("STATUS:", Text(mr.status, style=status_style))
+    if not mr.is_valid and mr.validation_errors:
+        grid.add_row("VALIDATION ERRORS:", Text("; ".join(mr.validation_errors), style="bold red"))
     grid.add_row("HANDOFF:", Text(mr.handoff or "NONE", style="yellow"))
     if mr.confidence:
         grid.add_row("CONFIDENCE:", Text(mr.confidence))

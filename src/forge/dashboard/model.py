@@ -346,17 +346,8 @@ class RunModel:
                 status = "CORRUPT_METADATA"
 
         # Check for active run lock
-        lock_file = run_dir / "run_lock.json"
-        is_active = False
-        if lock_file.exists():
-            try:
-                with open(lock_file, "r", encoding="utf-8") as f:
-                    lock_data = json.load(f)
-                # If lock has an active PID, consider it active
-                if lock_data.get("pid"):
-                    is_active = True
-            except Exception:
-                pass
+        from forge.storage.run_lock import RunLock
+        is_active = RunLock.is_run_locked(run_dir)
 
         # 2. Discover stage files
         # Canonical stages
@@ -369,7 +360,7 @@ class RunModel:
                     continue
 
                 # Ignore metadata and git baseline
-                if p.name in ("metadata.json", "git_baseline.json", "run_lock.json"):
+                if p.name in ("metadata.json", "git_baseline.json", "run_lock.json", "run.lock"):
                     continue
 
                 # Match patterns like 01_architect.json, 01_architect.md, 03_executor_attempt_1.json
@@ -403,6 +394,10 @@ class RunModel:
                 base_stages[key] = files
 
         # Determine whether to reconcile the full canonical autonomous pipeline
+        has_summary = bool(
+            ("metadata" in meta_dict and isinstance(meta_dict["metadata"], dict) and "summary" in meta_dict["metadata"])
+            or ("summary" in meta_dict and isinstance(meta_dict["summary"], dict))
+        )
         has_pre_critic = "00_critic" in base_stages or any(k.startswith("00_") for k in base_stages)
         is_only_critic = has_pre_critic and all(k == "00_critic" or k.startswith("00_") for k in base_stages)
         should_reconcile = (
@@ -411,6 +406,8 @@ class RunModel:
             or is_active
             or status in ("PENDING", "RUNNING", "IN_PROGRESS", "UNKNOWN")
             or meta_dict.get("reconcile_canonical", False)
+            or meta_dict.get("pipeline_type") in ("auto", "pipeline")
+            or has_summary
         )
 
         no_critic = meta_dict.get("no_critic", False)
@@ -580,24 +577,37 @@ class RunModel:
             try:
                 with open(files["json"], "r", encoding="utf-8") as f:
                     json_meta = json.load(f)
-                status = json_meta.get("status", "UNKNOWN")
-                duration = float(json_meta.get("duration_seconds", 0.0))
-                exit_code = json_meta.get("exit_code")
-                prompt_hash = json_meta.get("prompt_hash")
+                status = json_meta.get("status") or json_meta.get("STATUS") or "UNKNOWN"
+                duration = float(json_meta.get("duration_seconds") or json_meta.get("DURATION") or json_meta.get("duration") or 0.0)
+                exit_code = json_meta.get("exit_code") if json_meta.get("exit_code") is not None else json_meta.get("EXIT_CODE")
+                prompt_hash = json_meta.get("prompt_hash") or json_meta.get("PROMPT_HASH")
 
-                raw_mr = json_meta.get("machine_report")
+                raw_mr = json_meta.get("machine_report") or json_meta.get("MACHINE_REPORT")
                 if isinstance(raw_mr, dict):
+                    raw_mr_role = raw_mr.get("role") or raw_mr.get("ROLE")
+                    mr_is_valid = raw_mr.get("is_valid", True)
+                    mr_validation_errors = list(raw_mr.get("validation_errors", []))
+                    if raw_mr_role and str(raw_mr_role).upper() != role_name.upper():
+                        mr_is_valid = False
+                        err_msg = f"Expected role '{role_name.upper()}', got '{str(raw_mr_role).upper()}'"
+                        if err_msg not in mr_validation_errors:
+                            mr_validation_errors.append(err_msg)
+                    mr_status = str(raw_mr.get("status") or raw_mr.get("STATUS") or "UNKNOWN")
+                    if not mr_is_valid and StageOrder.is_success_status(mr_status, role_name):
+                        mr_status = "FAILED"
+                        if status in StageOrder.ALL_SUCCESS_STATUSES:
+                            status = "FAILED"
                     machine_report = MachineReportModel(
-                        role=raw_mr.get("role") or raw_mr.get("ROLE") or role_name.upper(),
-                        status=raw_mr.get("status") or raw_mr.get("STATUS") or "UNKNOWN",
+                        role=role_name.upper(),
+                        status=mr_status,
                         handoff=raw_mr.get("handoff") or raw_mr.get("HANDOFF"),
                         reason=raw_mr.get("reason") or raw_mr.get("REASON") or "",
                         confidence=raw_mr.get("confidence") or raw_mr.get("CONFIDENCE") or "",
                         issues=raw_mr.get("issues") or raw_mr.get("ISSUES") or {},
                         next_action=raw_mr.get("next_action") or raw_mr.get("NEXT_ACTION") or "",
                         raw_data=raw_mr,
-                        is_valid=raw_mr.get("is_valid", True),
-                        validation_errors=raw_mr.get("validation_errors", []),
+                        is_valid=mr_is_valid,
+                        validation_errors=mr_validation_errors,
                     )
             except Exception:
                 status = "CORRUPT_STAGE_JSON"
@@ -690,9 +700,18 @@ class RunModel:
             data, raw_yaml = MachineReportParser.extract_yaml(raw_text, expected_role=role_name)
         machine_model = None
         if data:
+            emitted_role = str(data.get("ROLE") or data.get("role") or role_name.upper())
+            errors = []
+            is_valid = True
+            if emitted_role.upper() != role_name.upper():
+                is_valid = False
+                errors.append(f"Expected role '{role_name.upper()}', got '{emitted_role.upper()}'")
+            mr_status = str(data.get("STATUS") or data.get("status") or "UNKNOWN")
+            if not is_valid and StageOrder.is_success_status(mr_status, role_name):
+                mr_status = "FAILED"
             machine_model = MachineReportModel(
-                role=str(data.get("ROLE") or data.get("role") or role_name.upper()),
-                status=str(data.get("STATUS") or data.get("status") or "UNKNOWN"),
+                role=role_name.upper(),
+                status=mr_status,
                 handoff=data.get("HANDOFF") or data.get("handoff"),
                 reason=str(data.get("REASON") or data.get("reason") or ""),
                 confidence=str(data.get("CONFIDENCE") or data.get("confidence") or ""),
@@ -700,7 +719,8 @@ class RunModel:
                 next_action=str(data.get("NEXT_ACTION") or data.get("next_action") or ""),
                 raw_yaml=raw_yaml,
                 raw_data=data,
-                is_valid=True,
+                is_valid=is_valid,
+                validation_errors=errors,
             )
 
         # 2. Slice human report (everything prior to ## Machine Report)
