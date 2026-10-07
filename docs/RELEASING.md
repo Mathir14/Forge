@@ -23,7 +23,7 @@ Developer
   │
   ├─ 1. Bump version in pyproject.toml & src/forge/__init__.py
   ├─ 2. Commit changes
-  ├─ 3. Tag (e.g., git tag -a v0.1.0b9 -m "Release v0.1.0b9")
+  ├─ 3. Tag (e.g., git tag -a v0.1.0b10 -m "Release v0.1.0b10")
   └─ 4. Push tag to GitHub
         │
 GitHub Actions (.github/workflows/release.yml)
@@ -106,8 +106,8 @@ To cut a new release:
 ### Step 1: Bump Version & Validate Locally
 
 Update the version in:
-- `pyproject.toml` (e.g. `version = "0.1.0b9"`)
-- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b9"`)
+- `pyproject.toml` (e.g. `version = "0.1.0b10"`)
+- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b10"`)
 
 Run local tests to confirm:
 ```bash
@@ -117,11 +117,11 @@ pytest
 ### Step 2: Commit and Tag
 
 ```bash
-git commit -am "chore: release v0.1.0b9"
+git commit -am "chore: release v0.1.0b10"
 git push origin master
 
-git tag -a v0.1.0b9 -m "Release v0.1.0b9"
-git push origin v0.1.0b9
+git tag -a v0.1.0b10 -m "Release v0.1.0b10"
+git push origin v0.1.0b10
 ```
 
 ### Step 3: Monitor Staged Release in GitHub Actions
@@ -148,3 +148,15 @@ git push origin v0.1.0b9
 | **Beta** | `0.2.0b1` | `v0.2.0b1` | TestPyPI / PyPI |
 | **Release Candidate** | `0.2.0rc1` | `v0.2.0rc1` | TestPyPI / PyPI |
 | **Final / Stable** | `0.2.0` | `v0.2.0` | PyPI |
+
+---
+
+## 6. Release Notes: v0.1.0b10
+
+`v0.1.0b10` is a corrective release following the `v0.1.0b9` Native Windows release.
+
+- **Windows RunLock mandatory-locking compatibility fix**: On Windows NT, byte-range locking via `msvcrt.locking` is kernel-enforced and mandatory.
+- **Windows lock byte moved away from owner metadata**: Windows file lock offset moved to `WINDOWS_LOCK_OFFSET` (1 GiB) instead of byte 0.
+- **Diagnostic metadata readable while locked**: `run.lock` owner diagnostic metadata at offset 0 remains readable while locked without triggering `PermissionError` (`ERROR_LOCK_VIOLATION`).
+- **Regression coverage added**: Dedicated regression test `test_windows_run_lock_uses_windows_lock_offset` in `tests/test_windows_platform_support.py`.
+- **Full Linux/Windows matrix validation**: Verified across full 8-job CI matrix (Ubuntu 3.10–3.13 and Windows 3.10–3.13).
