@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any, List, Set, Iterator, Iterable, Callable,
 from forge.adapters.base import BaseAdapter, AdapterResponse
 from forge.core.capabilities import Capability
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
+from forge.core.platform import get_process_group_flags, prepare_command
 
 logger = logging.getLogger(__name__)
 
@@ -716,12 +717,12 @@ class AntigravityAdapter(BaseAdapter):
             "errors": "replace",
             "bufsize": 1,
         }
-        if os.name == "posix":
-            popen_kwargs["start_new_session"] = True
+        popen_kwargs.update(get_process_group_flags())
 
         proc: Optional[subprocess.Popen] = None
         try:
-            proc = subprocess.Popen(cmd, **popen_kwargs)
+            prepared_cmd = prepare_command(cmd)
+            proc = subprocess.Popen(prepared_cmd, **popen_kwargs)
             self._register_proc(proc, instance=self)
 
             def _get_returncode() -> Optional[int]:

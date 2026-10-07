@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Tuple, Union, Iterator
 
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
+from forge.core.platform import (
+    get_process_group_flags,
+    prepare_command,
+    terminate_process_tree,
+    safe_kill,
+)
 
 
 _ORIGINAL_SUBPROCESS_RUN = subprocess.run
@@ -210,14 +216,14 @@ class BaseAdapter(ABC):
             - COMPLETE: on successful termination (exit code 0), carrying ExecutionResult.
             - ERROR: on non-zero exit code, carrying ExecutionResult and error details.
         """
-        start = time.time()
+        start = time.perf_counter()
         resp = self.execute(prompt=prompt, cwd=cwd, timeout=timeout)
-        duration = time.time() - start
+        duration = max(time.perf_counter() - start, 0.0001)
 
         if resp.stdout:
             yield AgentEvent(
                 event_type=AgentEventType.CHUNK,
-                timestamp=start,
+                timestamp=time.time(),
                 text=resp.stdout,
             )
 
@@ -390,51 +396,12 @@ class BaseAdapter(ABC):
     @staticmethod
     def _safe_kill(proc: subprocess.Popen) -> None:
         """Best-effort process termination ignoring missing or already-exited processes."""
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        safe_kill(proc)
 
     @classmethod
     def _kill_process_group(cls, proc: subprocess.Popen) -> None:
         """Terminate or kill the entire process group of proc to prevent orphaned children."""
-        try:
-            pid = getattr(proc, "pid", None)
-            # Guard against invalid or mocked PIDs. Cleanup must only target process
-            # groups belonging to genuine child subprocesses. Reject non-integer PIDs
-            # and protected/system process groups (PGID <= 1) to avoid signalling
-            # unintended processes.
-            if type(pid) is not int or pid <= 1:
-                if type(pid) is not int:
-                    cls._safe_kill(proc)
-                return
-
-            if os.name == "posix":
-                try:
-                    pgid = os.getpgid(pid)
-                except (ProcessLookupError, PermissionError, OSError):
-                    cls._safe_kill(proc)
-                    return
-
-                # Guard against protected/system process groups, caller's own process group, or PID.
-                current_pgid = os.getpgrp() if hasattr(os, "getpgrp") else None
-                current_pid = os.getpid()
-                if (
-                    type(pgid) is not int
-                    or pgid <= 1
-                    or (current_pgid is not None and pgid == current_pgid)
-                    or pgid == current_pid
-                ):
-                    cls._safe_kill(proc)
-                    return
-
-                os.killpg(pgid, signal.SIGTERM)
-                time.sleep(0.1)
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                cls._safe_kill(proc)
-        except Exception:
-            cls._safe_kill(proc)
+        terminate_process_tree(proc, safe_kill_fn=cls._safe_kill)
 
     @classmethod
     def _run_subprocess(
@@ -446,9 +413,10 @@ class BaseAdapter(ABC):
     ) -> Tuple[str, str, int]:
         """Run subprocess with process group isolation and guaranteed cleanup of child processes."""
         work_dir = cwd or Path.cwd()
+        prepared_cmd = prepare_command(cmd)
         if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
             res = subprocess.run(
-                cmd,
+                prepared_cmd,
                 input=input_data,
                 cwd=work_dir,
                 capture_output=True,
@@ -468,10 +436,9 @@ class BaseAdapter(ABC):
             "encoding": "utf-8",
             "errors": "replace",
         }
-        if os.name == "posix":
-            popen_kwargs["start_new_session"] = True
+        popen_kwargs.update(get_process_group_flags())
 
-        proc = subprocess.Popen(cmd, **popen_kwargs)
+        proc = subprocess.Popen(prepared_cmd, **popen_kwargs)
         cls._register_proc(proc)
         try:
             stdout, stderr = proc.communicate(input=input_data, timeout=timeout)

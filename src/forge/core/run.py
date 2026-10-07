@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import json
 import tempfile
+import time
 
 
 @dataclass
@@ -84,7 +85,17 @@ class Run:
         ) as f:
             json.dump(data, f, indent=2)
             tmp_path = Path(f.name)
-        tmp_path.replace(self.metadata_file)
+        # Retry loop for atomic replace on Windows where concurrent readers/writers
+        # may transiently lock the target file.
+        max_retries = 10
+        for attempt in range(max_retries):
+            try:
+                tmp_path.replace(self.metadata_file)
+                break
+            except OSError:
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
 
     @classmethod
     def load(cls, run_dir: Path) -> "Run":

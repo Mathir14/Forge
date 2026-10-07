@@ -25,6 +25,7 @@ from forge.dashboard.components.compare_view import render_compare_view
 from forge.dashboard.components.footer import render_footer
 from forge.dashboard.components.terminal_banner import render_terminal_banner
 from forge.dashboard.components.navigation import render_tab_navigation
+from forge.core.platform import is_tty, get_terminal_session
 from forge.stages.definition import StageOrder
 
 
@@ -323,7 +324,7 @@ class DashboardApp:
 
     def run(self) -> int:
         """Run the interactive dashboard loop. Falls back to static render if stdin is not a TTY."""
-        if not sys.stdin.isatty():
+        if not is_tty(sys.stdin):
             if self.live_queue is not None:
                 while True:
                     while True:
@@ -342,13 +343,8 @@ class DashboardApp:
                 self.console.print("\n" + summary.format_text())
             return 0
 
-        # POSIX terminal raw/cbreak setup
-        import termios
-        import tty
         import io
 
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         target_out = sys.__stdout__ if sys.__stdout__ is not None else old_stdout
@@ -357,65 +353,68 @@ class DashboardApp:
         captured_err = io.StringIO()
         terminal_state_applied = False
 
+        term_session = get_terminal_session(sys.stdin, read_key_fn=self._read_key)
         try:
-            if self.live_queue is not None:
-                sys.stdout = captured_out
-                sys.stderr = captured_err
-            elif not self.state.terminal_status:
-                if self.run_model.status not in ("PENDING", "RUNNING", "IN_PROGRESS", "UNKNOWN"):
-                    self._apply_terminal_state()
-                    terminal_state_applied = True
+            with term_session:
+                if self.live_queue is not None:
+                    sys.stdout = captured_out
+                    sys.stderr = captured_err
+                elif not self.state.terminal_status:
+                    if self.run_model.status not in ("PENDING", "RUNNING", "IN_PROGRESS", "UNKNOWN"):
+                        self._apply_terminal_state()
+                        terminal_state_applied = True
 
-            tty.setcbreak(fd)
-            # Enter alternate buffer and hide cursor
-            target_out.write("\x1b[?1049h\x1b[H\x1b[?25l")
-            target_out.flush()
+                # Enter alternate buffer and hide cursor
+                try:
+                    target_out.write("\x1b[?1049h\x1b[H\x1b[?25l")
+                    target_out.flush()
+                except Exception:
+                    pass
 
-            layout = self.create_layout()
-            last_size = self.console.size
-            with Live(layout, console=self.console, screen=False, auto_refresh=False) as live:
-                live.update(self.create_layout(), refresh=True)
+                layout = self.create_layout()
+                last_size = self.console.size
+                with Live(layout, console=self.console, screen=False, auto_refresh=False) as live:
+                    live.update(self.create_layout(), refresh=True)
 
-                while not self.state.should_exit:
-                    # 1. Drain live event queue if attached to running pipeline
-                    if self.live_queue is not None:
-                        drained = False
-                        while True:
-                            try:
-                                ev = self.live_queue.get_nowait()
-                                self.run_model.apply_event(ev)
-                                drained = True
-                            except (queue.Empty, Exception):
-                                break
-                        if drained:
-                            live.update(self.create_layout(), refresh=True)
-                        if self.stop_event is not None and self.stop_event.is_set() and self.live_queue.empty():
-                            if not terminal_state_applied:
-                                self._apply_terminal_state()
-                                terminal_state_applied = True
+                    while not self.state.should_exit:
+                        # 1. Drain live event queue if attached to running pipeline
+                        if self.live_queue is not None:
+                            drained = False
+                            while True:
+                                try:
+                                    ev = self.live_queue.get_nowait()
+                                    self.run_model.apply_event(ev)
+                                    drained = True
+                                except (queue.Empty, Exception):
+                                    break
+                            if drained:
+                                live.update(self.create_layout(), refresh=True)
+                            if self.stop_event is not None and self.stop_event.is_set() and self.live_queue.empty():
+                                if not terminal_state_applied:
+                                    self._apply_terminal_state()
+                                    terminal_state_applied = True
+                                    live.update(self.create_layout(), refresh=True)
+
+                        # 2. Live duration timer update for active stage
+                        if self.run_model.is_active and self.run_model.active_stage_name:
+                            active_st = self.run_model.get_stage(self.run_model.active_stage_name)
+                            st_t = self.run_model.stage_start_times.get(self.run_model.active_stage_name)
+                            if active_st and st_t:
+                                active_st.duration_seconds = time.time() - st_t
+                                self.run_model.total_duration_seconds = sum(s.duration_seconds for s in self.run_model.stages)
                                 live.update(self.create_layout(), refresh=True)
 
-                    # 2. Live duration timer update for active stage
-                    if self.run_model.is_active and self.run_model.active_stage_name:
-                        active_st = self.run_model.get_stage(self.run_model.active_stage_name)
-                        st_t = self.run_model.stage_start_times.get(self.run_model.active_stage_name)
-                        if active_st and st_t:
-                            active_st.duration_seconds = time.time() - st_t
-                            self.run_model.total_duration_seconds = sum(s.duration_seconds for s in self.run_model.stages)
+                        # 3. Check terminal resize
+                        current_size = self.console.size
+                        if current_size != last_size:
+                            last_size = current_size
                             live.update(self.create_layout(), refresh=True)
 
-                    # 3. Check terminal resize
-                    current_size = self.console.size
-                    if current_size != last_size:
-                        last_size = current_size
-                        live.update(self.create_layout(), refresh=True)
-
-                    # 4. Non-blocking poll for user input (50ms interval)
-                    r, _, _ = select.select([fd], [], [], 0.05)
-                    if r:
-                        key = self._read_key(fd)
-                        self.handle_key(key)
-                        live.update(self.create_layout(), refresh=True)
+                        # 4. Non-blocking poll for user input (50ms interval)
+                        key = term_session.poll_key(timeout=0.05)
+                        if key:
+                            self.handle_key(key)
+                            live.update(self.create_layout(), refresh=True)
 
         except KeyboardInterrupt:
             pass
@@ -426,7 +425,6 @@ class DashboardApp:
                 # Restore cursor and original screen buffer
                 target_out.write("\x1b[?25h\x1b[?1049l")
                 target_out.flush()
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
             except Exception:
                 pass
             sys.stdout = old_stdout

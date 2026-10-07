@@ -136,25 +136,32 @@ def _print_stage_summary(result: StageResult, run_id: str, role_name: str, seq: 
 
 
 def _setup_cli_sigterm_handler() -> None:
-    """Install graceful SIGTERM handler exclusively at the CLI boundary, preserving/chaining existing handlers."""
+    """Install graceful SIGTERM / SIGBREAK handlers exclusively at the CLI boundary, preserving/chaining existing handlers."""
     if threading.current_thread() is not threading.main_thread():
         return
-    try:
-        prev_handler = signal.getsignal(signal.SIGTERM)
-        if prev_handler == signal.SIG_IGN:
-            return
+    targets = [signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        targets.append(signal.SIGBREAK)
 
-        def _handle_sigterm(signum, frame):
-            if callable(prev_handler) and prev_handler not in (signal.SIG_DFL, signal.SIG_IGN):
-                try:
-                    prev_handler(signum, frame)
-                except Exception:
-                    pass
-            sys.exit(128 + signum)
+    for sig in targets:
+        try:
+            prev_handler = signal.getsignal(sig)
+            if prev_handler == signal.SIG_IGN:
+                continue
 
-        signal.signal(signal.SIGTERM, _handle_sigterm)
-    except (ValueError, OSError):
-        pass
+            def _make_handler(prev):
+                def _handle_signal(signum, frame):
+                    if callable(prev) and prev not in (signal.SIG_DFL, signal.SIG_IGN):
+                        try:
+                            prev(signum, frame)
+                        except Exception:
+                            pass
+                    sys.exit(128 + signum)
+                return _handle_signal
+
+            signal.signal(sig, _make_handler(prev_handler))
+        except (ValueError, OSError):
+            pass
 
 
 @click.group()

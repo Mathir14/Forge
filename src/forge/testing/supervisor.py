@@ -18,7 +18,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
+
+from forge.core.platform import terminate_process_tree, get_process_group_flags
 
 logger = logging.getLogger(__name__)
 
@@ -144,19 +146,23 @@ class RuntimeSupervisor:
         process_env["PYTHONUNBUFFERED"] = "1"
         process_env["NODE_ENV"] = "development"
 
-        # 5. Spawn child process in a new session group (os.setsid)
+        # 5. Spawn child process in a new session group (os.setsid on POSIX, CREATE_NEW_PROCESS_GROUP on Windows)
         cmd_args = final_cmd if isinstance(final_cmd, str) else " ".join(final_cmd)
         logger.info("Starting runtime command: %s (cwd=%s)", cmd_args, self.project_root)
 
-        self.process = subprocess.Popen(
-            cmd_args,
-            shell=True,
-            cwd=str(self.project_root),
-            stdout=self._stdout_handle,
-            stderr=self._stderr_handle,
-            env=process_env,
-            preexec_fn=os.setsid,  # Create new process group for clean tree kill
-        )
+        popen_kwargs: Dict[str, Any] = {
+            "shell": True,
+            "cwd": str(self.project_root),
+            "stdout": self._stdout_handle,
+            "stderr": self._stderr_handle,
+            "env": process_env,
+        }
+        if os.name == "posix":
+            popen_kwargs["preexec_fn"] = getattr(os, "setsid", None)
+        elif os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+
+        self.process = subprocess.Popen(cmd_args, **popen_kwargs)
 
         # 6. Wait for readiness
         target_url = readiness_url or (f"http://127.0.0.1:{final_port}" if final_port else None)
@@ -232,7 +238,7 @@ class RuntimeSupervisor:
         return stdout_txt, stderr_txt
 
     def stop(self) -> None:
-        """Cleanly terminate the entire process group (SIGTERM -> wait -> SIGKILL)."""
+        """Cleanly terminate the entire process tree."""
         if self.attached_to_existing:
             logger.info("Supervisor attached to existing instance; leaving process running.")
             return
@@ -240,29 +246,7 @@ class RuntimeSupervisor:
         if not self.process:
             return
 
-        pid = self.process.pid
-        if self.process.poll() is None:
-            try:
-                pgid = os.getpgid(pid)
-                logger.info("Sending SIGTERM to process group %d (pid %d)", pgid, pid)
-                os.killpg(pgid, signal.SIGTERM)
-                
-                # Wait up to grace period
-                deadline = time.time() + self.grace_period_seconds
-                while time.time() < deadline:
-                    if self.process.poll() is not None:
-                        break
-                    time.sleep(0.1)
-
-                # Escalate to SIGKILL if still alive
-                if self.process.poll() is None:
-                    logger.warning("Process group %d did not terminate; escalating to SIGKILL", pgid)
-                    os.killpg(pgid, signal.SIGKILL)
-                    self.process.wait(timeout=2.0)
-            except ProcessLookupError:
-                pass
-            except Exception as e:
-                logger.error("Error shutting down process tree for pid %d: %s", pid, e)
+        terminate_process_tree(self.process, timeout=self.grace_period_seconds)
 
         # Close log handles
         if self._stdout_handle and not self._stdout_handle.closed:

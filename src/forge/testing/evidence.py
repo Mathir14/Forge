@@ -174,7 +174,10 @@ echo "Expected: {defect.expected}"
 echo "Actual:   {defect.actual}"
 '''
             repro_file.write_text(repro_content, encoding="utf-8")
-            repro_file.chmod(0o755)
+            try:
+                repro_file.chmod(0o755)
+            except OSError:
+                pass
             return repro_file
 
         else:

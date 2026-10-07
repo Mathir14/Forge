@@ -169,6 +169,8 @@ class RunLock:
                     return True
             elif msvcrt is not None:
                 try:
+                    if os.fstat(fd).st_size == 0:
+                        return False
                     os.lseek(fd, 0, os.SEEK_SET)
                     msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                     os.lseek(fd, 0, os.SEEK_SET)
@@ -236,6 +238,9 @@ class RunLock:
                     locked = False
             elif msvcrt is not None:
                 try:
+                    if os.fstat(fd).st_size == 0:
+                        os.write(fd, b" ")
+                        os.lseek(fd, 0, os.SEEK_SET)
                     os.lseek(fd, 0, os.SEEK_SET)
                     msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                     locked = True

@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any, List, Set, Iterator, Iterable, Callable,
 from forge.adapters.base import BaseAdapter, AdapterResponse
 from forge.core.capabilities import Capability
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
+from forge.core.platform import get_process_group_flags, prepare_command
 
 logger = logging.getLogger(__name__)
 
@@ -352,9 +353,10 @@ class OpenCodeAdapter(BaseAdapter):
             return OpenCodeAdapter._model_variants_cache
 
         cmd = [bin_path, "api", "model.list"]
+        prepared_cmd = prepare_command(cmd)
         try:
             res = subprocess.run(
-                cmd,
+                prepared_cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.OPENCODE_METADATA_TIMEOUT,
@@ -1138,12 +1140,12 @@ class OpenCodeAdapter(BaseAdapter):
             "errors": "replace",
             "bufsize": 1,
         }
-        if os.name == "posix":
-            popen_kwargs["start_new_session"] = True
+        popen_kwargs.update(get_process_group_flags())
 
         proc: Optional[subprocess.Popen] = None
         try:
-            proc = subprocess.Popen(cmd, **popen_kwargs)
+            prepared_cmd = prepare_command(cmd)
+            proc = subprocess.Popen(prepared_cmd, **popen_kwargs)
             self._register_proc(proc, instance=self)
             if proc.stdin:
                 try:
@@ -1302,9 +1304,10 @@ class OpenCodeAdapter(BaseAdapter):
             return None
 
         cmd = [bin_path, "api", method, endpoint]
+        prepared_cmd = prepare_command(cmd)
         try:
             res = subprocess.run(
-                cmd,
+                prepared_cmd,
                 capture_output=True,
                 text=True,
                 cwd=cwd or Path.cwd(),
