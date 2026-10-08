@@ -18,6 +18,7 @@ from forge.adapters.opencode import OpenCodeAdapter
 from forge.core.config import Config
 from forge.core.context import Context
 from forge.core.git import GitService
+from forge.core.platform import IS_WINDOWS
 from forge.core.role import Role
 from forge.core.run import Run
 from forge.prompts.compiler import PromptCompiler
@@ -161,9 +162,12 @@ def test_n01_renamed_file_detected_in_changed_files(real_git_repo):
 # ===========================================================================
 
 def test_n02_adapter_max_prompt_bytes_property():
-    """N-02: Adapters declare max_prompt_bytes property (Antigravity=130000, others=None)."""
+    """N-02: Adapters declare max_prompt_bytes property (Antigravity=130000 on POSIX / platform-aware on Windows, others=None)."""
     antigravity = AntigravityAdapter()
-    assert antigravity.max_prompt_bytes == 130000
+    if IS_WINDOWS:
+        assert antigravity.max_prompt_bytes in (antigravity.WINDOWS_CMD_MAX_PROMPT_BYTES, antigravity.WINDOWS_EXE_MAX_PROMPT_BYTES)
+    else:
+        assert antigravity.max_prompt_bytes == 130000
 
     opencode = OpenCodeAdapter()
     assert opencode.max_prompt_bytes is None
@@ -292,10 +296,10 @@ def test_n02_stage_run_passes_adapter_budget(tmp_path):
         )
         stage.run(context)
 
-        # Confirm PromptCompiler.compile was called with max_prompt_bytes=130000
+        # Confirm PromptCompiler.compile was called with adapter.max_prompt_bytes
         spy_compile.assert_called_once()
         _, kwargs = spy_compile.call_args
-        assert kwargs.get("max_prompt_bytes") == 130000
+        assert kwargs.get("max_prompt_bytes") == adapter.max_prompt_bytes
 
 
 # ===========================================================================
