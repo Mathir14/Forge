@@ -27,6 +27,20 @@ def render_terminal_banner(state: DashboardState) -> Panel:
         left.append("  ⚠️ PIPELINE CANCELLED  ", style="bold white on yellow")
         left.append("  ")
         left.append("Execution was cancelled by user.", style="bold yellow")
+    elif status == "INCOMPLETE":
+        left.append("  ⚠️ PIPELINE INCOMPLETE  ", style="bold white on red")
+        left.append("  ")
+        stage_label = state.terminal_stage or "Pipeline"
+        reason = state.terminal_reason or "Run terminated unexpectedly before completion."
+        left.append(f"{stage_label} — ", style="bold red")
+        left.append(reason, style="bold yellow")
+    elif status in ("IN_PROGRESS", "RUNNING", "INTERRUPTED", "PENDING"):
+        left.append("  ⚠️ PIPELINE INTERRUPTED  ", style="bold white on yellow")
+        left.append("  ")
+        stage_label = state.terminal_stage or "Pipeline"
+        reason = state.terminal_reason or f"Execution was interrupted ({status})."
+        left.append(f"{stage_label} — ", style="bold yellow")
+        left.append(reason, style="bold yellow")
     else:
         left.append("  ⛔ PIPELINE FAILED  ", style="bold white on red")
         left.append("  ")
@@ -51,7 +65,8 @@ def render_terminal_banner(state: DashboardState) -> Panel:
         summary_renderable,
     )
 
-    border_style = "green" if is_success else ("yellow" if is_cancelled else "red")
+    is_interrupted = status in ("IN_PROGRESS", "RUNNING", "INTERRUPTED", "PENDING")
+    border_style = "green" if is_success else ("yellow" if (is_cancelled or is_interrupted) else "red")
     return Panel(
         panel_content,
         style="white",

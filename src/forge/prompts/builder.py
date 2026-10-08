@@ -1,5 +1,6 @@
 """Builder that constructs an Instruction object from Context and Role."""
 
+import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -179,6 +180,14 @@ class InstructionBuilder:
                 if t_json_file.exists():
                     try:
                         t_json_content = t_json_file.read_text(encoding="utf-8")
+                        try:
+                            tj_obj = json.loads(t_json_content)
+                            if isinstance(tj_obj, dict):
+                                prov_keys = {"task_fingerprint", "role", "sequence_number", "run_id"}
+                                clean_obj = {k: v for k, v in tj_obj.items() if k not in prov_keys}
+                                t_json_content = json.dumps(clean_obj)
+                        except Exception:
+                            pass
                         if len(t_json_content) > MAX_STAGE_OUTPUT_CHARS:
                             excess = len(t_json_content) - MAX_STAGE_OUTPUT_CHARS
                             t_json_content = t_json_content[:MAX_STAGE_OUTPUT_CHARS] + f"\n\n[... Truncated remaining {excess} chars ...]"
@@ -187,11 +196,9 @@ class InstructionBuilder:
                         logging.warning("Failed to read tester machine json artifact %s: %s", t_json_file, e)
 
         # Resolve clean user task for instruction so prompt compiler renders repair_feedback independently
-        base_task = getattr(context.run, "_initial_task", None)
-        if not base_task:
-            base_task = context.run.task
-            if context.repair_feedback and context.repair_feedback.strip() in base_task:
-                base_task = base_task.replace(context.repair_feedback.strip(), "").strip()
+        base_task = ""
+        if context.run:
+            base_task = getattr(context.run, "task", "") or getattr(context.run, "_initial_task", "") or ""
 
         # Project PKB knowledge context
         knowledge_context = ""

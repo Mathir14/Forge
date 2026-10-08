@@ -23,14 +23,14 @@ Developer
   │
   ├─ 1. Bump version in pyproject.toml & src/forge/__init__.py
   ├─ 2. Commit changes
-  ├─ 3. Tag (e.g., git tag -a v0.1.0b10 -m "Release v0.1.0b10")
+  ├─ 3. Tag (e.g., git tag -a v0.1.0b11 -m "Release v0.1.0b11")
   └─ 4. Push tag to GitHub
         │
 GitHub Actions (.github/workflows/release.yml)
   │
   ├─ Job 1: test-and-build
   │    ├─ Validate version tag format (PEP 440)
-  │    ├─ Run full pytest suite (650+ tests)
+  │    ├─ Run full pytest suite (750+ tests)
   │    ├─ Single Build: build wheel and sdist (python -m build)
   │    ├─ Validate with twine check --strict dist/*
   │    └─ Upload dist/ artifacts to workflow run storage
@@ -106,8 +106,8 @@ To cut a new release:
 ### Step 1: Bump Version & Validate Locally
 
 Update the version in:
-- `pyproject.toml` (e.g. `version = "0.1.0b10"`)
-- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b10"`)
+- `pyproject.toml` (e.g. `version = "0.1.0b11"`)
+- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b11"`)
 
 Run local tests to confirm:
 ```bash
@@ -117,11 +117,11 @@ pytest
 ### Step 2: Commit and Tag
 
 ```bash
-git commit -am "chore: release v0.1.0b10"
+git commit -am "chore: release v0.1.0b11"
 git push origin master
 
-git tag -a v0.1.0b10 -m "Release v0.1.0b10"
-git push origin v0.1.0b10
+git tag -a v0.1.0b11 -m "Release v0.1.0b11"
+git push origin v0.1.0b11
 ```
 
 ### Step 3: Monitor Staged Release in GitHub Actions
@@ -151,7 +151,18 @@ git push origin v0.1.0b10
 
 ---
 
-## 6. Release Notes: v0.1.0b10
+## 6. Release Notes: v0.1.0b11
+
+`v0.1.0b11` addresses findings RC-01 through RC-04 from the adversarial release-candidate audit:
+
+- **RC-01 Task/Feedback Disambiguation & Stale Artifact Archival**: Decoupled auto-repair feedback from `Run.task`. User task modifications are strictly opaque, preserving task fingerprint integrity and triggering automatic archival of stale generation artifacts. Auto-repair feedback is routed through explicit `Run.set_auto_repair_feedback()`.
+- **RC-02 Dashboard Incomplete State Reconciliation**: Fixed dashboard terminal-state handling. Interrupted and incomplete runs truthfully display incomplete/interrupted states rather than reconciling to false failures. Completed stages reconcile to APPROVED.
+- **RC-03 Stage Deliverable Completion Verification**: Removed metadata-summary fallback from `verify_pipeline_completion()`. Pipeline verification strictly audits physical stage deliverables on disk, enforcing task fingerprint, run ID, role identity, sequence ordering, successful stage status, and zero exit code.
+- **RC-04 Mandatory Artifact Provenance Envelopes**: Enforced all four provenance fields (`parent_fingerprint`, `producer_agent`, `generated_at_utc`, `run_id`). Missing or malformed provenance is strictly rejected as invalid, and `save_stage_artifacts()` guarantees full provenance persistence across all stages.
+
+---
+
+## 7. Release Notes: v0.1.0b10
 
 `v0.1.0b10` is a corrective release following the `v0.1.0b9` Native Windows release.
 

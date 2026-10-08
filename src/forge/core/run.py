@@ -4,9 +4,21 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+import hashlib
 import json
+import re
+import shutil
 import tempfile
 import time
+
+
+def compute_task_fingerprint(task: Optional[str]) -> str:
+    """Compute deterministic SHA-256 fingerprint for a task string,
+    treating user task text as completely opaque data."""
+    if not task:
+        return ""
+    clean = task.strip()
+    return hashlib.sha256(clean.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -19,14 +31,99 @@ class Run:
     prompt_hashes: Dict[str, str] = field(default_factory=dict)
     adapters_used: Dict[str, str] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    repair_feedback: Optional[str] = None
     _initial_task: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self._initial_task is None:
-            if "\n\n### Auto-Repair Feedback" in self.task:
-                self._initial_task = self.task.split("\n\n### Auto-Repair Feedback")[0]
-            else:
-                self._initial_task = self.task
+            self._initial_task = self.task
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "task" and value is not None:
+            old_task = getattr(self, "task", None)
+            super().__setattr__("task", value)
+            super().__setattr__("_initial_task", value)
+            if old_task is not None:
+                old_fp = compute_task_fingerprint(old_task)
+                new_fp = compute_task_fingerprint(value)
+                if old_fp and new_fp and old_fp != new_fp:
+                    self._archive_stale_artifacts(old_fp)
+            return
+        super().__setattr__(name, value)
+
+    def set_auto_repair_feedback(self, feedback: Optional[str]) -> None:
+        """Explicit internal API to record auto-repair feedback without mutating canonical user task."""
+        self.repair_feedback = feedback
+
+    @property
+    def auto_repair_feedback(self) -> Optional[str]:
+        return self.repair_feedback
+
+    @property
+    def task_fingerprint(self) -> str:
+        return compute_task_fingerprint(self.task)
+
+    def _archive_stale_artifacts(self, old_task_fingerprint: str) -> None:
+        """Archive existing stage deliverables, proposals, evidence, and debug state
+        when task identity changes, isolating historical generations."""
+        if not hasattr(self, "run_dir") or not self.run_dir.exists():
+            return
+
+        base_history_dir = self.run_dir / "history" / f"task_{old_task_fingerprint[:8]}"
+        history_dir = base_history_dir
+        idx = 1
+        while history_dir.exists():
+            history_dir = self.run_dir / "history" / f"task_{old_task_fingerprint[:8]}_{idx}"
+            idx += 1
+
+        history_dir.mkdir(parents=True, exist_ok=True)
+
+        stage_file_pattern = re.compile(r"^(\d+_[a-zA-Z0-9_\-]+?)(?:_attempt_\d+)?\.(json|md)$")
+        archived_files: List[str] = []
+        archived_dirs: List[str] = []
+
+        # Archive task-scoped subdirectories
+        for dname in ("knowledge_proposals", "evidence", "debug"):
+            src_dir = self.run_dir / dname
+            if src_dir.exists() and src_dir.is_dir():
+                dest_dir = history_dir / dname
+                try:
+                    if dest_dir.exists():
+                        shutil.rmtree(dest_dir, ignore_errors=True)
+                    shutil.move(str(src_dir), str(dest_dir))
+                    archived_dirs.append(dname)
+                except Exception:
+                    pass
+
+        # Archive stage deliverable files and task-scoped files
+        try:
+            for p in list(self.run_dir.iterdir()):
+                if p.is_file():
+                    if stage_file_pattern.match(p.name) or p.name == "git_baseline.json":
+                        dest = history_dir / p.name
+                        shutil.move(str(p), str(dest))
+                        archived_files.append(p.name)
+        except Exception:
+            pass
+
+        # Reset execution tracking and stage fingerprints in metadata
+        if "summary" in self.metadata:
+            self.metadata.pop("summary", None)
+        self.metadata["stages_executed"] = []
+        self.metadata["auto_committed"] = False
+        self.metadata["stage_fingerprints"] = {}
+        if hasattr(self, "prompt_hashes") and isinstance(self.prompt_hashes, dict):
+            self.prompt_hashes.clear()
+        self.status = "PENDING"
+
+        history_meta = self.metadata.setdefault("task_history", [])
+        history_meta.append({
+            "old_task_fingerprint": old_task_fingerprint,
+            "archived_files": archived_files,
+            "archived_directories": archived_dirs,
+            "archived_to": str(history_dir.name),
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+        })
 
     @property
     def metadata_file(self) -> Path:
@@ -73,13 +170,16 @@ class Run:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         data = {
             "run_id": self.run_id,
-            "task": self._initial_task or self.task,
+            "task": self.task,
+            "task_fingerprint": self.task_fingerprint,
             "created_at": self.created_at,
             "status": self.status,
             "prompt_hashes": self.prompt_hashes,
             "adapters_used": self.adapters_used,
             "metadata": self.metadata,
         }
+        if self.repair_feedback:
+            data["repair_feedback"] = self.repair_feedback
         with tempfile.NamedTemporaryFile(
             "w", dir=self.run_dir, prefix=".tmp_meta_", delete=False, encoding="utf-8"
         ) as f:
@@ -107,19 +207,17 @@ class Run:
                 data = json.load(f)
         except (json.JSONDecodeError, ValueError) as e:
             raise ValueError(f"Corrupted metadata in {meta_path}: {e}") from e
-        raw_task = data.get("task", "")
-        if "\n\n### Auto-Repair Feedback" in raw_task:
-            clean_task = raw_task.split("\n\n### Auto-Repair Feedback")[0]
-        else:
-            clean_task = raw_task
+        task_text = data.get("task", "")
+        repair_fb = data.get("repair_feedback")
         return cls(
             run_id=data.get("run_id", run_dir.name),
-            task=clean_task,
+            task=task_text,
             run_dir=run_dir,
             created_at=data.get("created_at", ""),
             status=data.get("status", "UNKNOWN"),
             prompt_hashes=data.get("prompt_hashes", {}),
             adapters_used=data.get("adapters_used", {}),
             metadata=data.get("metadata", {}),
-            _initial_task=clean_task,
+            repair_feedback=repair_fb,
+            _initial_task=task_text,
         )

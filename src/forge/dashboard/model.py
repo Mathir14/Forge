@@ -59,6 +59,7 @@ class StageModel:
     is_partial: bool = False
     has_error: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    artifact_json_path: Optional[Path] = None
 
     @property
     def display_status(self) -> str:
@@ -86,6 +87,14 @@ class RunModel:
     active_stage_name: Optional[str] = None
     stage_start_times: Dict[str, float] = field(default_factory=dict)
     summary: Optional[Any] = None
+
+    @property
+    def task_fingerprint(self) -> str:
+        fp = self.metadata.get("task_fingerprint")
+        if fp:
+            return fp
+        from forge.core.run import compute_task_fingerprint
+        return compute_task_fingerprint(self.task)
 
     @property
     def stage_names(self) -> List[str]:
@@ -411,6 +420,8 @@ class RunModel:
         )
 
         no_critic = meta_dict.get("no_critic", False)
+        if not no_critic and isinstance(meta_dict.get("metadata"), dict):
+            no_critic = meta_dict["metadata"].get("no_critic", False)
         if not no_critic and isinstance(meta_dict.get("config"), dict):
             no_critic = meta_dict["config"].get("execution", {}).get("no_critic", False)
 
@@ -583,6 +594,8 @@ class RunModel:
                 prompt_hash = json_meta.get("prompt_hash") or json_meta.get("PROMPT_HASH")
 
                 raw_mr = json_meta.get("machine_report") or json_meta.get("MACHINE_REPORT")
+                if not raw_mr and str(json_meta.get("role") or json_meta.get("ROLE") or "").upper() == "TESTER":
+                    raw_mr = json_meta
                 if isinstance(raw_mr, dict):
                     raw_mr_role = raw_mr.get("role") or raw_mr.get("ROLE")
                     mr_is_valid = raw_mr.get("is_valid", True)
@@ -616,7 +629,6 @@ class RunModel:
         raw_content = ""
         human_report = ""
         is_partial = False
-
         if "md" in files:
             try:
                 with open(files["md"], "r", encoding="utf-8") as f:
@@ -646,6 +658,7 @@ class RunModel:
             is_partial=is_partial,
             has_error=bool(exit_code is not None and exit_code != 0),
             metadata=json_meta,
+            artifact_json_path=files.get("json"),
         )
 
     @classmethod
@@ -663,6 +676,22 @@ class RunModel:
                 status = data.get("status", "UNKNOWN")
                 duration = float(data.get("duration_seconds", 0.0))
                 exit_code = data.get("exit_code")
+                att_mr = data.get("machine_report") or data.get("MACHINE_REPORT")
+                if not att_mr and str(data.get("role") or data.get("ROLE") or "").upper() == "TESTER":
+                    att_mr = data
+                if isinstance(att_mr, dict):
+                    machine_report = MachineReportModel(
+                        role=str(att_mr.get("role") or att_mr.get("ROLE") or "attempt").upper(),
+                        status=str(att_mr.get("status") or att_mr.get("STATUS") or status),
+                        handoff=att_mr.get("handoff") or att_mr.get("HANDOFF"),
+                        reason=att_mr.get("reason") or att_mr.get("REASON") or "",
+                        confidence=att_mr.get("confidence") or att_mr.get("CONFIDENCE") or "",
+                        issues=att_mr.get("issues") or att_mr.get("ISSUES") or {},
+                        next_action=att_mr.get("next_action") or att_mr.get("NEXT_ACTION") or "",
+                        raw_data=att_mr,
+                        is_valid=att_mr.get("is_valid", True),
+                        validation_errors=list(att_mr.get("validation_errors", [])),
+                    )
             except Exception:
                 pass
 

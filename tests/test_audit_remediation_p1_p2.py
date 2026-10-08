@@ -264,7 +264,7 @@ def test_p1_04_verifier_rejected_propagates_feedback(tmp_path, monkeypatch):
         def fake_execute(stage_def, context, run_mgr, display_task=None, banner_prefix=""):
             if stage_def.name == "executor":
                 iteration_count["executor"] += 1
-                task_received_by_executor.append(context.run.task)
+                task_received_by_executor.append(context.repair_feedback or context.run.task)
                 return make_fake_stage_result("executor", "SUCCESS", seq=stage_def.sequence_number)
             if stage_def.name == "reviewer":
                 iteration_count["reviewer"] += 1

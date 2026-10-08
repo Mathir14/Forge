@@ -520,18 +520,44 @@ def test_interactive_dashboard_exit_emits_summary(tmp_path: Path):
     run_dir = tmp_path / ".forge" / "runs" / "run-005"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    summary = RunSummary(run_id="run-005", final_status="APPROVED")
+    from forge.core.run import compute_task_fingerprint
+    task = "Test task"
+    task_fp = compute_task_fingerprint(task)
+    run_id = "run-005"
+
+    summary = RunSummary(run_id=run_id, final_status="APPROVED")
     summary.record_stage("Architect", "APPROVED", "COMPLETED", duration_seconds=1.0)
     summary.record_stage("Planner", "READY", "COMPLETED", duration_seconds=1.0)
     summary.record_stage("Executor", "COMPLETE", "COMPLETED", duration_seconds=2.0)
+    summary.record_stage("Tester", "PASS", "COMPLETED", duration_seconds=1.0)
     summary.record_stage("Reviewer", "APPROVED", "COMPLETED", duration_seconds=1.5)
+
+    stages = [
+        (1, "architect", "APPROVED", 1.0),
+        (2, "planner", "READY", 1.0),
+        (3, "executor", "COMPLETE", 2.0),
+        (4, "tester", "PASS", 1.0),
+        (5, "reviewer", "APPROVED", 1.5),
+    ]
+    for seq, role, status, dur in stages:
+        (run_dir / f"{seq:02d}_{role}.json").write_text(json.dumps({
+            "run_id": run_id,
+            "task_fingerprint": task_fp,
+            "role": role,
+            "sequence_number": seq,
+            "status": status,
+            "duration_seconds": dur,
+        }), encoding="utf-8")
 
     meta_file = run_dir / "metadata.json"
     meta_file.write_text(json.dumps({
-        "run_id": "run-005",
-        "task": "Test task",
+        "run_id": run_id,
+        "task": task,
         "status": "APPROVED",
-        "metadata": {"summary": summary.to_dict()},
+        "metadata": {
+            "summary": summary.to_dict(),
+            "no_critic": True,
+        },
     }), encoding="utf-8")
 
     app = DashboardApp(run_dir, project_root=tmp_path)

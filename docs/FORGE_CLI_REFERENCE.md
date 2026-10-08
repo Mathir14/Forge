@@ -1,6 +1,6 @@
 # Forge CLI Complete Reference Manual
 
-**Forge Version Inspected:** `0.1.0b10`  
+**Forge Version Inspected:** `0.1.0b11`  
 **Inspection Date:** 2026-10-07  
 **Target Repository:** `/home/mathir/Forge`  
 **Verified Source Files:**
@@ -68,13 +68,13 @@ forge [OPTIONS] COMMAND [ARGS]...
 
 | Option | Type | Description |
 |---|---|---|
-| `--version` | Flag | Displays the installed Forge version (`forge, version 0.1.0b10`) and exits immediately. |
+| `--version` | Flag | Displays the installed Forge version (`forge, version 0.1.0b11`) and exits immediately. |
 | `--help` | Flag | Displays top-level command list and usage summary. |
 
 ### Fundamental Design Principle: CLI Flags vs. Configuration
 
 > [!IMPORTANT]
-> In Forge v0.1.0b10, individual stage commands (`architect`, `planner`, `execute`, `test`, `review`, `critic`) **do not accept inline `--adapter`, `--model`, `--effort`, or `--timeout` flags**.
+> In Forge v0.1.0b11, individual stage commands (`architect`, `planner`, `execute`, `test`, `review`, `critic`) **do not accept inline `--adapter`, `--model`, `--effort`, or `--timeout` flags**.
 > 
 > Stage runtime settings (adapter selection, model IDs, reasoning effort, timeout limits, and approval policies) are configured declaratively in `forge.yaml` (or via `forge config set stages.<stage>.<property> <value>`).
 > 

@@ -124,7 +124,8 @@ def test_prm01_instruction_builder_preserves_task_immutability(tmp_path):
     original_task = "Build payment gateway"
     repair_fb = "### Auto-Repair Feedback from Reviewer (Attempt 1):\n- Fix webhook signature"
 
-    run = Run(run_id="run-001", task=f"{original_task}\n\n{repair_fb}", run_dir=run_dir)
+    run = Run(run_id="run-001", task=original_task, run_dir=run_dir)
+    run.set_auto_repair_feedback(repair_fb)
     git = GitService(tmp_path)
     context = Context(
         run=run,

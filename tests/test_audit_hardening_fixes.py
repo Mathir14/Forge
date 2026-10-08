@@ -292,9 +292,9 @@ def test_auto_repair_task_immutability_and_resume(tmp_path):
 
     assert run.task == original_task
 
-    # Simulate attempt 1 retry setting context.repair_feedback and context.run.task
+    # Simulate attempt 1 retry setting auto-repair feedback via explicit API
     attempt_feedback = "### Auto-Repair Feedback from Reviewer (Attempt 1):\nFix token hashing"
-    run.task = f"{original_task}\n\n{attempt_feedback}"
+    run.set_auto_repair_feedback(attempt_feedback)
 
     # During stage execution, save_stage_artifacts is called which calls run.save_metadata()
     rm.save_stage_artifacts(

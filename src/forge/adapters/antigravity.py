@@ -9,10 +9,10 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Iterator, Iterable, Callable, Tuple
-from forge.adapters.base import BaseAdapter, AdapterResponse
+from forge.adapters.base import BaseAdapter, AdapterResponse, StderrDrainer
 from forge.core.capabilities import Capability
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
-from forge.core.platform import get_process_group_flags, prepare_command
+from forge.core.platform import get_process_group_flags, prepare_command, IS_WINDOWS
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,19 @@ class AntigravityAdapter(BaseAdapter):
     }
     DEFAULT_MODEL = "gemini-3.7-flash-high"
     DEFAULT_EFFORT = "high"
-    MAX_PROMPT_BYTES: int = 130000  # Provider CLI argument limit bounded by OS MAX_ARG_STRLEN (131,072 bytes)
+    MAX_PROMPT_BYTES: int = 130000  # Provider CLI argument limit bounded by POSIX OS MAX_ARG_STRLEN (131,072 bytes)
+    WINDOWS_CMD_MAX_PROMPT_BYTES: int = 7500  # Windows cmd.exe 8,191 char limit minus flags
+    WINDOWS_EXE_MAX_PROMPT_BYTES: int = 30000  # Windows CreateProcessW 32,767 char limit minus flags
+
+    @property
+    def max_prompt_bytes(self) -> int:
+        """Platform-aware maximum prompt size in bytes supported by argv transport."""
+        if IS_WINDOWS:
+            bin_path = self._get_binary()
+            if bin_path and (bin_path.lower().endswith(".cmd") or bin_path.lower().endswith(".bat")):
+                return self.WINDOWS_CMD_MAX_PROMPT_BYTES
+            return self.WINDOWS_EXE_MAX_PROMPT_BYTES
+        return self.MAX_PROMPT_BYTES
 
     def __init__(
         self,
@@ -69,10 +81,11 @@ class AntigravityAdapter(BaseAdapter):
             )
 
         prompt_bytes = len(prompt.encode("utf-8"))
-        if prompt_bytes > self.MAX_PROMPT_BYTES:
+        effective_limit = self.max_prompt_bytes
+        if prompt_bytes > effective_limit:
             err_msg = (
                 f"Prompt size ({prompt_bytes} bytes) exceeds Antigravity CLI argv transport limit "
-                f"({self.MAX_PROMPT_BYTES} bytes). Provider requires command-line argument transport limited by OS MAX_ARG_STRLEN."
+                f"({effective_limit} bytes). Provider requires command-line argument transport limited by host OS constraints."
             )
             logging.error(err_msg)
             return AdapterResponse(
@@ -660,10 +673,11 @@ class AntigravityAdapter(BaseAdapter):
             return
 
         prompt_bytes = len(prompt.encode("utf-8"))
-        if prompt_bytes > self.MAX_PROMPT_BYTES:
+        effective_limit = self.max_prompt_bytes
+        if prompt_bytes > effective_limit:
             err_msg = (
                 f"Prompt size ({prompt_bytes} bytes) exceeds Antigravity CLI argv transport limit "
-                f"({self.MAX_PROMPT_BYTES} bytes). Provider requires command-line argument transport limited by OS MAX_ARG_STRLEN."
+                f"({effective_limit} bytes). Provider requires command-line argument transport limited by host OS constraints."
             )
             logger.error(err_msg)
             yield AgentEvent(
@@ -720,10 +734,12 @@ class AntigravityAdapter(BaseAdapter):
         popen_kwargs.update(get_process_group_flags())
 
         proc: Optional[subprocess.Popen] = None
+        stderr_drainer: Optional[StderrDrainer] = None
         try:
             prepared_cmd = prepare_command(cmd)
             proc = subprocess.Popen(prepared_cmd, **popen_kwargs)
             self._register_proc(proc, instance=self)
+            stderr_drainer = StderrDrainer(proc.stderr)
 
             def _get_returncode() -> Optional[int]:
                 if proc is not None:
@@ -733,26 +749,8 @@ class AntigravityAdapter(BaseAdapter):
                         return proc.poll()
                 return None
 
-            _captured_stderr: Optional[str] = None
-
             def _get_stderr() -> str:
-                nonlocal _captured_stderr
-                if _captured_stderr is not None:
-                    return _captured_stderr
-                if proc is not None and proc.stderr:
-                    try:
-                        # Only read if the child process has terminated to avoid blocking on an open pipe
-                        if proc.poll() is None:
-                            try:
-                                proc.wait(timeout=0.5)
-                            except Exception:
-                                pass
-                        if proc.poll() is not None:
-                            _captured_stderr = proc.stderr.read() or ""
-                            return _captured_stderr
-                    except Exception:
-                        return ""
-                return ""
+                return stderr_drainer.get_stderr() if stderr_drainer is not None else ""
 
             if proc.stdout is not None:
                 yield from self._decode_stream_events(
@@ -811,7 +809,9 @@ class AntigravityAdapter(BaseAdapter):
         finally:
             if proc is not None:
                 self._safe_cleanup_subprocess(proc)
-                self._kill_process_group(proc)
+            if stderr_drainer is not None:
+                stderr_drainer.close()
+            if proc is not None:
                 try:
                     proc.wait(timeout=1.0)
                 except Exception:

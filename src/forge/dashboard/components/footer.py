@@ -44,6 +44,9 @@ def render_footer(state: DashboardState) -> Panel:
         elif term_stat in ("CANCELLED", "ABORTED"):
             mode_text = " CANCELLED "
             mode_style = "bold white on yellow"
+        elif term_stat == "INCOMPLETE":
+            mode_text = " INCOMPLETE "
+            mode_style = "bold white on red"
         else:
             mode_text = " HALTED "
             mode_style = "bold white on red"

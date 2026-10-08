@@ -181,11 +181,58 @@ def is_stage_completed(run: Any, stage_def: StageDefinition, run_mgr: RunManager
     prior_json = run_mgr.load_stage_json(run, stage_def)
     if not prior_json:
         return False, None
+
+    # Task identity and provenance invariants (N-001, N-009):
+    # A stage artifact must prove intrinsic identity matching the current task,
+    # current run, and the expected stage definition.
+    expected_fp = getattr(run, "task_fingerprint", None)
+    if not expected_fp or not isinstance(expected_fp, str) or len(expected_fp) != 64:
+        return False, None
+
+    art_fp = prior_json.get("task_fingerprint")
+    # Artifact must be self-authenticating with matching task fingerprint
+    if not art_fp or not isinstance(art_fp, str) or art_fp != expected_fp:
+        return False, None
+
+    # Validate that fingerprint is a valid 64-character SHA-256 hex string
+    if len(art_fp) != 64 or not all(c in "0123456789abcdefABCDEF" for c in art_fp):
+        return False, None
+
+    # Run metadata must also record matching stage fingerprint
+    stage_fps = getattr(run, "metadata", {}).get("stage_fingerprints", {})
+    meta_fp = stage_fps.get(stage_def.name)
+    if not meta_fp or meta_fp != expected_fp:
+        return False, None
+
+    # Mandatory run identity (RC-04)
+    art_run_id = prior_json.get("run_id")
+    expected_run_id = getattr(run, "run_id", None)
+    if not art_run_id or not expected_run_id or str(art_run_id) != str(expected_run_id):
+        return False, None
+
+    # Mandatory canonical role (RC-04)
+    art_role = prior_json.get("role") or prior_json.get("ROLE")
+    if not art_role or str(art_role).lower().strip() != stage_def.name.lower().strip():
+        return False, None
+
+    # Mandatory sequence number (RC-04)
+    art_seq = prior_json.get("sequence_number")
+    if art_seq is None:
+        return False, None
+    try:
+        if int(art_seq) != stage_def.sequence_number:
+            return False, None
+    except (ValueError, TypeError):
+        return False, None
+
     prior_status = prior_json.get("status") or prior_json.get("STATUS")
     if not prior_status:
         return False, None
     valid_statuses = stage_def.success_statuses or StageOrder.get_success_statuses(stage_def.name, phase=stage_def.phase)
     if prior_status in valid_statuses:
+        ec = prior_json.get("exit_code")
+        if ec is not None and ec != 0:
+            return False, prior_status
         return True, prior_status
     return False, prior_status
 
@@ -509,7 +556,9 @@ def _resolve_pipeline_run(
             click.secho(f"Error loading run: {e}", fg="red")
             sys.exit(1)
         if task and task.strip() != run.task.strip():
+            old_task = run.task
             run.task = task
+            run_mgr.archive_stale_artifacts(run, old_task=old_task)
             run.save_metadata()
             return run, False
         return run, True
@@ -951,7 +1000,7 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
             git_baseline: Optional[GitBaseline] = None
             if git.is_git_repo():
                 baseline_file = run.run_dir / "git_baseline.json"
-                if baseline_file.exists():
+                if baseline_file.exists() and is_resumed_same_task:
                     try:
                         git_baseline = GitBaseline.load(baseline_file)
                     except Exception:
@@ -1007,6 +1056,7 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
             click.echo(f"\n🚀 [Run: {run.run_id}] Starting Standard Forge Pipeline:")
             click.secho(f"   \"{run.task}\"\n", bold=True)
 
+            stages_executed = 0
             for stage_def in stages_to_run:
                 d_name = "Critic" if stage_def.name.lower() == "critic" else stage_def.name.capitalize()
                 # If resuming an existing run for the same task, skip stages that already completed successfully
@@ -1017,7 +1067,29 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
                         _record_stage_transition(run, d_name, prior_status or "APPROVED", "SKIPPED", role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
                         continue
 
-                result = execute_stage(stage_def, context, run_mgr)
+                try:
+                    result = execute_stage(stage_def, context, run_mgr)
+                except AutonomousHalt as halt:
+                    run.status = halt.status
+                    reason = halt.reason or f"Pipeline halted at stage '{stage_def.name}': {halt.status}"
+                    _record_stage_transition(
+                        run,
+                        d_name,
+                        run.status,
+                        "CANCELLED" if halt.status == "CANCELLED" else "FAILED",
+                        role_name=stage_def.name,
+                        seq=stage_def.sequence_number,
+                        reason=reason,
+                        context=context,
+                    )
+                    _record_final_halt(run, run.status, reason)
+                    run.save_metadata()
+                    if halt.status == "CANCELLED":
+                        click.secho("\n⚠️ Pipeline cancelled by user.", fg="yellow")
+                    else:
+                        click.secho(f"\n⚠️ Pipeline halted: {reason}", fg="red")
+                    sys.exit(halt.exit_code)
+                stages_executed += 1
                 _record_stage_transition(run, d_name, result.status, "COMPLETED", duration=result.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
 
                 click.echo(f"  ✓ {stage_def.name.capitalize()} completed | Status: {result.status} ({result.duration_seconds:.1f}s)")
@@ -1044,27 +1116,42 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
                         run.save_metadata()
                         return
 
+            run._stages_executed_in_session = stages_executed
             run.status = "APPROVED"
             _record_final_success(run)
             run.save_metadata()
 
             # Auto-commit if approved and requested
             if auto_commit or config.execution.auto_commit:
-                task_summary = run.task.strip().splitlines()[0][:70] if (run.task and run.task.strip()) else ""
-                commit_msg = f"feat: {task_summary}"
-                if git.is_git_repo():
-                    if auto_commit_run(git=git, task_summary=task_summary, baseline=git_baseline, run=run):
-                        click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'", fg="green")
-                        _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context)
-                    else:
-                        click.secho("  ⚠️ Auto-commit skipped: no changes or git commit error.", fg="yellow")
-                        _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
+                if stages_executed == 0:
+                    click.secho("  ⚠️ Auto-commit skipped: no stages were executed during this invocation.", fg="yellow")
+                    _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
+                else:
+                    task_summary = run.task.strip().splitlines()[0][:70] if (run.task and run.task.strip()) else ""
+                    commit_msg = f"feat: {task_summary}"
+                    if git.is_git_repo():
+                        if auto_commit_run(git=git, task_summary=task_summary, baseline=git_baseline, run=run, stages_executed=stages_executed):
+                            click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'", fg="green")
+                            _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context)
+                        else:
+                            click.secho("  ⚠️ Auto-commit skipped: no changes or git commit error.", fg="yellow")
+                            _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
 
             # Reconcile PKB knowledge proposals
             reconcile_run_knowledge(root, run.run_id, run.run_dir)
 
             click.secho(f"\n✨ Forge Pipeline completed successfully for {run.run_id}!", fg="green", bold=True)
             click.echo(f"   Artifacts saved in .forge/runs/{run.run_id}/\n")
+    except AutonomousHalt as halt:
+        run.status = halt.status
+        reason = halt.reason or f"Pipeline halted: {halt.status}"
+        _record_final_halt(run, run.status, reason)
+        run.save_metadata()
+        if halt.status == "CANCELLED":
+            click.secho("\n⚠️ Pipeline cancelled by user.", fg="yellow")
+        else:
+            click.secho(f"\n⚠️ Pipeline halted: {reason}", fg="red")
+        sys.exit(halt.exit_code)
     except RunOwnershipError as e:
         click.echo(e.format_diagnostic(), err=True)
         sys.exit(1)
@@ -1093,6 +1180,7 @@ def auto_commit_run(
     task_summary: str,
     baseline: Optional[GitBaseline] = None,
     run: Optional[Run] = None,
+    stages_executed: Optional[int] = None,
 ) -> bool:
     """Production commit orchestration helper for Forge runs.
 
@@ -1102,6 +1190,18 @@ def auto_commit_run(
     """
     if not git.is_git_repo():
         return False
+
+    if stages_executed is not None and stages_executed == 0:
+        click.secho("  ⚠️ Auto-commit skipped: no stages executed in current invocation.", fg="yellow")
+        return False
+
+    if run is not None:
+        if getattr(run, "_stages_executed_in_session", None) == 0:
+            click.secho("  ⚠️ Auto-commit skipped: no stages executed in current invocation.", fg="yellow")
+            return False
+        if run.metadata.get("auto_committed", False):
+            click.secho("  ⚠️ Auto-commit skipped: run was already committed.", fg="yellow")
+            return False
 
     resolved_baseline = baseline
     if resolved_baseline is None and run is not None and hasattr(run, "run_dir"):
@@ -1131,7 +1231,11 @@ def auto_commit_run(
         return False
 
     commit_msg = f"feat: {task_summary}"
-    return git.commit(commit_msg, paths=pure_forge_paths)
+    committed = git.commit(commit_msg, paths=pure_forge_paths)
+    if committed and run is not None:
+        run.metadata["auto_committed"] = True
+        run.save_metadata()
+    return committed
 
 
 
@@ -1185,7 +1289,7 @@ def auto_pipeline(
             git_baseline: Optional[GitBaseline] = None
             if git.is_git_repo():
                 baseline_file = run.run_dir / "git_baseline.json"
-                if baseline_file.exists():
+                if baseline_file.exists() and is_resumed_same_task:
                     try:
                         git_baseline = GitBaseline.load(baseline_file)
                     except Exception:
@@ -1260,6 +1364,8 @@ def auto_pipeline(
 
                 _check_abort()
 
+                stages_executed = 0
+
                 click.echo(f"\n⚡ [Run: {run.run_id}] Starting Fully Autonomous Forge Loop:")
                 click.secho(f"   \"{task_summary}...\"\n", bold=True)
 
@@ -1275,6 +1381,7 @@ def auto_pipeline(
                             continue
 
                     stage_res = execute_stage(stage_def, context, run_mgr, banner_prefix=f"[{stage_def.sequence_number}/{total_stages}]")
+                    stages_executed += 1
                     click.echo(f"  ✓ {stage_def.display_name} completed | Status: {stage_res.status} ({stage_res.duration_seconds:.1f}s)")
                     _record_stage_transition(run, stage_def.display_name, stage_res.status, "COMPLETED", duration=stage_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
                     _check_abort()
@@ -1330,6 +1437,7 @@ def auto_pipeline(
                         _check_abort()
                         # 1. Execute Change Producer (e.g. Executor)
                         producer_res = execute_stage(producer_def, context, run_mgr, banner_prefix=f"[{producer_def.sequence_number}/{total_stages}]{iter_label}")
+                        stages_executed += 1
                         click.echo(f"  ✓ {producer_def.display_name} finished | Status: {producer_res.status} ({producer_res.duration_seconds:.1f}s)")
                         _record_stage_transition(run, producer_def.display_name, producer_res.status, "COMPLETED", duration=producer_res.duration_seconds, role_name=producer_def.name, seq=producer_def.sequence_number, context=context)
                         _check_abort()
@@ -1369,7 +1477,7 @@ def auto_pipeline(
                                     f"{producer_def.display_name} exited with status '{producer_res.status}'. Output:\n{producer_res.raw_markdown[:2000]}\n"
                                     f"Fix all failures and complete implementation."
                                 )
-                                context.run.task = f"{task}\n\n{context.repair_feedback}"
+                                context.run.set_auto_repair_feedback(context.repair_feedback)
                                 continue
                             else:
                                 click.secho(f"\n⚠️ {producer_def.display_name} failed on final attempt with status '{producer_res.status}'.", fg="red")
@@ -1391,6 +1499,7 @@ def auto_pipeline(
                         for verifier_def in verifier_defs:
                             _check_abort()
                             verifier_res = execute_stage(verifier_def, context, run_mgr, banner_prefix=f"[{verifier_def.sequence_number}/{total_stages}]{iter_label}")
+                            stages_executed += 1
                             latest_verifier_res = verifier_res
                             click.echo(f"  ✓ {verifier_def.display_name} finished | Status: {verifier_res.status} ({verifier_res.duration_seconds:.1f}s)")
                             _record_stage_transition(run, verifier_def.display_name, verifier_res.status, "COMPLETED", duration=verifier_res.duration_seconds, role_name=verifier_def.name, seq=verifier_def.sequence_number, context=context)
@@ -1455,7 +1564,7 @@ def auto_pipeline(
                                         f"{issues_summary}\n"
                                         f"Fix all issues and satisfy all requirements."
                                     )
-                                    context.run.task = f"{task}\n\n{context.repair_feedback}"
+                                    context.run.set_auto_repair_feedback(context.repair_feedback)
                                 else:
                                     click.secho(f"\n⚠️ {verifier_def.display_name} verdict: {verifier_res.status}.", fg="yellow")
                                 break
@@ -1463,7 +1572,7 @@ def auto_pipeline(
                         if all_verifiers_passed:
                             approved = True
                             context.repair_feedback = None
-                            context.run.task = task
+                            context.run.set_auto_repair_feedback(None)
                             verifiers_label = " & ".join(v.display_name for v in verifier_defs)
                             click.secho(f"\n✅ Implementation APPROVED by {verifiers_label} on attempt {iteration}!", fg="green", bold=True)
                             break
@@ -1505,6 +1614,7 @@ def auto_pipeline(
                             continue
 
                     critic_res = execute_stage(stage_def, context, run_mgr, banner_prefix=f"[{stage_def.sequence_number}/{total_stages}]")
+                    stages_executed += 1
                     click.echo(f"  ✓ {stage_def.display_name} audit completed | Status: {critic_res.status} ({critic_res.duration_seconds:.1f}s)")
                     _record_stage_transition(run, d_name, critic_res.status, "COMPLETED", duration=critic_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
                     _check_abort()
@@ -1530,16 +1640,22 @@ def auto_pipeline(
                             stage_result=critic_res,
                         )
 
+                run._stages_executed_in_session = stages_executed
+
                 # Auto-commit if approved and requested (only AFTER Critic audit)
                 if approved and (auto_commit or config.execution.auto_commit):
-                    commit_msg = f"feat: {task_summary}"
-                    if git.is_git_repo():
-                        if auto_commit_run(git=git, task_summary=task_summary, baseline=git_baseline, run=run):
-                            click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'", fg="green")
-                            _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context)
-                        else:
-                            click.secho("  ⚠️ Auto-commit skipped: no changes or git commit error.", fg="yellow")
-                            _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
+                    if stages_executed == 0:
+                        click.secho("  ⚠️ Auto-commit skipped: no stages were executed during this invocation.", fg="yellow")
+                        _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
+                    else:
+                        commit_msg = f"feat: {task_summary}"
+                        if git.is_git_repo():
+                            if auto_commit_run(git=git, task_summary=task_summary, baseline=git_baseline, run=run, stages_executed=stages_executed):
+                                click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'", fg="green")
+                                _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context)
+                            else:
+                                click.secho("  ⚠️ Auto-commit skipped: no changes or git commit error.", fg="yellow")
+                                _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
 
                 run.task = task
                 run.status = "APPROVED"

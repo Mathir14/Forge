@@ -196,10 +196,22 @@ class RunManager:
             tmp_md = Path(f.name)
         tmp_md.replace(md_file)
 
+        json_payload = dict(json_data)
+        if hasattr(run, "task_fingerprint") and run.task_fingerprint:
+            json_payload["task_fingerprint"] = run.task_fingerprint
+            if "stage_fingerprints" not in run.metadata:
+                run.metadata["stage_fingerprints"] = {}
+            run.metadata["stage_fingerprints"][role_name] = run.task_fingerprint
+
+        json_payload["role"] = role_name
+        json_payload["sequence_number"] = sequence_number
+        if hasattr(run, "run_id") and run.run_id:
+            json_payload["run_id"] = str(run.run_id)
+
         with tempfile.NamedTemporaryFile(
             "w", dir=run.run_dir, prefix=f".tmp_{prefix}_json_", delete=False, encoding="utf-8"
         ) as f:
-            json.dump(json_data, f, indent=2)
+            json.dump(json_payload, f, indent=2)
             tmp_json = Path(f.name)
         tmp_json.replace(json_file)
 
@@ -210,6 +222,13 @@ class RunManager:
 
         run.save_metadata()
         return md_file, json_file
+
+    def archive_stale_artifacts(self, run: Run, old_task: Optional[str] = None) -> None:
+        """Archive existing stage deliverables and reset execution state when task changes."""
+        from forge.core.run import compute_task_fingerprint
+        old_fp = compute_task_fingerprint(old_task) if old_task else run.task_fingerprint
+        run._archive_stale_artifacts(old_fp)
+        run.save_metadata()
 
     def load_stage_json(self, run: Run, role_name: Any, sequence_number: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Load JSON report for a given role or StageDefinition from a run, optionally matching exact sequence number."""

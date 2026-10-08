@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple, Union, Any, FrozenSet
 from pathlib import Path
+import json
+import re
 
 
 @dataclass(frozen=True)
@@ -318,6 +320,227 @@ class StageOrder:
             stages.append(cls.get_closing_critic())
         return stages
 
+    @classmethod
+    def required_pipeline_stages(
+        cls,
+        no_critic: bool = False,
+        has_pre_critic: bool = False,
+    ) -> List[StageDefinition]:
+        """Return the canonical sequence of stages that MUST execute and succeed
+        for a full pipeline to be approved."""
+        stages: List[StageDefinition] = []
+        if has_pre_critic:
+            stages.append(cls.get_pre_run_critic())
+        stages.extend([
+            cls.get_architect(),
+            cls.get_planner(),
+            cls.get_executor(),
+            cls.get_tester(),
+            cls.get_reviewer(),
+        ])
+        if not no_critic:
+            stages.append(cls.get_closing_critic())
+        return stages
+
+    @classmethod
+    def verify_pipeline_completion(
+        cls,
+        stages: Any = None,
+        summary: Optional[Any] = None,
+        no_critic: bool = False,
+        has_pre_critic: bool = False,
+        run_dir: Optional[Union[str, Path]] = None,
+        task_fingerprint: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        """Centrally verify if a pipeline execution positively establishes full successful completion
+        based exclusively on physical, valid, correctly provenanced stage deliverables.
+
+        Metadata summary is informational state only and is NEVER used to substitute for missing
+        or invalid stage deliverables.
+
+        Returns: (is_completed, incomplete_stage_name, reason)
+        """
+        import re
+
+        # Resolve run directory and stage list
+        if isinstance(stages, (str, Path)):
+            run_dir = Path(stages)
+            stage_list = []
+        elif hasattr(stages, "run_dir"):
+            run_dir = run_dir or getattr(stages, "run_dir", None)
+            run_id = run_id or getattr(stages, "run_id", None)
+            task_fingerprint = task_fingerprint or getattr(stages, "task_fingerprint", None)
+            stage_list = list(getattr(stages, "stages", []))
+        else:
+            stage_list = list(stages or [])
+
+        if run_dir is not None:
+            run_dir = Path(run_dir)
+            meta_path = run_dir / "metadata.json"
+            if meta_path.exists():
+                try:
+                    meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if not run_id:
+                        run_id = meta_data.get("run_id")
+                    if not task_fingerprint:
+                        task_fingerprint = meta_data.get("task_fingerprint")
+                        if not task_fingerprint and meta_data.get("task"):
+                            from forge.core.run import compute_task_fingerprint
+                            task_fingerprint = compute_task_fingerprint(meta_data.get("task"))
+                    if not no_critic:
+                        if meta_data.get("no_critic") or (isinstance(meta_data.get("config"), dict) and meta_data["config"].get("execution", {}).get("no_critic")):
+                            no_critic = True
+                except Exception:
+                    pass
+
+        if run_dir is None:
+            for s in stage_list:
+                p = getattr(s, "artifact_json_path", None) or getattr(s, "run_dir", None)
+                if p:
+                    run_dir = Path(p).parent if getattr(s, "artifact_json_path", None) else Path(p)
+                    break
+
+        # Map in-memory executed stages by normalized (role, seq) and role alone
+        executed_by_key: Dict[Tuple[str, int], Any] = {}
+        for s in stage_list:
+            role = str(getattr(s, "role_name", "") or getattr(s, "name", "") or "").lower().strip()
+            seq = getattr(s, "sequence_number", None)
+            if not role and hasattr(s, "stage_name"):
+                m = re.match(r"^(\d+)_([a-zA-Z0-9_\-]+)$", str(s.stage_name))
+                if m:
+                    seq = int(m.group(1))
+                    role = m.group(2).lower().strip()
+            if role:
+                key = (role, seq if seq is not None else -1)
+                executed_by_key[key] = s
+                if (role, -1) not in executed_by_key:
+                    executed_by_key[(role, -1)] = s
+
+        # Canonical required pipeline stages
+        include_closing_critic = not no_critic
+        if not has_pre_critic:
+            if run_dir and run_dir.exists() and (run_dir / "00_critic.json").exists():
+                has_pre_critic = True
+            elif ("critic", 0) in executed_by_key:
+                has_pre_critic = True
+
+        required_defs = cls.required_pipeline_stages(no_critic=not include_closing_critic, has_pre_critic=has_pre_critic)
+
+        # Check if literally nothing was executed
+        has_any_execution = False
+        if run_dir and run_dir.exists():
+            for p in run_dir.iterdir():
+                if p.is_file() and p.suffix in (".json", ".md") and not p.name.startswith((".tmp", "metadata", "git_baseline", "run_lock")):
+                    has_any_execution = True
+                    break
+        if not has_any_execution:
+            for s in stage_list:
+                st = str(getattr(s, "status", "") or "").upper().strip()
+                dur = float(getattr(s, "duration_seconds", 0.0) or 0.0)
+                if (st and st not in ("PENDING", "UNKNOWN", "NOT REACHED", "—", "")) or dur > 0:
+                    has_any_execution = True
+                    break
+
+        if not has_any_execution:
+            return False, required_defs[0].display_name, "No stages were executed."
+
+        # Check for any explicit failure in in-memory stages
+        for s in stage_list:
+            st = str(getattr(s, "status", "") or "").upper().strip()
+            ec = getattr(s, "exit_code", None)
+            if st in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED") or (ec is not None and ec != 0):
+                s_name = getattr(s, "display_name", None) or getattr(s, "stage_name", None) or getattr(s, "name", "Stage")
+                return False, str(s_name), f"Stage '{s_name}' failed with status '{st or ec}'."
+
+        # Verify EVERY required stage has a physical, valid, correctly provenanced deliverable
+        for req_def in required_defs:
+            stage_inst = executed_by_key.get((req_def.name.lower(), req_def.sequence_number))
+            if stage_inst is None:
+                stage_inst = executed_by_key.get((req_def.name.lower(), -1))
+
+            if run_dir and run_dir.exists():
+                expected_json = run_dir / f"{req_def.sequence_number:02d}_{req_def.name.lower()}.json"
+                if not expected_json.exists() or not expected_json.is_file():
+                    return False, req_def.display_name, f"Stage artifact '{expected_json.name}' is missing on disk."
+
+                try:
+                    art_data = json.loads(expected_json.read_text(encoding="utf-8"))
+                    if not isinstance(art_data, dict):
+                        return False, req_def.display_name, f"Stage artifact '{expected_json.name}' contains invalid JSON data."
+                except Exception as e:
+                    return False, req_def.display_name, f"Stage artifact '{expected_json.name}' is malformed or corrupted JSON: {e}"
+
+                # Provenance checks (RC-03, RC-04):
+                # 1. task_fingerprint
+                art_fp = art_data.get("task_fingerprint")
+                if not art_fp or not isinstance(art_fp, str) or len(art_fp) != 64 or not all(c in "0123456789abcdefABCDEF" for c in art_fp):
+                    return False, req_def.display_name, f"Stage artifact '{expected_json.name}' lacks valid task fingerprint."
+                if task_fingerprint and art_fp != task_fingerprint:
+                    return False, req_def.display_name, f"Stage artifact '{expected_json.name}' has mismatched task fingerprint (generation mismatch)."
+
+                # 2. run_id
+                art_rid = art_data.get("run_id")
+                if not art_rid or not str(art_rid).strip():
+                    return False, req_def.display_name, f"Stage artifact '{expected_json.name}' lacks mandatory run identity."
+                if run_id and str(art_rid) != str(run_id):
+                    return False, req_def.display_name, f"Stage artifact '{expected_json.name}' has mismatched run identity (expected '{run_id}', got '{art_rid}')."
+
+                # 3. canonical role
+                art_role = art_data.get("role") or art_data.get("ROLE")
+                if not art_role or str(art_role).lower().strip() != req_def.name.lower().strip():
+                    return False, req_def.display_name, f"Stage artifact '{expected_json.name}' has mismatched role '{art_role}' (expected '{req_def.name}')."
+
+                # 4. sequence number
+                art_seq = art_data.get("sequence_number")
+                if art_seq is None:
+                    return False, req_def.display_name, f"Stage artifact '{expected_json.name}' lacks sequence number."
+                try:
+                    if int(art_seq) != req_def.sequence_number:
+                        return False, req_def.display_name, f"Stage artifact '{expected_json.name}' has mismatched sequence number '{art_seq}' (expected '{req_def.sequence_number}')."
+                except (ValueError, TypeError):
+                    return False, req_def.display_name, f"Stage artifact '{expected_json.name}' has invalid sequence number '{art_seq}'."
+
+                # 5. successful status
+                art_status = str(art_data.get("status") or art_data.get("STATUS") or "").upper().strip()
+                if not art_status or art_status in ("PENDING", "UNKNOWN", "RUNNING", "IN_PROGRESS", "NOT REACHED", "—", ""):
+                    return False, req_def.display_name, f"Stage '{req_def.display_name}' did not complete (status '{art_status}')."
+                if art_status in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED"):
+                    return False, req_def.display_name, f"Stage '{req_def.display_name}' finished with non-success status '{art_status}'."
+                if not cls.is_success_status(art_status, req_def.name):
+                    return False, req_def.display_name, f"Stage '{req_def.display_name}' finished with non-success status '{art_status}'."
+                art_ec = art_data.get("exit_code")
+                if art_ec is not None and art_ec != 0:
+                    return False, req_def.display_name, f"Stage '{req_def.display_name}' failed with exit code {art_ec}."
+
+            else:
+                # In-memory execution without run_dir
+                if stage_inst is None:
+                    return False, req_def.display_name, f"Pipeline terminated before stage '{req_def.display_name}' completed."
+
+                status_str = str(getattr(stage_inst, "status", "") or "").upper().strip()
+                if not status_str or status_str in ("PENDING", "UNKNOWN", "RUNNING", "IN_PROGRESS", "NOT REACHED", "—", ""):
+                    return False, req_def.display_name, f"Pipeline terminated before stage '{req_def.display_name}' completed."
+
+                if not cls.is_success_status(status_str, req_def.name) and status_str not in ("SKIPPED", "COMPLETE"):
+                    return False, req_def.display_name, f"Stage '{req_def.display_name}' finished with non-success status '{status_str}'."
+
+                inst_meta = getattr(stage_inst, "metadata", None)
+                if isinstance(inst_meta, dict) and inst_meta:
+                    art_fp = inst_meta.get("task_fingerprint")
+                    if task_fingerprint and art_fp and art_fp != task_fingerprint:
+                        return False, req_def.display_name, f"Stage '{req_def.display_name}' has mismatched task fingerprint."
+                    art_rid = inst_meta.get("run_id")
+                    if run_id and art_rid and str(art_rid) != str(run_id):
+                        return False, req_def.display_name, f"Stage '{req_def.display_name}' has mismatched run identity."
+                    art_role = inst_meta.get("role")
+                    if art_role and str(art_role).lower().strip() != req_def.name.lower().strip():
+                        return False, req_def.display_name, f"Stage '{req_def.display_name}' has mismatched role."
+                    art_seq = inst_meta.get("sequence_number")
+                    if art_seq is not None and int(art_seq) != req_def.sequence_number:
+                        return False, req_def.display_name, f"Stage '{req_def.display_name}' has mismatched sequence number."
+
+        return True, None, "All stages completed successfully."
 
     @classmethod
     def resolve_definition(

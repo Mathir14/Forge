@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forge-orchestrator"
-version = "0.1.0b10"
+version = "0.1.0b11"
 
 description = "CLI-first multi-agent orchestration framework"
 readme = "README.md"

@@ -1,5 +1,6 @@
 """DashboardApp: Main terminal application orchestrating state and layout rendering."""
 
+import json
 import os
 import queue
 import select
@@ -113,15 +114,31 @@ class DashboardApp:
             pass
 
         # 3. Derive terminal state from run_model
-        status = (self.run_model.status or "UNKNOWN").upper()
+        status = (self.run_model.status or "UNKNOWN").upper().strip()
+
+        # Handle user cancellations/abort
+        if status in ("CANCELLED", "ABORTED"):
+            self.state.terminal_status = status
+            self.state.terminal_stage = "Pipeline"
+            self.state.terminal_reason = (
+                self.run_model.summary.reason
+                if self.run_model.summary and self.run_model.summary.reason
+                else "Execution was cancelled by user."
+            )
+            self.run_model.status = self.state.terminal_status
+            return
+
+        # Check for any failed / blocked / rejected stages
         failed_stage = None
         for s in self.run_model.stages:
-            if s.status in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED") or (s.exit_code is not None and s.exit_code != 0):
+            st_upper = str(s.status or "").upper().strip()
+            if st_upper in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED") or (s.exit_code is not None and s.exit_code != 0):
                 failed_stage = s
                 break
 
         if failed_stage:
-            self.state.terminal_status = failed_stage.status
+            st_upper = str(failed_stage.status or "FAILED").upper().strip()
+            self.state.terminal_status = st_upper if st_upper not in ("UNKNOWN", "—", "") else "FAILED"
             self.state.terminal_stage = failed_stage.stage_name
             reason = None
             if failed_stage.machine_report and not failed_stage.machine_report.is_valid:
@@ -133,26 +150,95 @@ class DashboardApp:
                 reason = "Execution timed out (exit code 124)."
             elif self.run_model.summary and self.run_model.summary.reason:
                 reason = self.run_model.summary.reason
-            self.state.terminal_reason = reason or f"Stage finished with status '{failed_stage.status}'"
-        elif StageOrder.is_success_status(status):
+            self.state.terminal_reason = reason or f"Stage finished with status '{self.state.terminal_status}'"
+            self.run_model.status = self.state.terminal_status
+            if self.run_model.summary is not None:
+                self.run_model.summary.final_status = self.state.terminal_status
+                if self.state.terminal_reason:
+                    self.run_model.summary.reason = self.state.terminal_reason
+            return
+
+        # If run status is explicitly failed/rejected at the run level
+        if status in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED"):
             self.state.terminal_status = status
-            self.state.terminal_stage = None
-            self.state.terminal_reason = (self.run_model.summary.reason if self.run_model.summary and self.run_model.summary.reason else "All stages completed successfully.")
-        elif any(StageOrder.is_success_status(s.status, s.role_name) for s in self.run_model.stages):
+            self.state.terminal_stage = "Pipeline"
+            self.state.terminal_reason = (
+                self.run_model.summary.reason
+                if self.run_model.summary and self.run_model.summary.reason
+                else f"Pipeline finished with status '{status}'."
+            )
+            self.run_model.status = self.state.terminal_status
+            if self.run_model.summary is not None:
+                self.run_model.summary.final_status = self.state.terminal_status
+                if self.state.terminal_reason:
+                    self.run_model.summary.reason = self.state.terminal_reason
+            return
+
+        # Positive establishment rule (N-008 / N-002 / F-004):
+        # A run may ONLY be established as APPROVED or COMPLETED if all required
+        # pipeline stages have positively and successfully completed.
+        # Heuristics like "number of stages >= 4" or bare status string matching
+        # are strictly prohibited.
+        no_critic = False
+        if self.run_model.metadata:
+            no_critic = self.run_model.metadata.get("no_critic", False)
+            if not no_critic and isinstance(self.run_model.metadata.get("metadata"), dict):
+                no_critic = self.run_model.metadata["metadata"].get("no_critic", False)
+            if not no_critic and isinstance(self.run_model.metadata.get("config"), dict):
+                no_critic = self.run_model.metadata["config"].get("execution", {}).get("no_critic", False)
+
+        has_pre_critic = any(
+            (getattr(s, "role_name", "") or "").lower() == "critic" and getattr(s, "sequence_number", -1) == 0
+            for s in self.run_model.stages
+        )
+
+        is_completed, incomplete_stage, reason = StageOrder.verify_pipeline_completion(
+            stages=self.run_model.stages,
+            summary=self.run_model.summary,
+            no_critic=no_critic,
+            has_pre_critic=has_pre_critic,
+            run_dir=self.run_dir,
+            task_fingerprint=getattr(self.run_model, "task_fingerprint", None) or getattr(self.state.run, "task_fingerprint", None),
+            run_id=self.run_model.run_id or getattr(self.state.run, "run_id", None),
+        )
+
+        if is_completed:
             self.state.terminal_status = "APPROVED"
             self.state.terminal_stage = None
-            self.state.terminal_reason = (self.run_model.summary.reason if self.run_model.summary and self.run_model.summary.reason else "Pipeline finished successfully.")
+            self.state.terminal_reason = (
+                self.run_model.summary.reason
+                if self.run_model.summary and self.run_model.summary.reason
+                else "All stages completed successfully."
+            )
+            self.run_model.status = "APPROVED"
+            try:
+                meta_path = self.run_dir / "metadata.json"
+                if meta_path.exists():
+                    meta_dict = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if meta_dict.get("status") not in ("APPROVED", "FAILED", "CANCELLED", "ABORTED"):
+                        meta_dict["status"] = "APPROVED"
+                        meta_path.write_text(json.dumps(meta_dict, indent=2), encoding="utf-8")
+            except Exception:
+                pass
         else:
-            self.state.terminal_status = status if status not in ("UNKNOWN", "PENDING", "IN_PROGRESS", "RUNNING") else "COMPLETED"
-            self.state.terminal_stage = "Pipeline"
-            self.state.terminal_reason = (self.run_model.summary.reason if self.run_model.summary and self.run_model.summary.reason else "Pipeline execution completed.")
-
+            self.state.terminal_status = "INCOMPLETE"
+            self.state.terminal_stage = incomplete_stage or "Pipeline"
+            self.state.terminal_reason = reason or "Pipeline terminated unexpectedly before completing."
+            self.run_model.status = self.state.terminal_status
         if self.run_model.summary is not None:
             self.run_model.summary.final_status = self.state.terminal_status
             if self.state.terminal_reason:
                 self.run_model.summary.reason = self.state.terminal_reason
         else:
             self.run_model.summary = self.state.get_run_summary()
+
+    @property
+    def terminal_status(self) -> Optional[str]:
+        return self.state.terminal_status
+
+    @property
+    def terminal_reason(self) -> Optional[str]:
+        return self.state.terminal_reason
 
     def get_summary_text(self) -> str:
         """Return the formatted Forge Run Summary plain text."""

@@ -1,6 +1,7 @@
 """Tests for forge auto -d process lifecycle, dashboard persistence, and cancellation."""
 
 import io
+import json
 import os
 import queue
 import signal
@@ -280,9 +281,45 @@ def test_process_group_safety_guards_against_parent_signalling():
 
 
 def test_normal_success_path_regression(mock_run_dir: Path):
-    """Test 8: Successful pipeline transitions to APPROVED terminal banner and exits cleanly on q."""
+    from forge.core.run import compute_task_fingerprint
+    task = "Test"
+    fp = compute_task_fingerprint(task)
+    run_id = "run-999"
+
+    stages = [
+        (1, "architect", "APPROVED"),
+        (2, "planner", "READY"),
+        (3, "executor", "COMPLETE"),
+        (4, "tester", "PASS"),
+        (5, "reviewer", "APPROVED"),
+    ]
+    summary_stages = []
+    for seq, role, status in stages:
+        stage_file = mock_run_dir / f"{seq:02d}_{role}.json"
+        stage_file.write_text(json.dumps({
+            "run_id": run_id,
+            "task_fingerprint": fp,
+            "role": role,
+            "sequence_number": seq,
+            "status": status,
+        }), encoding="utf-8")
+        summary_stages.append({"name": role.title(), "status": status, "execution_state": "COMPLETED"})
+
+    summary = {
+        "run_id": run_id,
+        "final_status": "APPROVED",
+        "stages": summary_stages,
+    }
     meta = mock_run_dir / "metadata.json"
-    meta.write_text('{"run_id": "run-999", "task": "Test", "status": "APPROVED"}', encoding="utf-8")
+    meta.write_text(json.dumps({
+        "run_id": run_id,
+        "task": task,
+        "status": "APPROVED",
+        "metadata": {
+            "summary": summary,
+            "no_critic": True,
+        },
+    }), encoding="utf-8")
 
     live_q = queue.Queue()
     stop_ev = threading.Event()

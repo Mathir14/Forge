@@ -471,7 +471,7 @@ def test_opencode_iter_events_command_construction():
         assert len(events) == 2
         assert events[0].event_type == AgentEventType.CHUNK
         assert events[1].event_type == AgentEventType.COMPLETE
-        mock_kill_pg.assert_called_once_with(mock_proc)
+        mock_kill_pg.assert_not_called()  # Safe cleanup does not kill already-exited process (ADR-017 / F-005)
 
 
 MOCK_OPENCODE_CATALOG = {

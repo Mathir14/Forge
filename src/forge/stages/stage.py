@@ -544,7 +544,24 @@ class Stage:
             )
             if not is_mock:
                 from forge.testing.engine import TesterEngine
-                engine = TesterEngine(context=context, run_manager=self.run_manager)
+                from forge.testing.budget import TestingBudget
+
+                effective_timeout = self.timeout
+                if effective_timeout is None and context.config:
+                    stage_cfg = context.config.get_stage_config(
+                        self.role.name,
+                        phase=getattr(self.role, "phase", "pre_run"),
+                    )
+                    if stage_cfg and stage_cfg.timeout:
+                        effective_timeout = stage_cfg.timeout
+                if effective_timeout is None and getattr(context.config, "defaults", None):
+                    effective_timeout = getattr(context.config.defaults, "timeout", None)
+
+                budget = None
+                if effective_timeout is not None:
+                    budget = TestingBudget(max_runtime_seconds=float(effective_timeout))
+
+                engine = TesterEngine(context=context, run_manager=self.run_manager, budget=budget)
                 return engine.run()
 
         # 1. Prepare

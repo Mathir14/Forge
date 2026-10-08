@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Iterator, Iterable, Callable, Tuple, Union
 
-from forge.adapters.base import BaseAdapter, AdapterResponse
+from forge.adapters.base import BaseAdapter, AdapterResponse, StderrDrainer
 from forge.core.capabilities import Capability
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
 from forge.core.platform import get_process_group_flags, prepare_command
@@ -1143,10 +1143,12 @@ class OpenCodeAdapter(BaseAdapter):
         popen_kwargs.update(get_process_group_flags())
 
         proc: Optional[subprocess.Popen] = None
+        stderr_drainer: Optional[StderrDrainer] = None
         try:
             prepared_cmd = prepare_command(cmd)
             proc = subprocess.Popen(prepared_cmd, **popen_kwargs)
             self._register_proc(proc, instance=self)
+            stderr_drainer = StderrDrainer(proc.stderr)
             if proc.stdin:
                 try:
                     proc.stdin.write(prompt)
@@ -1162,26 +1164,8 @@ class OpenCodeAdapter(BaseAdapter):
                         return proc.poll()
                 return None
 
-            _captured_stderr: Optional[str] = None
-
             def _get_stderr() -> str:
-                nonlocal _captured_stderr
-                if _captured_stderr is not None:
-                    return _captured_stderr
-                if proc is not None and proc.stderr:
-                    try:
-                        # Only read if the child process has terminated to avoid blocking on an open pipe
-                        if proc.poll() is None:
-                            try:
-                                proc.wait(timeout=0.5)
-                            except Exception:
-                                pass
-                        if proc.poll() is not None:
-                            _captured_stderr = proc.stderr.read() or ""
-                            return _captured_stderr
-                    except Exception:
-                        return ""
-                return ""
+                return stderr_drainer.get_stderr() if stderr_drainer is not None else ""
 
             if proc.stdout is not None:
                 yield from self._decode_stream_events(
@@ -1236,7 +1220,9 @@ class OpenCodeAdapter(BaseAdapter):
         finally:
             if proc is not None:
                 self._safe_cleanup_subprocess(proc)
-                self._kill_process_group(proc)
+            if stderr_drainer is not None:
+                stderr_drainer.close()
+            if proc is not None:
                 try:
                     proc.wait(timeout=1.0)
                 except Exception:

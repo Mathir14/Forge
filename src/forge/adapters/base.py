@@ -3,9 +3,11 @@ import os
 import re
 import signal
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Tuple, Union, Iterator
 
@@ -19,6 +21,92 @@ from forge.core.platform import (
 
 
 _ORIGINAL_SUBPROCESS_RUN = subprocess.run
+
+
+import collections
+
+
+class StderrDrainer:
+    """Asynchronously drains a subprocess stderr pipe in a background daemon thread
+    to prevent OS pipe buffer saturation and deadlock during stdout streaming.
+
+    Bounded in memory to prevent heap exhaustion while preserving tail diagnostics
+    for error reporting and recovery.
+    """
+    DEFAULT_MAX_BYTES: int = 512 * 1024  # 512 KB
+
+    def __init__(self, stream: Optional[Any], max_bytes: int = DEFAULT_MAX_BYTES):
+        self._stream = stream
+        self._max_bytes = max_bytes
+        self._chunks: collections.deque[str] = collections.deque()
+        self._current_bytes: int = 0
+        self._truncated: bool = False
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        if self._stream is not None:
+            self._thread = threading.Thread(target=self._drain, daemon=True)
+            self._thread.start()
+
+    def _drain(self) -> None:
+        try:
+            for line in self._stream:
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                with self._lock:
+                    line_len = len(line.encode("utf-8", errors="replace"))
+                    self._chunks.append(line)
+                    self._current_bytes += line_len
+                    while self._current_bytes > self._max_bytes and self._chunks:
+                        removed = self._chunks.popleft()
+                        self._current_bytes -= len(removed.encode("utf-8", errors="replace"))
+                        self._truncated = True
+        except Exception:
+            pass
+
+    def get_stderr(self) -> str:
+        with self._lock:
+            content = "".join(self._chunks)
+            if self._truncated:
+                limit_kb = self._max_bytes // 1024
+                return f"[... stderr truncated: previous output exceeded {limit_kb}KB buffer ...]\n" + content
+            return content
+
+    def close(self, timeout: float = 0.2) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=timeout)
+            except Exception:
+                pass
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+
+
+class hybridmethod:
+    """Descriptor enabling a method to be invoked on either a class or an instance."""
+
+    def __init__(self, func: Any):
+        self.func = func
+        self.__doc__ = getattr(func, "__doc__", None)
+        self.__name__ = getattr(func, "__name__", "hybridmethod")
+
+    def __get__(self, instance: Any, owner: Any) -> Any:
+        if instance is None:
+            @wraps(self.func)
+            def class_wrapper(*args: Any, **kwargs: Any) -> Any:
+                return self.func(owner, *args, **kwargs)
+            class_wrapper.__wrapped__ = self.func
+            return class_wrapper
+        else:
+            @wraps(self.func)
+            def instance_wrapper(*args: Any, **kwargs: Any) -> Any:
+                return self.func(instance, *args, **kwargs)
+            instance_wrapper.__wrapped__ = self.func
+            return instance_wrapper
 
 
 @dataclass
@@ -403,15 +491,23 @@ class BaseAdapter(ABC):
         """Terminate or kill the entire process group of proc to prevent orphaned children."""
         terminate_process_tree(proc, safe_kill_fn=cls._safe_kill)
 
-    @classmethod
+    @hybridmethod
     def _run_subprocess(
-        cls,
+        self_or_cls,
         cmd: List[str],
         input_data: Optional[str] = None,
         cwd: Optional[Path] = None,
         timeout: Optional[int] = None,
+        instance: Optional["BaseAdapter"] = None,
     ) -> Tuple[str, str, int]:
         """Run subprocess with process group isolation and guaranteed cleanup of child processes."""
+        if isinstance(self_or_cls, BaseAdapter):
+            inst = self_or_cls
+            cls = type(self_or_cls)
+        else:
+            inst = instance
+            cls = self_or_cls
+
         work_dir = cwd or Path.cwd()
         prepared_cmd = prepare_command(cmd)
         if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
@@ -439,7 +535,7 @@ class BaseAdapter(ABC):
         popen_kwargs.update(get_process_group_flags())
 
         proc = subprocess.Popen(prepared_cmd, **popen_kwargs)
-        cls._register_proc(proc)
+        cls._register_proc(proc, instance=inst)
         try:
             stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
             return stdout or "", stderr or "", proc.returncode
@@ -459,7 +555,7 @@ class BaseAdapter(ABC):
             cls._kill_process_group(proc)
             raise
         finally:
-            cls._unregister_proc(proc)
+            cls._unregister_proc(proc, instance=inst)
 
 
 atexit.register(BaseAdapter.cleanup_all)
