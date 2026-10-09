@@ -1434,16 +1434,30 @@ class OpenCodeAdapter(BaseAdapter):
             self._record_recovery_failure(terminal_event, response, reason)
             return None
 
-        if getattr(self, "_explicit_recovery_timeout", False):
-            effective_timeout = self.recovery_timeout
-        elif timeout is not None:
-            effective_timeout = max(self.recovery_timeout, float(timeout))
+        if timeout is not None:
+            try:
+                parsed_timeout = float(timeout)
+                # Stage deadline is strictly authoritative and must never be overrun.
+                # If budget is already expired or negative, clamp to 0.0s.
+                stage_budget = max(0.0, parsed_timeout)
+                effective_timeout = min(self.recovery_timeout, stage_budget)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Invalid timeout value %r for recovery; falling back to recovery_timeout",
+                    timeout,
+                )
+                effective_timeout = self.recovery_timeout
         else:
             effective_timeout = self.recovery_timeout
 
         start_recovery_time = time.time()
         poll_deadline = start_recovery_time + effective_timeout
-        poll_interval = max(0.5, self.recovery_poll_interval)
+        if effective_timeout <= 0.0:
+            poll_interval = 0.0
+        elif effective_timeout < 0.5:
+            poll_interval = max(0.02, min(self.recovery_poll_interval, effective_timeout))
+        else:
+            poll_interval = max(0.1, min(self.recovery_poll_interval, effective_timeout))
 
         logger.info(
             "Polling OpenCode daemon for session %s (timeout: %.1fs, interval: %.1fs)...",
@@ -1505,7 +1519,7 @@ class OpenCodeAdapter(BaseAdapter):
                     )
 
                 # Responsive sleep checking for cancellation
-                sleep_end = time.time() + poll_interval
+                sleep_end = min(poll_deadline, time.time() + poll_interval)
                 while time.time() < sleep_end:
                     if getattr(self, "_cancel_requested", False):
                         reason = "Session recovery cancelled by user or stage shutdown."

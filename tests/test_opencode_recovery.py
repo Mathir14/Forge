@@ -906,3 +906,292 @@ def test_retry_arbitration_fail_closed_on_unverified_prior_session():
     prod_meta = failed_resp.metadata
     should_halt = prod_meta.get("session_active") is True or prod_meta.get("session_stopped") is False
     assert should_halt is True
+
+
+# ==============================================================================
+# REMEDIATION REGRESSION TESTS (v0.1.0b12 Blockers 1, 2, 3)
+# ==============================================================================
+
+def test_recover_session_timeout_bounded_by_stage_budget(tmp_path):
+    """Verify recovery timeout respects remaining stage budget and never expands to 300s."""
+    adapter = OpenCodeAdapter()
+    assert adapter.recovery_timeout == OpenCodeAdapter.DEFAULT_RECOVERY_TIMEOUT  # 300.0s
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        # Daemon session keeps running
+        return {"data": {"id": "ses_short_budget", "outcome": None}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="ECONNRESET",
+            result=ExecutionResult(exit_code=1, duration_seconds=5.0, stderr="ECONNRESET"),
+        )
+        # Stage only has 0.1s left
+        t0 = time.time()
+        recovered = adapter.recover_session(
+            terminal_event=orig_event,
+            session_id="ses_short_budget",
+            cwd=tmp_path,
+            timeout=0.1,
+        )
+        duration = time.time() - t0
+        assert recovered is None
+        assert duration < 2.0  # Finished promptly, did NOT hang for 300s
+        assert orig_event.result.metadata.get("recovery_failed") is True
+        assert "timeout" in orig_event.result.metadata.get("recovery_failure_reason", "").lower()
+
+
+def test_recover_session_budget_below_one_second_authoritative(tmp_path):
+    """Verify budget below 1.0s is authoritative and not inflated to 1.0s."""
+    adapter = OpenCodeAdapter()
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        return {"data": {"id": "ses_subsecond", "outcome": None}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="ECONNRESET",
+            result=ExecutionResult(exit_code=1, duration_seconds=5.0, stderr="ECONNRESET"),
+        )
+        t0 = time.time()
+        recovered = adapter.recover_session(
+            terminal_event=orig_event,
+            session_id="ses_subsecond",
+            cwd=tmp_path,
+            timeout=0.08,
+        )
+        duration = time.time() - t0
+        assert recovered is None
+        assert duration < 1.0  # Must not hang for 1.0s or more
+        assert orig_event.result.metadata.get("recovery_failed") is True
+
+
+def test_recover_session_budget_already_expired(tmp_path):
+    """Verify expired (0 or negative) timeout aborts immediately without polling."""
+    adapter = OpenCodeAdapter()
+    endpoints = []
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        endpoints.append((endpoint, method))
+        return {"data": {"id": "ses_expired", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="ECONNRESET",
+            result=ExecutionResult(exit_code=1, duration_seconds=5.0, stderr="ECONNRESET"),
+        )
+        t0 = time.time()
+        recovered = adapter.recover_session(
+            terminal_event=orig_event,
+            session_id="ses_expired",
+            cwd=tmp_path,
+            timeout=0.0,
+        )
+        duration = time.time() - t0
+        assert recovered is None
+        assert duration < 0.5
+        # The session recovery timed out immediately (0s budget) and initiated cancellation
+        assert any("interrupt" in ep[0] for ep in endpoints)
+        assert orig_event.result.metadata.get("recovery_failed") is True
+
+
+def test_recover_session_invalid_timeout_falls_back_gracefully(tmp_path):
+    """Verify invalid timeout input falls back to recovery_timeout without crashing."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 0.2, "recovery_poll_interval": 0.05})
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        return {"data": {"id": "ses_invalid_to", "outcome": None}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="ECONNRESET",
+            result=ExecutionResult(exit_code=1, duration_seconds=5.0, stderr="ECONNRESET"),
+        )
+        recovered = adapter.recover_session(
+            terminal_event=orig_event,
+            session_id="ses_invalid_to",
+            cwd=tmp_path,
+            timeout="not-a-number",
+        )
+        assert recovered is None
+        assert orig_event.result.metadata.get("recovery_failed") is True
+
+
+def test_working_tree_lease_dead_process_stale_lock_cleanup(tmp_path):
+    """Verify lease held by a non-existent PID is recognized as stale and safely reclaimed."""
+    import os
+    from forge.storage.run_lock import WorkingTreeLease
+
+    lease_file = tmp_path / ".forge" / "working_tree.lock"
+    lease_file.parent.mkdir(parents=True, exist_ok=True)
+    # Write stale lease belonging to a non-existent PID
+    stale_data = {
+        "schema_version": 1,
+        "pid": 99999999,
+        "run_id": "run-old",
+        "stage_name": "executor",
+        "iteration": 1,
+        "adapter": "opencode",
+        "session_id": "ses_dead",
+        "acquired_at": "2026-01-01T00:00:00Z",
+        "status": "ACTIVE",
+    }
+    lease_file.write_text(json.dumps(stale_data), encoding="utf-8")
+
+    # A new lease for a different run should successfully reclaim the stale lease
+    new_lease = WorkingTreeLease(
+        project_root=tmp_path,
+        run_id="run-new",
+        stage_name="executor",
+        session_id="ses_new",
+    )
+    new_lease.acquire()
+    assert new_lease.is_acquired is True
+    # Verify metadata was updated
+    current_data = json.loads(lease_file.read_text(encoding="utf-8"))
+    assert current_data["run_id"] == "run-new"
+    assert current_data["pid"] == os.getpid()
+    new_lease.release()
+
+
+def test_working_tree_lease_windows_does_not_probe_posix_signals(tmp_path, monkeypatch):
+    """Verify Windows code path uses kernel32 liveness check and never invokes raw os.kill."""
+    import os
+    from forge.storage.run_lock import WorkingTreeLease
+    import forge.core.platform as platform_mod
+
+    monkeypatch.setattr(platform_mod, "IS_POSIX", False)
+    monkeypatch.setattr(platform_mod, "IS_WINDOWS", True)
+
+    os_kill_called = []
+    original_kill = os.kill
+    def fake_kill(pid, sig):
+        os_kill_called.append((pid, sig))
+        return original_kill(pid, sig)
+    monkeypatch.setattr(os, "kill", fake_kill)
+
+    mock_kernel32 = MagicMock()
+    mock_kernel32.OpenProcess.return_value = 12345
+    def fake_get_exit_code(handle, byref_var):
+        byref_var._obj.value = 259  # STILL_ACTIVE
+        return True
+    mock_kernel32.GetExitCodeProcess.side_effect = fake_get_exit_code
+
+    with patch("ctypes.windll", MagicMock(kernel32=mock_kernel32), create=True):
+        lease = WorkingTreeLease(
+            project_root=tmp_path,
+            run_id="run-win",
+            stage_name="executor",
+            session_id="ses_win",
+        )
+        lease.acquire()
+        assert lease.is_acquired is True
+        lease.release()
+
+    assert len(os_kill_called) == 0
+
+
+def test_working_tree_lease_ambiguous_ownership_fail_closed(tmp_path, monkeypatch):
+    """Verify permission errors and ambiguous ownership fail closed without deleting lease."""
+    from forge.storage.run_lock import WorkingTreeLease, WorkingTreeConflictError
+
+    lease_file = tmp_path / ".forge" / "working_tree.lock"
+    lease_file.parent.mkdir(parents=True, exist_ok=True)
+    lease_data = {
+        "schema_version": 1,
+        "pid": 5555,
+        "run_id": "run-foreign",
+        "stage_name": "executor",
+        "iteration": 1,
+        "adapter": "opencode",
+        "session_id": "ses_foreign",
+        "acquired_at": "2026-01-01T00:00:00Z",
+        "status": "ACTIVE",
+    }
+    lease_file.write_text(json.dumps(lease_data), encoding="utf-8")
+
+    # Mock is_pid_alive to return True (as it does when PermissionError occurs)
+    with patch("forge.storage.run_lock.is_pid_alive", return_value=True):
+        competing = WorkingTreeLease(
+            project_root=tmp_path,
+            run_id="run-local",
+            stage_name="executor",
+            session_id="ses_local",
+        )
+        with pytest.raises(WorkingTreeConflictError):
+            competing.acquire()
+
+        # Confirm the original lease file was not overwritten or deleted
+        content = json.loads(lease_file.read_text(encoding="utf-8"))
+        assert content["run_id"] == "run-foreign"
+        assert content["status"] == "ACTIVE"
+
+
+def _worker_proc(root_str, run_id, result_queue):
+    from forge.storage.run_lock import WorkingTreeLease, WorkingTreeConflictError
+    try:
+        lease = WorkingTreeLease(
+            project_root=Path(root_str),
+            run_id=run_id,
+            stage_name="executor",
+            session_id=f"ses_{run_id}",
+        )
+        lease.acquire()
+        time.sleep(0.1)  # Hold briefly
+        lease.release()
+        result_queue.put((run_id, "SUCCESS"))
+    except WorkingTreeConflictError:
+        result_queue.put((run_id, "CONFLICT"))
+    except Exception as e:
+        result_queue.put((run_id, f"ERROR: {e}"))
+
+
+def test_working_tree_lease_multiprocess_stress_mutual_exclusion(tmp_path):
+    """Multiprocess stress test: exactly one distinct process acquires the lease at a time."""
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue()
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    procs = []
+    num_workers = 4
+    for i in range(num_workers):
+        p = ctx.Process(
+            target=_worker_proc,
+            args=(str(tmp_path), f"run_{i}", result_queue),
+        )
+        procs.append(p)
+
+    for p in procs:
+        p.start()
+
+    for p in procs:
+        p.join(timeout=10.0)
+
+    results = []
+    while not result_queue.empty():
+        results.append(result_queue.get())
+
+    assert len(results) == num_workers
+    statuses = [r[1] for r in results]
+    assert "SUCCESS" in statuses
+    for r in results:
+        assert not r[1].startswith("ERROR:"), f"Worker crashed: {r}"

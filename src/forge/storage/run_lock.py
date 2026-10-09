@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from forge import __version__
-from forge.core.platform import WINDOWS_LOCK_OFFSET
+from forge.core.platform import WINDOWS_LOCK_OFFSET, is_pid_alive
 
 try:
     import fcntl
@@ -454,6 +454,106 @@ class WorkingTreeConflictError(RuntimeError):
         )
 
 
+class _WorkingTreeMutex:
+    """Advisory filesystem mutex protecting WorkingTreeLease metadata modifications.
+
+    Uses kernel file locking (fcntl.flock on POSIX, msvcrt.locking at WINDOWS_LOCK_OFFSET on Windows)
+    to serialize inspection and mutation of the lease metadata file across processes.
+    """
+
+    def __init__(self, mutex_path: Path):
+        self.mutex_path = Path(mutex_path)
+        self._fd: Optional[int] = None
+
+    def acquire(self, timeout: float = 10.0, poll_interval: float = 0.02) -> bool:
+        self.mutex_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.time() + max(0.1, timeout)
+        while True:
+            try:
+                self._fd = os.open(self.mutex_path, os.O_RDWR | os.O_CREAT, 0o644)
+            except OSError:
+                if time.time() >= deadline:
+                    return False
+                time.sleep(poll_interval)
+                continue
+
+            locked = False
+            if fcntl is not None:
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                except (BlockingIOError, OSError):
+                    locked = False
+            elif msvcrt is not None:
+                try:
+                    os.lseek(self._fd, WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+                    msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
+                    locked = True
+                except OSError:
+                    locked = False
+            else:
+                locked = True
+
+            if locked:
+                return True
+
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+            if time.time() >= deadline:
+                return False
+            time.sleep(poll_interval)
+
+    def release(self) -> None:
+        if self._fd is not None:
+            try:
+                if fcntl is not None:
+                    try:
+                        fcntl.flock(self._fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                elif msvcrt is not None:
+                    try:
+                        os.lseek(self._fd, WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+                        msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+            finally:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+                self._fd = None
+
+    def __enter__(self) -> "_WorkingTreeMutex":
+        if not self.acquire():
+            raise TimeoutError(f"Timed out acquiring working tree mutex at {self.mutex_path}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+
+def _write_lease_metadata_atomic(path: Path, data: Dict[str, Any]) -> None:
+    """Atomically write lease metadata to disk via temporary file and atomic replace."""
+    content = json.dumps(data, indent=2)
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    temp_file = parent / f".{path.name}.tmp.{os.getpid()}_{time.time_ns()}"
+    try:
+        temp_file.write_text(content, encoding="utf-8")
+        os.replace(temp_file, path)
+    finally:
+        if temp_file.exists():
+            try:
+                temp_file.unlink()
+            except OSError:
+                pass
+
+
 class WorkingTreeLease:
     """Exclusive writer lease for the repository working tree across stages and retries.
 
@@ -476,6 +576,8 @@ class WorkingTreeLease:
         self.project_root = Path(project_root).resolve()
         self.forge_dir = self.project_root / ".forge"
         self.lease_file = self.forge_dir / self.LEASE_FILE_NAME
+        self.mutex_file = self.forge_dir / (self.LEASE_FILE_NAME + ".mutex")
+        self.mutex = _WorkingTreeMutex(self.mutex_file)
         self.run_id = run_id
         self.stage_name = stage_name
         self.iteration = iteration
@@ -507,78 +609,94 @@ class WorkingTreeLease:
                 self.is_acquired = True
                 return self
 
-        if self.lease_file.exists():
-            existing = RunLock.read_owner_metadata(self.lease_file)
-            if existing and existing.get("status") == "ACTIVE":
-                existing_sid = existing.get("session_id")
-                existing_pid = existing.get("pid")
-                existing_stage = existing.get("stage_name")
-                existing_run = existing.get("run_id")
+        # Serialize acquisition across processes using advisory kernel file lock
+        mutex_timeout = max(5.0, timeout)
+        if not self.mutex.acquire(timeout=mutex_timeout):
+            raise WorkingTreeConflictError(
+                f"Working tree '{self.project_root}' is currently being arbitrated by another process. "
+                "Timed out waiting for acquisition mutex.",
+                working_tree=self.project_root,
+            )
 
-                is_different_session = (
-                    existing_sid and existing_sid != self.session_id
-                ) or (
-                    existing_run != self.run_id or existing_stage != self.stage_name
-                )
+        try:
+            if self.lease_file.exists():
+                existing = RunLock.read_owner_metadata(self.lease_file)
+                if existing and existing.get("status") == "ACTIVE":
+                    existing_sid = existing.get("session_id")
+                    existing_pid = existing.get("pid")
+                    existing_stage = existing.get("stage_name")
+                    existing_run = existing.get("run_id")
 
-                if is_different_session:
-                    pid_alive = False
-                    if existing_pid:
-                        try:
-                            os.kill(existing_pid, 0)
-                            pid_alive = True
-                        except (ProcessLookupError, PermissionError):
-                            pid_alive = False
+                    is_different_session = (
+                        (existing_sid and existing_sid != self.session_id)
+                        or (existing_run != self.run_id or existing_stage != self.stage_name)
+                    )
 
-                    session_active = False
-                    if adapter_instance and existing_sid and hasattr(adapter_instance, "is_session_active"):
-                        session_active = adapter_instance.is_session_active(existing_sid, cwd=self.project_root)
+                    if is_different_session:
+                        pid_alive = False
+                        if existing_pid:
+                            pid_alive = is_pid_alive(existing_pid)
 
-                    if session_active or (pid_alive and existing_pid != os.getpid()):
-                        stopped = False
-                        if adapter_instance and existing_sid and hasattr(adapter_instance, "cancel_session"):
-                            stopped = adapter_instance.cancel_session(existing_sid, verify=True, timeout=5.0, cwd=self.project_root)
+                        session_active = False
+                        if adapter_instance and existing_sid and hasattr(adapter_instance, "is_session_active"):
+                            session_active = adapter_instance.is_session_active(existing_sid, cwd=self.project_root)
 
-                        if not stopped:
-                            raise WorkingTreeConflictError(
-                                f"Working tree '{self.project_root}' is actively held by writer "
-                                f"session '{existing_sid}' (PID {existing_pid}, Stage '{existing_stage}'). "
-                                "Cannot start competing execution.",
-                                working_tree=self.project_root,
-                                lease_info=existing,
+                        if session_active or (pid_alive and existing_pid != os.getpid()):
+                            stopped = False
+                            if adapter_instance and existing_sid and hasattr(adapter_instance, "cancel_session"):
+                                stopped = adapter_instance.cancel_session(existing_sid, verify=True, timeout=5.0, cwd=self.project_root)
+
+                            if not stopped:
+                                raise WorkingTreeConflictError(
+                                    f"Working tree '{self.project_root}' is actively held by writer "
+                                    f"session '{existing_sid}' (PID {existing_pid}, Stage '{existing_stage}'). "
+                                    "Cannot start competing execution.",
+                                    working_tree=self.project_root,
+                                    lease_info=existing,
+                                )
+                        else:
+                            logger.info(
+                                "Reclaimed stale working-tree lease from dead process/session (PID %s, Stage '%s', Session '%s')",
+                                existing_pid,
+                                existing_stage,
+                                existing_sid,
                             )
 
-        metadata = {
-            "schema_version": self.SCHEMA_VERSION,
-            "pid": os.getpid(),
-            "run_id": self.run_id,
-            "stage_name": self.stage_name,
-            "iteration": self.iteration,
-            "adapter": self.adapter_name,
-            "session_id": self.session_id,
-            "acquired_at": datetime.now(timezone.utc).isoformat(),
-            "status": "ACTIVE",
-        }
-        try:
-            self.lease_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.debug("Failed to write lease metadata: %s", e)
+            metadata = {
+                "schema_version": self.SCHEMA_VERSION,
+                "pid": os.getpid(),
+                "run_id": self.run_id,
+                "stage_name": self.stage_name,
+                "iteration": self.iteration,
+                "adapter": self.adapter_name,
+                "session_id": self.session_id,
+                "acquired_at": datetime.now(timezone.utc).isoformat(),
+                "status": "ACTIVE",
+            }
+            try:
+                _write_lease_metadata_atomic(self.lease_file, metadata)
+            except Exception as e:
+                logger.debug("Failed to write lease metadata: %s", e)
 
-        active_locks[canonical_key] = self
-        self._depth = 1
-        self.is_acquired = True
-        return self
+            active_locks[canonical_key] = self
+            self._depth = 1
+            self.is_acquired = True
+            return self
+        finally:
+            self.mutex.release()
 
     def update_session_id(self, session_id: str) -> None:
         """Update lease with the captured session ID once known."""
         self.session_id = session_id
-        if self.lease_file.exists():
-            try:
-                data = RunLock.read_owner_metadata(self.lease_file)
-                data["session_id"] = session_id
-                self.lease_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+        with self.mutex:
+            if self.lease_file.exists():
+                try:
+                    data = RunLock.read_owner_metadata(self.lease_file)
+                    if data:
+                        data["session_id"] = session_id
+                        _write_lease_metadata_atomic(self.lease_file, data)
+                except Exception:
+                    pass
 
     def release(self, force: bool = False, adapter_instance: Optional[Any] = None) -> None:
         """Release the working-tree writer lease."""
@@ -591,23 +709,25 @@ class WorkingTreeLease:
                 return
             del active_locks[canonical_key]
 
-        if self.lease_file.exists():
-            try:
-                if not force and self.session_id and adapter_instance and hasattr(adapter_instance, "is_session_active"):
-                    if adapter_instance.is_session_active(self.session_id, cwd=self.project_root):
-                        logger.warning(
-                            "Working tree lease retained: session %s is still active in background.",
-                            self.session_id,
-                        )
-                        self.is_acquired = False
-                        return
+        with self.mutex:
+            if self.lease_file.exists():
+                try:
+                    if not force and self.session_id and adapter_instance and hasattr(adapter_instance, "is_session_active"):
+                        if adapter_instance.is_session_active(self.session_id, cwd=self.project_root):
+                            logger.warning(
+                                "Working tree lease retained: session %s is still active in background.",
+                                self.session_id,
+                            )
+                            self.is_acquired = False
+                            return
 
-                data = RunLock.read_owner_metadata(self.lease_file)
-                data["status"] = "RELEASED"
-                data["released_at"] = datetime.now(timezone.utc).isoformat()
-                self.lease_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+                    data = RunLock.read_owner_metadata(self.lease_file)
+                    if data:
+                        data["status"] = "RELEASED"
+                        data["released_at"] = datetime.now(timezone.utc).isoformat()
+                        _write_lease_metadata_atomic(self.lease_file, data)
+                except Exception:
+                    pass
         self.is_acquired = False
 
     @classmethod
@@ -625,11 +745,8 @@ class WorkingTreeLease:
             return False
         pid = data.get("pid")
         if pid and pid != os.getpid():
-            try:
-                os.kill(pid, 0)
+            if is_pid_alive(pid):
                 return False
-            except (ProcessLookupError, PermissionError):
-                pass
         sid = data.get("session_id")
         if sid:
             adapter = adapter_instance

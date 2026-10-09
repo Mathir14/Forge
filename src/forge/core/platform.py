@@ -202,6 +202,10 @@ def is_pid_alive(pid: int) -> bool:
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
             if not h_proc:
+                ERROR_ACCESS_DENIED = 5
+                err = kernel32.GetLastError()
+                if err == ERROR_ACCESS_DENIED:
+                    return True
                 return False
             try:
                 exit_code = wintypes.DWORD()
