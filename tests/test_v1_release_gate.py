@@ -234,11 +234,11 @@ def test_version_metadata_is_beta():
     runner = CliRunner()
     res = runner.invoke(main, ["--version"])
     assert res.exit_code == 0
-    assert "0.1.0b11" in res.output
+    assert "0.1.0b12" in res.output
 
     pyproject_file = Path(__file__).resolve().parent.parent / "pyproject.toml"
     content = pyproject_file.read_text(encoding="utf-8")
-    assert 'version = "0.1.0b11"' in content
+    assert 'version = "0.1.0b12"' in content
 
 
 def test_run_manager_latest_scales_without_loading_all_runs(tmp_path):
