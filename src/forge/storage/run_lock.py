@@ -419,3 +419,235 @@ class RunLock:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
+
+
+class WorkingTreeConflictError(RuntimeError):
+    """Raised when an attempt to acquire working-tree writer lease fails due to an active writer."""
+
+    def __init__(
+        self,
+        message: str,
+        working_tree: Path,
+        lease_info: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(message)
+        self.working_tree = working_tree
+        self.lease_info = lease_info or {}
+
+    def format_diagnostic(self) -> str:
+        session_id = self.lease_info.get("session_id", "(unknown)")
+        stage_name = self.lease_info.get("stage_name", "(unknown)")
+        run_id = self.lease_info.get("run_id", "(unknown)")
+        pid = self.lease_info.get("pid", "(unknown)")
+        adapter = self.lease_info.get("adapter", "(unknown)")
+
+        return (
+            f"\n❌ Working Tree Conflict: Working tree '{self.working_tree}' is currently "
+            f"occupied by active writer session '{session_id}' in stage '{stage_name}' (Run '{run_id}').\n\n"
+            f"Owner Details:\n"
+            f"  • PID:              {pid}\n"
+            f"  • Adapter:          {adapter}\n"
+            f"  • Session ID:       {session_id}\n"
+            f"  • Stage:            {stage_name}\n"
+            f"  • Run ID:           {run_id}\n\n"
+            f"Aborting execution to prevent concurrent corruption of repository files.\n"
+        )
+
+
+class WorkingTreeLease:
+    """Exclusive writer lease for the repository working tree across stages and retries.
+
+    Guarantees that at any point in time, at most one active adapter session or Forge
+    execution stage can modify files in the working tree.
+    """
+
+    LEASE_FILE_NAME = "working_tree.lock"
+    SCHEMA_VERSION = 1
+
+    def __init__(
+        self,
+        project_root: Path,
+        run_id: str,
+        stage_name: str,
+        iteration: int = 1,
+        adapter_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ):
+        self.project_root = Path(project_root).resolve()
+        self.forge_dir = self.project_root / ".forge"
+        self.lease_file = self.forge_dir / self.LEASE_FILE_NAME
+        self.run_id = run_id
+        self.stage_name = stage_name
+        self.iteration = iteration
+        self.adapter_name = adapter_name or "unknown"
+        self.session_id = session_id
+        self.is_acquired: bool = False
+        self._depth: int = 0
+
+    def acquire(self, timeout: float = 0.0, adapter_instance: Optional[Any] = None) -> "WorkingTreeLease":
+        """Acquire exclusive writer ownership of the working tree.
+
+        If a prior writer session is recorded, verifies whether that session has stopped.
+        If the prior session is still active and cannot be proven stopped, raises
+        WorkingTreeConflictError (fails closed).
+        """
+        self.forge_dir.mkdir(parents=True, exist_ok=True)
+        canonical_key = f"wt_{self.project_root}"
+        active_locks = _get_active_locks()
+        if canonical_key in active_locks:
+            held = active_locks[canonical_key]
+            if (
+                held.session_id == self.session_id
+                and held.run_id == self.run_id
+                and held.stage_name == self.stage_name
+                and held.iteration == self.iteration
+            ):
+                held._depth += 1
+                self._depth = held._depth
+                self.is_acquired = True
+                return self
+
+        if self.lease_file.exists():
+            existing = RunLock.read_owner_metadata(self.lease_file)
+            if existing and existing.get("status") == "ACTIVE":
+                existing_sid = existing.get("session_id")
+                existing_pid = existing.get("pid")
+                existing_stage = existing.get("stage_name")
+                existing_run = existing.get("run_id")
+
+                is_different_session = (
+                    existing_sid and existing_sid != self.session_id
+                ) or (
+                    existing_run != self.run_id or existing_stage != self.stage_name
+                )
+
+                if is_different_session:
+                    pid_alive = False
+                    if existing_pid:
+                        try:
+                            os.kill(existing_pid, 0)
+                            pid_alive = True
+                        except (ProcessLookupError, PermissionError):
+                            pid_alive = False
+
+                    session_active = False
+                    if adapter_instance and existing_sid and hasattr(adapter_instance, "is_session_active"):
+                        session_active = adapter_instance.is_session_active(existing_sid, cwd=self.project_root)
+
+                    if session_active or (pid_alive and existing_pid != os.getpid()):
+                        stopped = False
+                        if adapter_instance and existing_sid and hasattr(adapter_instance, "cancel_session"):
+                            stopped = adapter_instance.cancel_session(existing_sid, verify=True, timeout=5.0, cwd=self.project_root)
+
+                        if not stopped:
+                            raise WorkingTreeConflictError(
+                                f"Working tree '{self.project_root}' is actively held by writer "
+                                f"session '{existing_sid}' (PID {existing_pid}, Stage '{existing_stage}'). "
+                                "Cannot start competing execution.",
+                                working_tree=self.project_root,
+                                lease_info=existing,
+                            )
+
+        metadata = {
+            "schema_version": self.SCHEMA_VERSION,
+            "pid": os.getpid(),
+            "run_id": self.run_id,
+            "stage_name": self.stage_name,
+            "iteration": self.iteration,
+            "adapter": self.adapter_name,
+            "session_id": self.session_id,
+            "acquired_at": datetime.now(timezone.utc).isoformat(),
+            "status": "ACTIVE",
+        }
+        try:
+            self.lease_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.debug("Failed to write lease metadata: %s", e)
+
+        active_locks[canonical_key] = self
+        self._depth = 1
+        self.is_acquired = True
+        return self
+
+    def update_session_id(self, session_id: str) -> None:
+        """Update lease with the captured session ID once known."""
+        self.session_id = session_id
+        if self.lease_file.exists():
+            try:
+                data = RunLock.read_owner_metadata(self.lease_file)
+                data["session_id"] = session_id
+                self.lease_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+    def release(self, force: bool = False, adapter_instance: Optional[Any] = None) -> None:
+        """Release the working-tree writer lease."""
+        canonical_key = f"wt_{self.project_root}"
+        active_locks = _get_active_locks()
+        if canonical_key in active_locks:
+            held = active_locks[canonical_key]
+            held._depth -= 1
+            if held._depth > 0:
+                return
+            del active_locks[canonical_key]
+
+        if self.lease_file.exists():
+            try:
+                if not force and self.session_id and adapter_instance and hasattr(adapter_instance, "is_session_active"):
+                    if adapter_instance.is_session_active(self.session_id, cwd=self.project_root):
+                        logger.warning(
+                            "Working tree lease retained: session %s is still active in background.",
+                            self.session_id,
+                        )
+                        self.is_acquired = False
+                        return
+
+                data = RunLock.read_owner_metadata(self.lease_file)
+                data["status"] = "RELEASED"
+                data["released_at"] = datetime.now(timezone.utc).isoformat()
+                self.lease_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        self.is_acquired = False
+
+    @classmethod
+    def check_no_active_writers(cls, project_root: Path, adapter_instance: Optional[Any] = None) -> bool:
+        """Verify that no active writer session or process holds the working tree lease."""
+        lease_path = Path(project_root) / ".forge" / cls.LEASE_FILE_NAME
+        if not lease_path.exists():
+            return True
+        data = RunLock.read_owner_metadata(lease_path)
+        if not data or data.get("status") != "ACTIVE":
+            return True
+        canonical_key = f"wt_{Path(project_root).resolve()}"
+        active_locks = _get_active_locks()
+        if canonical_key in active_locks:
+            return False
+        pid = data.get("pid")
+        if pid and pid != os.getpid():
+            try:
+                os.kill(pid, 0)
+                return False
+            except (ProcessLookupError, PermissionError):
+                pass
+        sid = data.get("session_id")
+        if sid:
+            adapter = adapter_instance
+            if adapter is None and sid.startswith("ses_"):
+                try:
+                    from forge.adapters.opencode import OpenCodeAdapter
+                    adapter = OpenCodeAdapter()
+                except Exception:
+                    pass
+            if adapter and hasattr(adapter, "is_session_active"):
+                if adapter.is_session_active(sid, cwd=project_root):
+                    return False
+        if pid == os.getpid():
+            return False
+        return True
+
+    def __enter__(self) -> "WorkingTreeLease":
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()

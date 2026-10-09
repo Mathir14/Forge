@@ -592,6 +592,7 @@ class Stage:
                 idle_timeout = getattr(context.config.defaults, "idle_timeout", None)
 
         # 3. Event-driven execution
+        start_time = time.time()
         terminal_event, response = self._execute_stream_events(
             prompt=rendered_prompt.text,
             cwd=context.project_root,
@@ -610,10 +611,16 @@ class Stage:
                     getattr(self.adapter, "name", type(self.adapter).__name__),
                     self.role.name,
                 )
+                remaining_time = None
+                if timeout is not None:
+                    elapsed = time.time() - start_time
+                    remaining_time = max(1.0, timeout - elapsed)
+
                 recovered = self.adapter.recover_session(
                     terminal_event=terminal_event,
                     response=response,
                     cwd=context.project_root,
+                    timeout=remaining_time,
                 )
                 if recovered is not None:
                     terminal_event, response = recovered
@@ -627,7 +634,13 @@ class Stage:
                         except Exception:
                             pass
                 else:
-                    # Recovery failed: dispatch the deferred ERROR event with diagnostic metadata
+                    # Recovery failed: ensure adapter session is terminated before dispatching error
+                    if hasattr(self.adapter, "cancel_session"):
+                        self.adapter.cancel_session(verify=True, timeout=1.0, cwd=context.project_root)
+                    elif hasattr(self.adapter, "cancel"):
+                        self.adapter.cancel()
+
+                    # Dispatch the deferred ERROR event with diagnostic metadata
                     if self.event_listener is not None:
                         try:
                             if "stage_name" not in terminal_event.data:
@@ -637,6 +650,13 @@ class Stage:
                             self.event_listener(terminal_event)
                         except Exception:
                             pass
+            else:
+                # Unrecoverable error: ensure any background process/session is cancelled if not already requested
+                if not getattr(self.adapter, "_cancel_requested", False):
+                    if hasattr(self.adapter, "cancel_session"):
+                        self.adapter.cancel_session(verify=True, timeout=1.0, cwd=context.project_root)
+                    elif hasattr(self.adapter, "cancel"):
+                        self.adapter.cancel()
 
         # 4. Validate / Parse protocol
         # Parse the machine report ONLY after a COMPLETE event.

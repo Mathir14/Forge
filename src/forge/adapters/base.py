@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Tuple, Union, Iterator
@@ -116,6 +116,7 @@ class AdapterResponse:
     exit_code: int
     duration_seconds: float
     raw_output: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_result(cls, result: ExecutionResult) -> "AdapterResponse":
@@ -126,6 +127,7 @@ class AdapterResponse:
             exit_code=result.exit_code,
             duration_seconds=result.duration_seconds,
             raw_output=result.raw_output,
+            metadata=dict(result.metadata) if result.metadata else {},
         )
 
     def to_result(self, duration_seconds: Optional[float] = None) -> ExecutionResult:
@@ -141,6 +143,7 @@ class AdapterResponse:
             exit_code=self.exit_code,
             duration_seconds=final_duration,
             raw_output=self.raw_output,
+            metadata=dict(self.metadata) if self.metadata else {},
         )
 
 
@@ -350,6 +353,7 @@ class BaseAdapter(ABC):
         response: Optional[AdapterResponse] = None,
         session_id: Optional[str] = None,
         cwd: Optional[Path] = None,
+        timeout: Optional[float] = None,
     ) -> Optional[Tuple[AgentEvent, AdapterResponse]]:
         """Attempt to recover a failed execution from an external daemon or persistent session.
 
@@ -358,6 +362,29 @@ class BaseAdapter(ABC):
             or None if recovery failed or was not possible.
         """
         return None
+
+    def is_session_active(
+        self,
+        session_id: Optional[str] = None,
+        cwd: Optional[Path] = None,
+    ) -> bool:
+        """Check whether an external daemon or persistent session is actively executing."""
+        return False
+
+    def cancel_session(
+        self,
+        session_id: Optional[str] = None,
+        verify: bool = True,
+        timeout: float = 10.0,
+        cwd: Optional[Path] = None,
+    ) -> bool:
+        """Attempt to cancel/interrupt an external session and verify that it stopped.
+
+        Returns:
+            True if session is confirmed stopped, False if still running or unverified.
+        """
+        self.cancel()
+        return True
 
     @staticmethod
     def _decode_stream(stream: Any) -> str:

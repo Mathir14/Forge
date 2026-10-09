@@ -230,6 +230,83 @@ class RunManager:
         run._archive_stale_artifacts(old_fp)
         run.save_metadata()
 
+    def recover_stage_from_session(
+        self,
+        run: Run,
+        stage_name: str,
+        session_id: str,
+        adapter: Optional[Any] = None,
+        sequence_number: Optional[int] = None,
+    ) -> Optional[Any]:
+        """Recover and reconstruct a completed stage result from an external daemon session.
+
+        Retrieves the authoritative session output, runs it through normal MachineReportParser
+        and MachineReportValidator, writes the canonical stage artifacts, and updates run metadata.
+        """
+        from forge.adapters.opencode import OpenCodeAdapter
+        from forge.protocol.parser import MachineReportParser
+        from forge.protocol.validator import MachineReportValidator
+        from forge.stages.result import StageResult
+
+        adapter_inst = adapter or OpenCodeAdapter()
+        recovered = adapter_inst.recover_session(
+            session_id=session_id,
+            cwd=self.project_root,
+        )
+        if not recovered:
+            return None
+
+        event, response = recovered
+        raw_text = response.stdout or ""
+        raw_dict, raw_yaml = MachineReportParser.extract_yaml(raw_text, expected_role=stage_name)
+        report = MachineReportValidator.validate(
+            data=raw_dict,
+            expected_role=stage_name,
+            raw_yaml=raw_yaml,
+        )
+
+        from forge.core.role import Role
+        from forge.prompts.rendered_prompt import RenderedPrompt
+        from forge.stages.definition import StageOrder
+
+        stage_def = StageOrder.resolve_definition(stage_name)
+        seq = sequence_number if sequence_number is not None else (stage_def.sequence_number if stage_def else 1)
+        role = Role(
+            name=stage_name,
+            sequence_number=seq,
+            template_content="",
+            protocol_content="",
+        )
+        rendered_prompt = RenderedPrompt.from_text("")
+
+        is_success = (
+            response.exit_code == 0
+            and report.is_valid
+            and report.status not in ("REJECTED", "FAILED", "BLOCKED", "CHANGES_REQUIRED")
+        )
+
+        stage_result = StageResult(
+            role=role,
+            prompt=rendered_prompt,
+            response=response,
+            machine_report=report,
+            raw_markdown=raw_text,
+            duration_seconds=response.duration_seconds,
+            success=is_success,
+        )
+
+        if stage_result.success:
+            self.save_stage_artifacts(
+                run=run,
+                sequence_number=seq,
+                role_name=stage_name,
+                markdown_content=raw_text,
+                json_data=stage_result.to_dict(),
+                adapter_name=getattr(adapter_inst, "name", "opencode"),
+            )
+
+        return stage_result
+
     def load_stage_json(self, run: Run, role_name: Any, sequence_number: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Load JSON report for a given role or StageDefinition from a run, optionally matching exact sequence number."""
         if hasattr(role_name, "name"):

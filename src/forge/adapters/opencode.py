@@ -300,6 +300,7 @@ class OpenCodeAdapter(BaseAdapter):
             raw_timeout = self.extra_flags.get("recovery_timeout")
             if raw_timeout is None:
                 raw_timeout = self.extra_flags.get("recovery-timeout")
+        self._explicit_recovery_timeout = raw_timeout is not None
         try:
             val = float(raw_timeout) if raw_timeout is not None else self.DEFAULT_RECOVERY_TIMEOUT
             self.recovery_timeout = max(1.0, min(3600.0, val))
@@ -1231,6 +1232,83 @@ class OpenCodeAdapter(BaseAdapter):
 
     execute_events = iter_events
 
+    def is_session_active(
+        self,
+        session_id: Optional[str] = None,
+        cwd: Optional[Path] = None,
+    ) -> bool:
+        """Check whether an OpenCode daemon session is actively executing."""
+        sid = _clean_session_id(session_id or self._session_id)
+        if not sid:
+            return False
+        work_dir = cwd or getattr(self, "_current_cwd", None) or Path.cwd()
+        resp = self._query_daemon_api(f"/api/session/{sid}", cwd=work_dir, timeout=5.0)
+        if resp is None:
+            return False
+        data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+        outcome = data.get("outcome")
+        if outcome in ("succeeded", "failed", "interrupted"):
+            return False
+        return True
+
+    def cancel_session(
+        self,
+        session_id: Optional[str] = None,
+        verify: bool = True,
+        timeout: float = 2.0,
+        cwd: Optional[Path] = None,
+    ) -> bool:
+        """Terminate active server-side OpenCode session and optionally verify cessation.
+
+        Returns True if session is confirmed stopped, False if still running or unverified.
+        """
+        sid = _clean_session_id(session_id or self._session_id)
+        if not sid:
+            return True
+
+        if not hasattr(self, "_interrupted_sessions"):
+            self._interrupted_sessions = set()
+        self._interrupted_sessions.add(sid)
+
+        work_dir = cwd if cwd is not None else getattr(self, "_current_cwd", None)
+        logger.info("Interrupting OpenCode daemon session: %s", sid)
+        try:
+            res = self._query_daemon_api(
+                f"/api/session/{sid}/interrupt",
+                method="POST",
+                cwd=work_dir,
+                timeout=5.0,
+            )
+            if res and res.get("interrupted"):
+                logger.info("Successfully interrupted OpenCode daemon session %s", sid)
+            elif res is not None:
+                logger.debug("OpenCode daemon session %s interrupt response: %s", sid, res)
+        except Exception as exc:
+            logger.warning("Failed to interrupt OpenCode daemon session %s: %s", sid, exc)
+
+        if not verify:
+            return True
+
+        # Verify that session outcome has settled out of running state
+        poll_deadline = time.time() + max(0.05, timeout)
+        poll_interval = min(0.2, timeout / 2) if timeout > 0.1 else 0.02
+        while time.time() < poll_deadline:
+            resp = self._query_daemon_api(f"/api/session/{sid}", cwd=work_dir, timeout=5.0)
+            if resp is not None:
+                data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+                outcome = data.get("outcome")
+                if outcome in ("interrupted", "failed", "succeeded"):
+                    logger.info("Verified OpenCode daemon session %s stopped with outcome '%s'", sid, outcome)
+                    return True
+            time.sleep(poll_interval)
+
+        logger.warning(
+            "OpenCode daemon session %s could not be verified stopped within %.1fs timeout",
+            sid,
+            timeout,
+        )
+        return False
+
     def cancel(self) -> None:
         """Terminate active server-side session and local subprocesses.
 
@@ -1242,38 +1320,15 @@ class OpenCodeAdapter(BaseAdapter):
         3. Background worker threads and daemon LLM/tool execution halt before
            subsequent stages or resumed runs proceed.
         """
+        if getattr(self, "_cancel_requested", False):
+            return
+        self._cancel_requested = True
         sid = _clean_session_id(self._session_id)
-        if sid and sid not in getattr(self, "_interrupted_sessions", set()):
-            if not hasattr(self, "_interrupted_sessions"):
-                self._interrupted_sessions = set()
-            self._interrupted_sessions.add(sid)
+        if sid:
             try:
-                logger.info("Interrupting OpenCode daemon session: %s", sid)
-                res = self._query_daemon_api(
-                    f"/api/session/{sid}/interrupt",
-                    method="POST",
-                    cwd=getattr(self, "_current_cwd", None),
-                    timeout=5.0,
-                )
-                if res and res.get("interrupted"):
-                    logger.info("Successfully interrupted OpenCode daemon session %s", sid)
-                elif res is not None:
-                    logger.debug(
-                        "OpenCode daemon session %s interrupt response: %s",
-                        sid,
-                        res,
-                    )
-                else:
-                    logger.debug(
-                        "OpenCode daemon session %s interrupt query returned no response",
-                        sid,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to interrupt OpenCode daemon session %s: %s",
-                    sid,
-                    exc,
-                )
+                self.cancel_session(sid, verify=False, cwd=getattr(self, "_current_cwd", None))
+            except Exception as e:
+                logger.debug("Failed to cancel active session %s: %s", sid, e)
         super().cancel()
 
     def _query_daemon_api(
@@ -1349,6 +1404,7 @@ class OpenCodeAdapter(BaseAdapter):
         response: Optional[AdapterResponse] = None,
         session_id: Optional[str] = None,
         cwd: Optional[Path] = None,
+        timeout: Optional[float] = None,
     ) -> Optional[Tuple[AgentEvent, AdapterResponse]]:
         """Poll the local OpenCode daemon and recover output if the daemon succeeded."""
         self._cancel_requested = False
@@ -1378,23 +1434,31 @@ class OpenCodeAdapter(BaseAdapter):
             self._record_recovery_failure(terminal_event, response, reason)
             return None
 
+        if getattr(self, "_explicit_recovery_timeout", False):
+            effective_timeout = self.recovery_timeout
+        elif timeout is not None:
+            effective_timeout = max(self.recovery_timeout, float(timeout))
+        else:
+            effective_timeout = self.recovery_timeout
+
         start_recovery_time = time.time()
-        poll_deadline = start_recovery_time + self.recovery_timeout
+        poll_deadline = start_recovery_time + effective_timeout
         poll_interval = max(0.5, self.recovery_poll_interval)
 
         logger.info(
             "Polling OpenCode daemon for session %s (timeout: %.1fs, interval: %.1fs)...",
             sid,
-            self.recovery_timeout,
+            effective_timeout,
             poll_interval,
         )
 
+        last_observed_outcome: Optional[str] = None
         try:
             while time.time() < poll_deadline:
                 if getattr(self, "_cancel_requested", False):
                     reason = "Session recovery cancelled by user or stage shutdown."
                     logger.info(reason)
-                    self._record_recovery_failure(terminal_event, response, reason)
+                    self._record_recovery_failure(terminal_event, response, reason, session_active=False, session_stopped=True)
                     return None
 
                 session_resp = self._query_daemon_api(f"/api/session/{sid}", cwd=cwd)
@@ -1406,6 +1470,7 @@ class OpenCodeAdapter(BaseAdapter):
                         else session_resp
                     )
                     outcome = data.get("outcome")
+                    last_observed_outcome = outcome
 
                     if outcome == "succeeded":
                         logger.info(
@@ -1424,7 +1489,7 @@ class OpenCodeAdapter(BaseAdapter):
                     elif outcome in ("failed", "interrupted"):
                         reason = f"OpenCode daemon reported session outcome as '{outcome}'."
                         logger.warning("Session recovery failed for %s: %s", sid, reason)
-                        self._record_recovery_failure(terminal_event, response, reason)
+                        self._record_recovery_failure(terminal_event, response, reason, session_active=False, session_stopped=True)
                         return None
 
                     else:
@@ -1444,24 +1509,46 @@ class OpenCodeAdapter(BaseAdapter):
                 while time.time() < sleep_end:
                     if getattr(self, "_cancel_requested", False):
                         reason = "Session recovery cancelled by user or stage shutdown."
-                        self._record_recovery_failure(terminal_event, response, reason)
+                        self._record_recovery_failure(terminal_event, response, reason, session_active=False, session_stopped=True)
                         return None
                     time.sleep(min(0.2, max(0.01, sleep_end - time.time())))
 
-            reason = f"OpenCode daemon session did not complete within recovery timeout ({self.recovery_timeout}s)."
-            logger.warning("Session recovery timed out for %s: %s", sid, reason)
-            self._record_recovery_failure(terminal_event, response, reason)
+            cancel_timeout = min(2.0, max(0.1, effective_timeout))
+            if last_observed_outcome is None:
+                reason = f"OpenCode daemon session did not complete within recovery timeout ({effective_timeout:.1f}s) and was still running."
+                logger.warning("Session recovery timed out for %s: %s", sid, reason)
+                stopped = self.cancel_session(sid, verify=True, timeout=cancel_timeout, cwd=cwd)
+                self._record_recovery_failure(
+                    terminal_event,
+                    response,
+                    reason,
+                    session_active=not stopped,
+                    session_stopped=stopped,
+                )
+            else:
+                reason = f"OpenCode daemon session did not complete within recovery timeout ({effective_timeout:.1f}s)."
+                logger.warning("Session recovery timed out for %s: %s", sid, reason)
+                stopped = self.cancel_session(sid, verify=True, timeout=cancel_timeout, cwd=cwd)
+                self._record_recovery_failure(
+                    terminal_event,
+                    response,
+                    reason,
+                    session_active=not stopped,
+                    session_stopped=stopped,
+                )
             return None
 
         except KeyboardInterrupt:
             reason = "Session recovery interrupted by user (SIGINT)."
             logger.warning(reason)
-            self._record_recovery_failure(terminal_event, response, reason)
+            self.cancel_session(sid, verify=True, timeout=5.0, cwd=cwd)
+            self._record_recovery_failure(terminal_event, response, reason, session_active=False, session_stopped=True)
             return None
         except Exception as exc:
             reason = f"Unexpected error during session recovery: {exc}"
             logger.warning(reason)
-            self._record_recovery_failure(terminal_event, response, reason)
+            self.cancel_session(sid, verify=True, timeout=5.0, cwd=cwd)
+            self._record_recovery_failure(terminal_event, response, reason, session_active=False, session_stopped=True)
             return None
 
     def _retrieve_and_build_recovered_result(
@@ -1598,6 +1685,8 @@ class OpenCodeAdapter(BaseAdapter):
         terminal_event: Optional[AgentEvent],
         response: Optional[AdapterResponse],
         reason: str,
+        session_active: bool = False,
+        session_stopped: bool = True,
     ) -> None:
         """Annotate terminal event and response with diagnostic metadata when recovery fails."""
         diag_msg = f"[Session Recovery Attempted: Failed - {reason}]"
@@ -1607,12 +1696,21 @@ class OpenCodeAdapter(BaseAdapter):
             terminal_event.result.metadata["recovery_attempted"] = True
             terminal_event.result.metadata["recovery_failed"] = True
             terminal_event.result.metadata["recovery_failure_reason"] = reason
+            terminal_event.result.metadata["session_active"] = session_active
+            terminal_event.result.metadata["session_stopped"] = session_stopped
             if terminal_event.result.stderr:
                 terminal_event.result.stderr = f"{terminal_event.result.stderr}\n{diag_msg}"
             else:
                 terminal_event.result.stderr = diag_msg
 
         if response:
+            if not hasattr(response, "metadata") or not isinstance(response.metadata, dict):
+                response.metadata = {}
+            response.metadata["recovery_attempted"] = True
+            response.metadata["recovery_failed"] = True
+            response.metadata["recovery_failure_reason"] = reason
+            response.metadata["session_active"] = session_active
+            response.metadata["session_stopped"] = session_stopped
             if response.stderr:
                 response.stderr = f"{response.stderr}\n{diag_msg}"
             else:

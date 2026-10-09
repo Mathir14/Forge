@@ -19,7 +19,7 @@ from forge.adapters.antigravity import AntigravityAdapter
 from forge.adapters.registry import AdapterRegistry
 from forge.core.capabilities import Capability, CapabilityValidationError
 from forge.storage.run_manager import RunManager
-from forge.storage.run_lock import RunLock, RunOwnershipError
+from forge.storage.run_lock import RunLock, RunOwnershipError, WorkingTreeConflictError, WorkingTreeLease
 from forge.stages.stage import Stage
 from forge.stages.definition import StageDefinition, StageOrder
 
@@ -290,38 +290,68 @@ def execute_stage(
         except Exception:
             pass
 
-    prefix_str = f"{banner_prefix} " if banner_prefix else ""
-    click.echo(f"\n{prefix_str}▶ Executing Stage: {stage_def.artifact_prefix.upper()} ({adapter.name})...")
-    result = stage.run(context)
-
-    if (abort_ev is not None and abort_ev.is_set()) or (result.response and result.response.exit_code == 130):
+    # Acquire working tree writer lease
+    from forge.storage.run_lock import WorkingTreeLease, WorkingTreeConflictError
+    run_id = context.run.run_id if hasattr(context, "run") and context.run else "unknown"
+    lease = WorkingTreeLease(
+        project_root=context.project_root,
+        run_id=run_id,
+        stage_name=stage_def.name,
+        adapter_name=getattr(adapter, "name", "unknown"),
+    )
+    try:
+        lease.acquire(adapter_instance=adapter)
+    except WorkingTreeConflictError as conflict:
+        click.echo(conflict.format_diagnostic(), err=True)
         raise AutonomousHalt(
-            status="CANCELLED",
-            exit_code=130,
-            reason="Autonomous pipeline cancelled by user.",
+            status="FAILED",
+            exit_code=1,
+            reason=f"Working tree conflict: {conflict}",
             stage_name=stage_def.display_name,
-            stage_result=result,
         )
 
-    if getattr(context, "event_listener", None) is not None:
-        try:
-            from forge.core.events import AgentEvent, AgentEventType
-            context.event_listener(AgentEvent(
-                event_type=AgentEventType.HEARTBEAT,
-                timestamp=time.time(),
-                data={
-                    "lifecycle": "stage_finish",
-                    "stage_name": stage_def.artifact_prefix,
-                    "role_name": stage_def.name,
-                    "sequence_number": stage_def.sequence_number,
-                    "status": result.status,
-                    "duration_seconds": result.duration_seconds,
-                },
-            ))
-        except Exception:
-            pass
+    try:
+        prefix_str = f"{banner_prefix} " if banner_prefix else ""
+        click.echo(f"\n{prefix_str}▶ Executing Stage: {stage_def.artifact_prefix.upper()} ({adapter.name})...")
+        result = stage.run(context)
 
-    return result
+        # Update lease with session id if captured
+        sid = getattr(adapter, "_session_id", None) or (
+            result.response.metadata.get("session_id") if result.response else None
+        )
+        if sid:
+            lease.update_session_id(sid)
+
+        if (abort_ev is not None and abort_ev.is_set()) or (result.response and result.response.exit_code == 130):
+            raise AutonomousHalt(
+                status="CANCELLED",
+                exit_code=130,
+                reason="Autonomous pipeline cancelled by user.",
+                stage_name=stage_def.display_name,
+                stage_result=result,
+            )
+
+        if getattr(context, "event_listener", None) is not None:
+            try:
+                from forge.core.events import AgentEvent, AgentEventType
+                context.event_listener(AgentEvent(
+                    event_type=AgentEventType.HEARTBEAT,
+                    timestamp=time.time(),
+                    data={
+                        "lifecycle": "stage_finish",
+                        "stage_name": stage_def.artifact_prefix,
+                        "role_name": stage_def.name,
+                        "sequence_number": stage_def.sequence_number,
+                        "status": result.status,
+                        "duration_seconds": result.duration_seconds,
+                    },
+                ))
+            except Exception:
+                pass
+
+        return result
+    finally:
+        lease.release(adapter_instance=adapter)
 
 
 def _record_stage_transition(
@@ -471,7 +501,28 @@ def _run_stage(
             click.echo(f"\n{stage_def.emoji} [Run: {run.run_id}] Invoking {stage_def.display_name} ({adapter.name}) {stage_def.preposition}")
             click.secho(f"   \"{shown_text}\"\n", bold=True)
 
-            result = stage.run(context)
+            from forge.storage.run_lock import WorkingTreeLease, WorkingTreeConflictError
+            lease = WorkingTreeLease(
+                project_root=root,
+                run_id=run.run_id,
+                stage_name=stage_name,
+                adapter_name=getattr(adapter, "name", "unknown"),
+            )
+            try:
+                lease.acquire(adapter_instance=adapter)
+            except WorkingTreeConflictError as err:
+                click.echo(err.format_diagnostic(), err=True)
+                sys.exit(1)
+
+            try:
+                result = stage.run(context)
+                sid = getattr(adapter, "_session_id", None) or (
+                    result.response.metadata.get("session_id") if result.response else None
+                )
+                if sid:
+                    lease.update_session_id(sid)
+            finally:
+                lease.release(adapter_instance=adapter)
             _print_stage_summary(result, run.run_id, stage_name, role.sequence_number)
             d_name = "Critic" if stage_name.lower() == "critic" else stage_name.capitalize()
             _record_stage_transition(
@@ -876,6 +927,48 @@ def dashboard_cmd(run_id: Optional[str], render_once: bool):
     sys.exit(app.run())
 
 
+@main.command(name="recover")
+@click.option("--run", "run_id", type=str, required=True, help="Run ID to recover (e.g. run-012).")
+@click.option("--stage", "stage_name", type=str, required=True, help="Stage name to recover (e.g. executor).")
+@click.option("--session", "session_id", type=str, required=True, help="Daemon session ID to recover from.")
+def recover_cmd(run_id: str, stage_name: str, session_id: str):
+    """Recover and reconstruct a completed stage result from an external daemon session."""
+    root = Path.cwd()
+    run_mgr = RunManager(root)
+    run = run_mgr.resume(run_id)
+    if not run:
+        raise click.ClickException(f"Run '{run_id}' not found.")
+
+    stage_def = StageOrder.resolve_definition(stage_name.lower())
+    if not stage_def:
+        raise click.ClickException(f"Unknown stage name '{stage_name}'.")
+
+    click.echo(f"Attempting recovery of stage '{stage_name}' from session '{session_id}' in run '{run_id}'...")
+    res = run_mgr.recover_stage_from_session(
+        run=run,
+        stage_name=stage_def.name,
+        session_id=session_id,
+        sequence_number=stage_def.sequence_number,
+    )
+    if res and res.success:
+        click.secho(f"✅ Successfully recovered {stage_def.display_name}! Status: {res.status}", fg="green", bold=True)
+        _record_stage_transition(
+            run,
+            stage_def.display_name,
+            res.status,
+            "COMPLETED",
+            duration=res.duration_seconds,
+            role_name=stage_def.name,
+            seq=stage_def.sequence_number,
+        )
+        run.save_metadata()
+    else:
+        status_str = res.status if res else "FAILED"
+        err_str = res.machine_report.validation_errors if res and res.machine_report else "Could not recover session"
+        click.secho(f"❌ Recovery failed: status '{status_str}', errors: {err_str}", fg="red")
+        raise click.ClickException(f"Failed to recover stage '{stage_name}'.")
+
+
 @main.command(name="critic")
 @click.argument("target", type=str, required=False, default=None)
 @click.option("--post-run", is_flag=True, default=False, help="Run closing Critic audit on an existing run.")
@@ -1152,7 +1245,7 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
         else:
             click.secho(f"\n⚠️ Pipeline halted: {reason}", fg="red")
         sys.exit(halt.exit_code)
-    except RunOwnershipError as e:
+    except (RunOwnershipError, WorkingTreeConflictError) as e:
         click.echo(e.format_diagnostic(), err=True)
         sys.exit(1)
 
@@ -1201,6 +1294,21 @@ def auto_commit_run(
             return False
         if run.metadata.get("auto_committed", False):
             click.secho("  ⚠️ Auto-commit skipped: run was already committed.", fg="yellow")
+            return False
+
+    root_dir = getattr(git, "repo_path", None) or getattr(git, "root_dir", None)
+    if root_dir is None and hasattr(git, "toplevel"):
+        try:
+            root_dir = git.toplevel()
+        except Exception:
+            pass
+    if root_dir is not None:
+        if not WorkingTreeLease.check_no_active_writers(root_dir):
+            click.secho(
+                "  ⚠️ Auto-commit aborted: active writer lease or running background session detected in working tree.",
+                fg="yellow",
+                bold=True,
+            )
             return False
 
     resolved_baseline = baseline
@@ -1470,6 +1578,27 @@ def auto_pipeline(
                                     stage_name=producer_def.display_name,
                                     stage_result=producer_res,
                                 )
+                            # Fail-closed retry arbitration:
+                            # A retry must not start another Executor while a prior session can still modify the same working tree!
+                            prod_meta = getattr(producer_res.response, "metadata", {}) if producer_res.response else {}
+                            if prod_meta.get("session_active") is True or prod_meta.get("session_stopped") is False:
+                                halt_reason = (
+                                    f"Cannot retry {producer_def.display_name}: prior session '{prod_meta.get('session_id')}' "
+                                    f"could not be verified stopped. Aborting retry to prevent concurrent modification of working tree."
+                                )
+                                click.secho(f"\n🛑 {halt_reason}", fg="red", bold=True)
+                                run.status = "FAILED"
+                                _record_stage_transition(run, producer_def.display_name, run.status, "COMPLETED", duration=producer_res.duration_seconds, role_name=producer_def.name, seq=producer_def.sequence_number, reason=halt_reason, context=context)
+                                _record_final_halt(run, run.status, halt_reason)
+                                run.save_metadata()
+                                raise AutonomousHalt(
+                                    status="FAILED",
+                                    exit_code=1,
+                                    reason=halt_reason,
+                                    stage_name=producer_def.display_name,
+                                    stage_result=producer_res,
+                                )
+
                             if iteration < max_retries_val:
                                 click.secho(f"\n🔄 {producer_def.display_name} failed with status '{producer_res.status}'. Retrying execution (iteration {iteration + 1})...", fg="yellow")
                                 context.repair_feedback = (

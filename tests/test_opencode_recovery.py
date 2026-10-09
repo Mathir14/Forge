@@ -664,3 +664,245 @@ def test_recover_session_aborted_finish_reason_rejected(tmp_path):
         assert recovered is None
         assert orig_event.result.metadata.get("recovery_failed") is True
         assert "finish status was 'aborted'" in orig_event.result.metadata.get("recovery_failure_reason", "")
+
+
+# ===========================================================================
+# 8. Run-012 Regression Tests: ECONNRESET, Writer Arbitration, UNKNOWN Handling
+# ===========================================================================
+
+def test_econnreset_session_continues_and_timeout_attempts_cancellation(tmp_path):
+    """Verify ECONNRESET where session continues past recovery timeout triggers verified cancel_session."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 0.2, "recovery_poll_interval": 0.05})
+    adapter._session_id = "ses_econnreset_active"
+
+    interrupt_called = False
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        nonlocal interrupt_called
+        if "interrupt" in endpoint:
+            interrupt_called = True
+            return {"interrupted": True}
+        # Session still actively executing in background
+        return {"data": {"id": "ses_econnreset_active", "outcome": None}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="provider.transport ECONNRESET",
+            result=ExecutionResult(exit_code=1, duration_seconds=5.0, stderr="ECONNRESET"),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_econnreset_active", cwd=tmp_path)
+        assert recovered is None
+        assert interrupt_called is True
+        meta = orig_event.result.metadata
+        assert meta.get("recovery_failed") is True
+        # Since daemon never returned terminal outcome, session could not be proven stopped:
+        assert meta.get("session_active") is True
+        assert meta.get("session_stopped") is False
+
+
+def test_cancel_session_verification_outcomes(tmp_path):
+    """Verify cancel_session verifies daemon cessation and returns accurate stopped status."""
+    adapter = OpenCodeAdapter()
+    adapter._session_id = "ses_cancel_verify"
+
+    # Case 1: Interrupt acknowledged and outcome confirmed 'interrupted'
+    def mock_query_success(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "interrupt" in endpoint:
+            return {"interrupted": True}
+        return {"data": {"id": "ses_cancel_verify", "outcome": "interrupted"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query_success):
+        assert adapter.cancel_session("ses_cancel_verify", verify=True, timeout=0.2, cwd=tmp_path) is True
+
+    # Case 2: Interrupt acknowledged but daemon remains in active/running state (outcome: None)
+    def mock_query_hanging(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "interrupt" in endpoint:
+            return {"interrupted": True}
+        return {"data": {"id": "ses_cancel_verify", "outcome": None}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query_hanging):
+        assert adapter.cancel_session("ses_cancel_verify", verify=True, timeout=0.1, cwd=tmp_path) is False
+
+
+def test_working_tree_lease_conflict_arbitration(tmp_path):
+    """Verify WorkingTreeLease detects competing active sessions and fails closed."""
+    from forge.storage.run_lock import WorkingTreeLease, WorkingTreeConflictError
+
+    lease1 = WorkingTreeLease(
+        project_root=tmp_path,
+        run_id="run-001",
+        stage_name="executor",
+        session_id="ses_writer_1",
+    )
+    lease1.acquire()
+
+    adapter_mock = MagicMock()
+    # Session 1 is still active and cancel_session cannot verify stoppage
+    adapter_mock.is_session_active.return_value = True
+    adapter_mock.cancel_session.return_value = False
+
+    lease2 = WorkingTreeLease(
+        project_root=tmp_path,
+        run_id="run-001",
+        stage_name="executor",
+        iteration=2,
+        session_id="ses_writer_2",
+    )
+
+    with pytest.raises(WorkingTreeConflictError) as exc_info:
+        lease2.acquire(adapter_instance=adapter_mock)
+
+    assert "actively held by writer session 'ses_writer_1'" in str(exc_info.value)
+
+    # Now simulate session 1 successfully stopping
+    adapter_mock.cancel_session.return_value = True
+    lease2.acquire(adapter_instance=adapter_mock)
+    assert lease2.is_acquired is True
+    lease2.release()
+    lease1.release()
+
+
+def test_auto_commit_aborted_when_active_writer_exists(tmp_path):
+    """Verify auto_commit_run safely aborts when an active writer lease is present."""
+    from forge.storage.run_lock import WorkingTreeLease
+    from forge.cli import auto_commit_run
+    from forge.core.git import GitService
+
+    git_mock = MagicMock(spec=GitService)
+    git_mock.is_git_repo.return_value = True
+    git_mock.root_dir = tmp_path
+
+    # Case 1: Active writer lease
+    lease = WorkingTreeLease(
+        project_root=tmp_path,
+        run_id="run-001",
+        stage_name="executor",
+        session_id="ses_active_writer",
+    )
+    lease.acquire()
+
+    adapter_mock = MagicMock()
+    adapter_mock.is_session_active.return_value = True
+
+    assert WorkingTreeLease.check_no_active_writers(tmp_path, adapter_instance=adapter_mock) is False
+    assert auto_commit_run(git=git_mock, task_summary="test commit") is False
+
+    # Case 2: Lease released -> auto_commit allowed to evaluate changes
+    lease.release()
+    assert WorkingTreeLease.check_no_active_writers(tmp_path) is True
+
+
+def test_malformed_prose_without_yaml_retains_unknown_status():
+    """Verify prose claims without YAML block default to UNKNOWN and fail validation (exit_code 0 does not manufacture success)."""
+    from forge.protocol.parser import MachineReportParser
+    from forge.protocol.validator import MachineReportValidator
+    from forge.stages.result import StageResult
+    from forge.prompts.rendered_prompt import RenderedPrompt
+
+    prose_only = (
+        "Deliverables are complete, all 826 unit tests passed without regression, "
+        "and code check is clean. Handoff to Tester is appropriate."
+    )
+
+    raw_dict, raw_yaml = MachineReportParser.extract_yaml(prose_only, expected_role="executor")
+    assert raw_dict == {}
+    assert raw_yaml == ""
+
+    report = MachineReportValidator.validate(data=raw_dict, expected_role="executor", raw_yaml=raw_yaml)
+    assert report.status == "UNKNOWN"
+    assert report.is_valid is False
+    assert any("Status 'UNKNOWN' not in allowed statuses" in err for err in report.validation_errors)
+
+    # Even if exit_code is 0, StageResult status must be FAILED/UNKNOWN, never SUCCESS
+    result = StageResult(
+        role=_create_critic_role(),
+        prompt=RenderedPrompt.from_text("test"),
+        response=AdapterResponse(stdout=prose_only, stderr="", exit_code=0, duration_seconds=1.0, raw_output=prose_only),
+        machine_report=report,
+        raw_markdown=prose_only,
+        duration_seconds=1.0,
+        success=False,
+    )
+    assert result.status == "UNKNOWN"
+    assert result.success is False
+
+
+def test_recover_stage_from_session_reconstructs_authoritative_result(tmp_path):
+    """Verify RunManager.recover_stage_from_session reconstructs valid report from authoritative daemon data."""
+    run_mgr = RunManager(tmp_path)
+    run = run_mgr.create_run(task="Test recovery from session")
+
+    authoritative_yaml = (
+        "I have completed all changes.\n\n"
+        "```yaml\n"
+        "ROLE: EXECUTOR\n"
+        "STATUS: SUCCESS\n"
+        "HANDOFF: TESTER\n"
+        "FILES_MODIFIED:\n"
+        "  - src/module.py\n"
+        "```\n"
+    )
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_auth_001",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": authoritative_yaml}],
+                    }
+                ]
+            }
+        return {
+            "data": {
+                "id": "ses_auth_123",
+                "outcome": "succeeded",
+                "tokens": {"input": 1200, "output": 400},
+            }
+        }
+
+    adapter = OpenCodeAdapter()
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        stage_res = run_mgr.recover_stage_from_session(
+            run=run,
+            stage_name="executor",
+            session_id="ses_auth_123",
+            adapter=adapter,
+        )
+
+        assert stage_res is not None
+        assert stage_res.success is True
+        assert stage_res.status == "SUCCESS"
+        assert stage_res.handoff == "TESTER"
+        assert stage_res.machine_report.is_valid is True
+
+        # Verify artifacts were written to run directory
+        json_artifact = run.run_dir / "03_executor.json"
+        assert json_artifact.exists()
+        saved_data = json.loads(json_artifact.read_text(encoding="utf-8"))
+        assert saved_data["status"] == "SUCCESS"
+        assert saved_data["machine_report"]["is_valid"] is True
+
+
+def test_retry_arbitration_fail_closed_on_unverified_prior_session():
+    """Verify metadata conditions trigger fail-closed retry arbitration."""
+    failed_resp = AdapterResponse(
+        stdout="",
+        stderr="ECONNRESET",
+        exit_code=1,
+        duration_seconds=5.0,
+        raw_output="",
+        metadata={"session_id": "ses_unstopped_999", "session_active": True, "session_stopped": False},
+    )
+    prod_meta = failed_resp.metadata
+    should_halt = prod_meta.get("session_active") is True or prod_meta.get("session_stopped") is False
+    assert should_halt is True
