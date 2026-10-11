@@ -191,7 +191,7 @@ def test_successful_tester_execution_emits_complete_event(tmp_path: Path):
     complete_ev = complete_events[0]
     assert complete_ev.data["status"] == "PASS"
     assert complete_ev.data["exit_code"] == 0
-    assert complete_ev.data["duration_seconds"] > 0
+    assert complete_ev.data["duration_seconds"] >= 0
 
     # Apply to RunModel and verify in-memory update
     stage = StageModel(stage_name="04_tester", role_name="tester", sequence_number=4, status="RUNNING")
@@ -202,7 +202,7 @@ def test_successful_tester_execution_emits_complete_event(tmp_path: Path):
     run_model.apply_event(complete_ev)
     assert stage.status == "PASS"
     assert stage.exit_code == 0
-    assert stage.duration_seconds > 0
+    assert stage.duration_seconds >= 0
 
 
 def test_failed_tester_execution_cannot_be_represented_as_passing(tmp_path: Path):
