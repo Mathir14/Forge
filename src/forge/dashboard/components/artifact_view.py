@@ -1,6 +1,6 @@
 """Artifact View component rendering Human and Machine Reports."""
 
-from typing import List
+from typing import List, Optional
 from rich.console import RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -9,6 +9,7 @@ from rich.table import Table
 from rich.text import Text
 from forge.dashboard.state import DashboardState
 from forge.dashboard.components.navigation import render_tab_navigation
+from forge.dashboard.components.viewport import VirtualViewport
 
 
 def render_artifact_view(state: DashboardState, max_lines: int = 40) -> Panel:
@@ -28,9 +29,9 @@ def render_artifact_view(state: DashboardState, max_lines: int = 40) -> Panel:
     border_color = "cyan" if is_focused else "dim"
 
     if state.active_content_tab == "human":
-        body = _render_human_report(stage, state.scroll_offset, max_lines)
+        body = _render_human_report(stage, state.scroll_offset, max_lines, state=state)
     else:
-        body = _render_machine_report(stage, state.scroll_offset, max_lines)
+        body = _render_machine_report(stage, state.scroll_offset, max_lines, state=state)
 
     return Panel(
         body,
@@ -42,32 +43,29 @@ def render_artifact_view(state: DashboardState, max_lines: int = 40) -> Panel:
 
 
 
-def _render_human_report(stage, scroll_offset: int, max_lines: int) -> RenderableType:
+def _render_human_report(stage, scroll_offset: int = 0, max_lines: int = 40, state: Optional[DashboardState] = None) -> RenderableType:
     content = stage.human_report or stage.raw_content
     if not content or not content.strip():
         if stage.status == "PENDING":
             return Text("\nStage has not executed yet. Waiting for upstream handoff...\n", style="dim italic")
         return Text("\nNo markdown artifact found for this stage.\n", style="yellow italic")
 
-    lines = content.splitlines()
-    total_lines = len(lines)
-    start = min(scroll_offset, max(0, total_lines - 1))
-    end = min(total_lines, start + max_lines)
-
-    visible_text = "\n".join(lines[start:end])
-
-    # If scrolled, show position indicator
-    header_info = ""
-    if total_lines > max_lines:
-        header_info = f"[dim](Lines {start + 1}–{end} of {total_lines})[/dim]\n\n"
-
     try:
-        return Markdown(header_info + visible_text)
+        renderable = Markdown(content)
     except Exception:
-        return Text(header_info + visible_text)
+        renderable = Text(content)
+
+    return VirtualViewport(
+        renderable,
+        scroll_offset=scroll_offset,
+        max_lines=max_lines,
+        state=state,
+        cache_key=f"artifact_human_{stage.stage_name}_{id(content)}",
+        indicator_label="Lines",
+    )
 
 
-def _render_machine_report(stage, scroll_offset: int, max_lines: int) -> RenderableType:
+def _render_machine_report(stage, scroll_offset: int = 0, max_lines: int = 40, state: Optional[DashboardState] = None) -> RenderableType:
     mr = stage.machine_report
     if not mr:
         return Text(
@@ -116,9 +114,13 @@ def _render_machine_report(stage, scroll_offset: int, max_lines: int) -> Rendera
 
     if mr.raw_yaml:
         outer_table.add_row(Text("\nRaw Machine Protocol Block:", style="bold dim"))
-        yaml_lines = mr.raw_yaml.splitlines()
-        yaml_slice = "\n".join(yaml_lines[scroll_offset : scroll_offset + max_lines])
-        syntax = Syntax(yaml_slice, "yaml", theme="monokai", line_numbers=True, start_line=scroll_offset + 1)
+        syntax = Syntax(mr.raw_yaml, "yaml", theme="monokai", line_numbers=True)
         outer_table.add_row(syntax)
 
-    return outer_table
+    return VirtualViewport(
+        outer_table,
+        scroll_offset=scroll_offset,
+        max_lines=max_lines,
+        state=state,
+        indicator_label="Lines",
+    )

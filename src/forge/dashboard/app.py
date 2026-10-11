@@ -1,5 +1,6 @@
 """DashboardApp: Main terminal application orchestrating state and layout rendering."""
 
+import collections
 import json
 import os
 import queue
@@ -26,7 +27,7 @@ from forge.dashboard.components.compare_view import render_compare_view
 from forge.dashboard.components.footer import render_footer
 from forge.dashboard.components.terminal_banner import render_terminal_banner
 from forge.dashboard.components.navigation import render_tab_navigation
-from forge.core.platform import is_tty, get_terminal_session
+from forge.core.platform import is_tty, get_terminal_session, parse_key_buffer
 from forge.stages.definition import StageOrder
 
 
@@ -66,6 +67,10 @@ class DashboardApp:
         self.state = DashboardState(run=self.run_model, active_tab=initial_tab, project_root=self.project_root)
         self.captured_stdout_content: str = ""
         self.captured_stderr_content: str = ""
+        self._key_queue: collections.deque[str] = collections.deque()
+
+    def has_queued_keys(self) -> bool:
+        return len(self._key_queue) > 0
 
     def _apply_terminal_state(self) -> None:
         """Inspect halt_holder and run_model/disk state to establish final terminal banner info."""
@@ -83,6 +88,21 @@ class DashboardApp:
                 disk_model = RunModel.from_dir(self.run_dir)
                 if disk_model.summary:
                     self.run_model.summary = disk_model.summary
+                for s in disk_model.stages:
+                    local_s = self.run_model.get_stage(s.stage_name)
+                    if local_s:
+                        if s.status and s.status not in ("PENDING", "UNKNOWN"):
+                            local_s.status = s.status
+                        if s.machine_report and s.machine_report.status != "UNKNOWN":
+                            local_s.machine_report = s.machine_report
+                        if s.raw_content:
+                            local_s.raw_content = s.raw_content
+                        if s.human_report:
+                            local_s.human_report = s.human_report
+                        if s.duration_seconds > 0:
+                            local_s.duration_seconds = s.duration_seconds
+                        if s.attempts:
+                            local_s.attempts = s.attempts
             except Exception:
                 pass
             if self.run_model.summary is not None:
@@ -110,6 +130,8 @@ class DashboardApp:
                         local_s.human_report = s.human_report
                     if s.duration_seconds > 0:
                         local_s.duration_seconds = s.duration_seconds
+                    if s.attempts:
+                        local_s.attempts = s.attempts
         except Exception:
             pass
 
@@ -378,16 +400,86 @@ class DashboardApp:
             if self.state.focused_pane == "timeline":
                 self.state.select_prev_stage()
             else:
-                self.state.scroll_up(1)
+                self._handle_content_scroll_up(1)
         elif key in ("down", "j"):
             if self.state.focused_pane == "timeline":
                 self.state.select_next_stage()
             else:
-                self.state.scroll_down(1)
+                self._handle_content_scroll_down(1)
         elif key in ("page_up", "pgup"):
-            self.state.page_up(15)
+            if self.state.focused_pane == "timeline":
+                for _ in range(5):
+                    self.state.select_prev_stage()
+            else:
+                self._handle_content_scroll_up(15)
         elif key in ("page_down", "pgdn"):
-            self.state.page_down(15)
+            if self.state.focused_pane == "timeline":
+                for _ in range(5):
+                    self.state.select_next_stage()
+            else:
+                self._handle_content_scroll_down(15)
+        elif clean_key == "home":
+            if self.state.focused_pane == "timeline":
+                self.state.selected_stage_index = 0
+                self.state.scroll_offset = 0
+            else:
+                if self.state.active_tab == 1:
+                    self.state.scroll_offset = self.state.max_scroll_offset
+                else:
+                    self.state.scroll_offset = 0
+        elif clean_key == "end":
+            if self.state.focused_pane == "timeline":
+                self.state.selected_stage_index = max(0, len(self.state.run.stages) - 1)
+                self.state.scroll_offset = 0
+            else:
+                if self.state.active_tab == 1:
+                    self.state.scroll_offset = 0
+                else:
+                    self.state.scroll_offset = self.state.max_scroll_offset
+        elif clean_key.startswith("wheel_up"):
+            parts = clean_key.split(":")
+            if len(parts) >= 3 and parts[1].isdigit():
+                x = int(parts[1])
+                term_width = self.console.size.width or 80
+                sidebar_width = max(28, term_width // 4)
+                if x <= sidebar_width:
+                    self.state.select_prev_stage()
+                    return
+            self._handle_content_scroll_up(3)
+        elif clean_key.startswith("wheel_down"):
+            parts = clean_key.split(":")
+            if len(parts) >= 3 and parts[1].isdigit():
+                x = int(parts[1])
+                term_width = self.console.size.width or 80
+                sidebar_width = max(28, term_width // 4)
+                if x <= sidebar_width:
+                    self.state.select_next_stage()
+                    return
+            self._handle_content_scroll_down(3)
+        elif clean_key.startswith("click:"):
+            parts = clean_key.split(":")
+            if len(parts) >= 3 and parts[1].isdigit():
+                x = int(parts[1])
+                term_width = self.console.size.width or 80
+                sidebar_width = max(28, term_width // 4)
+                if x <= sidebar_width:
+                    self.state.focused_pane = "timeline"
+                else:
+                    self.state.focused_pane = "content"
+
+    def _handle_content_scroll_up(self, lines: int = 1) -> None:
+        """Scroll content pane upward (towards start of document or older logs)."""
+        if self.state.active_tab == 1:
+            self.state.scroll_down(lines)
+        else:
+            self.state.scroll_up(lines)
+
+    def _handle_content_scroll_down(self, lines: int = 1) -> None:
+        """Scroll content pane downward (towards end of document or newer logs / tail)."""
+        if self.state.active_tab == 1:
+            self.state.scroll_up(lines)
+        else:
+            self.state.scroll_down(lines)
 
     def _cycle_pkb_filter(self, forward: bool = True) -> None:
         """Cycle through fact types for PKB view."""
@@ -450,9 +542,9 @@ class DashboardApp:
                         self._apply_terminal_state()
                         terminal_state_applied = True
 
-                # Enter alternate buffer and hide cursor
+                # Enter alternate buffer, hide cursor, and enable mouse tracking
                 try:
-                    target_out.write("\x1b[?1049h\x1b[H\x1b[?25l")
+                    target_out.write("\x1b[?1049h\x1b[H\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h")
                     target_out.flush()
                 except Exception:
                     pass
@@ -500,6 +592,13 @@ class DashboardApp:
                         key = term_session.poll_key(timeout=0.05)
                         if key:
                             self.handle_key(key)
+                            while not self.state.should_exit:
+                                if hasattr(term_session, "has_queued_keys") and not term_session.has_queued_keys():
+                                    break
+                                next_key = term_session.poll_key(timeout=0.0)
+                                if not next_key:
+                                    break
+                                self.handle_key(next_key)
                             live.update(self.create_layout(), refresh=True)
 
         except KeyboardInterrupt:
@@ -508,8 +607,8 @@ class DashboardApp:
             raise
         finally:
             try:
-                # Restore cursor and original screen buffer
-                target_out.write("\x1b[?25h\x1b[?1049l")
+                # Disable mouse tracking, restore cursor, and return to original screen buffer
+                target_out.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l")
                 target_out.flush()
             except Exception:
                 pass
@@ -533,35 +632,29 @@ class DashboardApp:
         return 0
 
 
-    @staticmethod
-    def _read_key(fd: int) -> str:
+    def _read_key(self_or_fd: Any, fd: Optional[int] = None) -> str:
         """Read a character or ANSI escape sequence from file descriptor."""
+        self_inst = None
+        if fd is None:
+            actual_fd = int(self_or_fd)
+        else:
+            self_inst = self_or_fd
+            actual_fd = fd
+
+        if self_inst is not None and hasattr(self_inst, "_key_queue") and self_inst._key_queue:
+            return self_inst._key_queue.popleft()
+
         try:
-            ch = os.read(fd, 1).decode("utf-8", errors="ignore")
+            raw = os.read(actual_fd, 1024).decode("utf-8", errors="ignore")
+            if raw.endswith(("\x1b", "\x1b[", "\x1bO", "\x1b[<")):
+                r, _, _ = select.select([actual_fd], [], [], 0.05)
+                if r:
+                    raw += os.read(actual_fd, 1024).decode("utf-8", errors="ignore")
+            tokens = parse_key_buffer(raw)
+            if tokens:
+                if self_inst is not None and hasattr(self_inst, "_key_queue") and len(tokens) > 1:
+                    self_inst._key_queue.extend(tokens[1:])
+                return tokens[0]
+            return ""
         except Exception:
             return ""
-
-        if ch == "\x1b":
-            r, _, _ = select.select([fd], [], [], 0.05)
-            if r:
-                seq = os.read(fd, 8).decode("utf-8", errors="ignore")
-                full = ch + seq
-                if full == "\x1b[A":
-                    return "up"
-                elif full == "\x1b[B":
-                    return "down"
-                elif full == "\x1b[C":
-                    return "right"
-                elif full == "\x1b[D":
-                    return "left"
-                elif full in ("\x1b[5~", "\x1b[V"):
-                    return "page_up"
-                elif full in ("\x1b[6~", "\x1b[U"):
-                    return "page_down"
-                return full
-            return "esc"
-        elif ch == "\t":
-            return "tab"
-        elif ch in ("\r", "\n"):
-            return "enter"
-        return ch

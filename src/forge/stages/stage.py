@@ -562,7 +562,21 @@ class Stage:
                     budget = TestingBudget(max_runtime_seconds=float(effective_timeout))
 
                 engine = TesterEngine(context=context, run_manager=self.run_manager, budget=budget)
-                return engine.run()
+                try:
+                    return engine.run()
+                except Exception as exc:
+                    logging.exception("Tester engine execution failed: %s", exc)
+                    if self.event_listener:
+                        try:
+                            self.event_listener(AgentEvent(
+                                event_type=AgentEventType.ERROR,
+                                timestamp=time.time(),
+                                text=str(exc),
+                                data={"role_name": "tester", "stage_name": "04_tester", "status": "FAILED", "exit_code": 1},
+                            ))
+                        except Exception:
+                            pass
+                    raise
 
         # 1. Prepare
         instruction = InstructionBuilder.build(context, self.role)

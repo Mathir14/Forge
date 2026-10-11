@@ -22,6 +22,11 @@ def render_console_view(state: DashboardState, max_lines: int = 35) -> Panel:
         )
     else:
         total_lines = len(logs)
+        max_scroll = max(0, total_lines - max_lines)
+        state.max_scroll_offset = max_scroll
+        if state.scroll_offset > max_scroll:
+            state.scroll_offset = max_scroll
+
         # Auto-scroll to tail if scroll_offset == 0, else show slice from tail - offset
         if state.scroll_offset == 0:
             start = max(0, total_lines - max_lines)

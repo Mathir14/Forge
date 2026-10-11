@@ -39,7 +39,12 @@ def render_timeline(state: DashboardState) -> Panel:
 
         # Format duration
         if stage.duration_seconds > 0:
-            dur_str = f"{int(stage.duration_seconds)}s"
+            if stage.duration_seconds < 0.1:
+                dur_str = f"{stage.duration_seconds:.2f}s"
+            elif stage.duration_seconds < 1.0:
+                dur_str = f"{stage.duration_seconds:.1f}s"
+            else:
+                dur_str = f"{int(stage.duration_seconds)}s"
         else:
             dur_str = "--"
 

@@ -7,6 +7,7 @@ from rich.text import Text
 from forge.dashboard.model import RunModel
 from forge.dashboard.state import DashboardState
 from forge.dashboard.components.navigation import render_tab_navigation
+from forge.dashboard.components.viewport import VirtualViewport
 from forge.storage.run_manager import RunManager
 
 
@@ -116,7 +117,7 @@ def render_compare_view(
 
     # Union of stage names
     all_stage_names = sorted(list(set(run_a.stage_names + run_b.stage_names)))
-    for s_name in all_stage_names[:max_lines]:
+    for s_name in all_stage_names:
         sa = run_a.get_stage(s_name)
         sb = run_b.get_stage(s_name)
 
@@ -144,8 +145,15 @@ def render_compare_view(
     content_grid.add_row(Text("─" * 60, style="dim"))
     content_grid.add_row(stage_table)
 
-    return Panel(
+    viewport = VirtualViewport(
         content_grid,
+        state=state,
+        max_lines=max_lines,
+        indicator_label="Stages",
+    )
+
+    return Panel(
+        viewport,
         title=title_markup,
         title_align="left",
         border_style=border_color,

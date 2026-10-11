@@ -86,7 +86,7 @@ class MachineReportValidator:
         emitted_role = str(normalized_data.get("ROLE", expected_role)).upper()
         if emitted_role != expected_role.upper():
             errors.append(f"Expected role '{expected_role.upper()}', got '{emitted_role}'")
-        role = expected_role.upper()
+        role = emitted_role if emitted_role else expected_role.upper()
 
         # 1.1 Enforce ADR-002 Score-Free policy for TESTER
         if expected_role.upper() == "TESTER" or emitted_role == "TESTER":

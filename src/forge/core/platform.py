@@ -9,8 +9,10 @@ Provides platform-neutral interfaces for:
 - Platform paths and environment variable utilities
 """
 
+import collections
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -265,6 +267,131 @@ def is_tty(stream: Any = sys.stdin) -> bool:
     return hasattr(stream, "isatty") and stream.isatty()
 
 
+def parse_key_buffer(buf: str) -> List[str]:
+    """Parse a string of raw keystrokes and ANSI escape sequences into token names."""
+    tokens: List[str] = []
+    i = 0
+    n = len(buf)
+    while i < n:
+        ch = buf[i]
+        if ch == "\x1b":
+            # Check for escape sequence
+            if i + 1 >= n:
+                tokens.append("esc")
+                i += 1
+                continue
+
+            next_ch = buf[i + 1]
+            if next_ch == "[":
+                # Check for SGR mouse: \x1b[<(\d+);(\d+);(\d+)([Mm])
+                if i + 2 < n and buf[i + 2] == "<":
+                    match = re.match(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])", buf[i:])
+                    if match:
+                        btn = int(match.group(1))
+                        x = int(match.group(2))
+                        y = int(match.group(3))
+                        action = match.group(4)
+                        if btn == 64:
+                            tokens.append(f"wheel_up:{x}:{y}")
+                        elif btn == 65:
+                            tokens.append(f"wheel_down:{x}:{y}")
+                        elif btn == 0 and action == "M":
+                            tokens.append(f"click:{x}:{y}")
+                        elif btn == 2 and action == "M":
+                            tokens.append(f"right_click:{x}:{y}")
+                        i += match.end()
+                        continue
+
+                # Check for legacy X10/Normal mouse: \x1b[M followed by 3 bytes
+                if i + 2 < n and buf[i + 2] == "M":
+                    if i + 5 <= n:
+                        b = ord(buf[i + 3]) - 32
+                        x = ord(buf[i + 4]) - 32
+                        y = ord(buf[i + 5]) - 32
+                        if b in (64, 96):
+                            tokens.append(f"wheel_up:{x}:{y}")
+                        elif b in (65, 97):
+                            tokens.append(f"wheel_down:{x}:{y}")
+                        elif b == 0:
+                            tokens.append(f"click:{x}:{y}")
+                        i += 6
+                        continue
+
+                # Standard CSI sequences: \x1b[ [0-9;]* [A-Za-z~]
+                match = re.match(r"\x1b\[[0-9;]*[A-Za-z~]", buf[i:])
+                if match:
+                    seq = match.group(0)
+                    if seq == "\x1b[A":
+                        tokens.append("up")
+                    elif seq == "\x1b[B":
+                        tokens.append("down")
+                    elif seq == "\x1b[C":
+                        tokens.append("right")
+                    elif seq == "\x1b[D":
+                        tokens.append("left")
+                    elif seq in ("\x1b[H", "\x1b[1~", "\x1b[7~"):
+                        tokens.append("home")
+                    elif seq in ("\x1b[F", "\x1b[4~", "\x1b[8~"):
+                        tokens.append("end")
+                    elif seq in ("\x1b[5~", "\x1b[V"):
+                        tokens.append("page_up")
+                    elif seq in ("\x1b[6~", "\x1b[U"):
+                        tokens.append("page_down")
+                    elif seq == "\x1b[Z":
+                        tokens.append("backtab")
+                    else:
+                        tokens.append(seq)
+                    i += match.end()
+                    continue
+
+                tokens.append("esc")
+                i += 1
+                continue
+
+            elif next_ch == "O":
+                # SS3 sequences: \x1bOA, \x1bOB, \x1bOC, \x1bOD, \x1bOH, \x1bOF
+                if i + 2 < n:
+                    third = buf[i + 2]
+                    if third == "A":
+                        tokens.append("up")
+                    elif third == "B":
+                        tokens.append("down")
+                    elif third == "C":
+                        tokens.append("right")
+                    elif third == "D":
+                        tokens.append("left")
+                    elif third == "H":
+                        tokens.append("home")
+                    elif third == "F":
+                        tokens.append("end")
+                    else:
+                        tokens.append(f"\x1bO{third}")
+                    i += 3
+                    continue
+                else:
+                    tokens.append("esc")
+                    i += 1
+                    continue
+            else:
+                tokens.append("esc")
+                i += 1
+                continue
+        elif ch == "\t":
+            tokens.append("tab")
+            i += 1
+        elif ch in ("\r", "\n"):
+            tokens.append("enter")
+            i += 1
+        elif ch in ("\x7f", "\x08"):
+            tokens.append("backspace")
+            i += 1
+        else:
+            tokens.append(ch)
+            i += 1
+
+    return tokens
+
+
 class PosixTerminalSession:
     """Terminal session manager for POSIX terminals using termios and tty."""
 
@@ -276,6 +403,10 @@ class PosixTerminalSession:
             self.fd = 0
         self.old_settings = None
         self._custom_read_key = read_key_fn
+        self._key_queue: collections.deque[str] = collections.deque()
+
+    def has_queued_keys(self) -> bool:
+        return len(self._key_queue) > 0
 
     def __enter__(self) -> "PosixTerminalSession":
         import termios
@@ -296,13 +427,23 @@ class PosixTerminalSession:
                 pass
 
     def poll_key(self, timeout: float = 0.05) -> Optional[str]:
+        if self._key_queue:
+            return self._key_queue.popleft()
         import select
         try:
             r, _, _ = select.select([self.fd], [], [], timeout)
             if r:
                 if self._custom_read_key:
                     return self._custom_read_key(self.fd)
-                return self.read_key(self.fd)
+                raw = os.read(self.fd, 1024).decode("utf-8", errors="ignore")
+                if raw.endswith(("\x1b", "\x1b[", "\x1bO", "\x1b[<")):
+                    r2, _, _ = select.select([self.fd], [], [], 0.05)
+                    if r2:
+                        raw += os.read(self.fd, 1024).decode("utf-8", errors="ignore")
+                tokens = parse_key_buffer(raw)
+                if tokens:
+                    self._key_queue.extend(tokens)
+                    return self._key_queue.popleft()
         except Exception:
             pass
         return None
@@ -311,34 +452,15 @@ class PosixTerminalSession:
     def read_key(fd: int) -> str:
         import select
         try:
-            ch = os.read(fd, 1).decode("utf-8", errors="ignore")
+            raw = os.read(fd, 1024).decode("utf-8", errors="ignore")
+            if raw.endswith(("\x1b", "\x1b[", "\x1bO", "\x1b[<")):
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    raw += os.read(fd, 1024).decode("utf-8", errors="ignore")
+            tokens = parse_key_buffer(raw)
+            return tokens[0] if tokens else ""
         except Exception:
             return ""
-
-        if ch == "\x1b":
-            r, _, _ = select.select([fd], [], [], 0.05)
-            if r:
-                seq = os.read(fd, 8).decode("utf-8", errors="ignore")
-                full = ch + seq
-                if full == "\x1b[A":
-                    return "up"
-                elif full == "\x1b[B":
-                    return "down"
-                elif full == "\x1b[C":
-                    return "right"
-                elif full == "\x1b[D":
-                    return "left"
-                elif full in ("\x1b[5~", "\x1b[V"):
-                    return "page_up"
-                elif full in ("\x1b[6~", "\x1b[U"):
-                    return "page_down"
-                return full
-            return "esc"
-        elif ch == "\t":
-            return "tab"
-        elif ch in ("\r", "\n"):
-            return "enter"
-        return ch
 
 
 class WindowsTerminalSession:

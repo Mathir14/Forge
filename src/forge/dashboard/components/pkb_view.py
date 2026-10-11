@@ -8,6 +8,7 @@ from rich.table import Table
 from rich.text import Text
 from forge.dashboard.state import DashboardState
 from forge.dashboard.components.navigation import render_tab_navigation
+from forge.dashboard.components.viewport import VirtualViewport
 from forge.storage.knowledge import KnowledgeStore
 from forge.core.knowledge import KnowledgeFact
 
@@ -69,11 +70,7 @@ def render_pkb_view(state: DashboardState, project_root: Optional[Path] = None, 
     table.add_column("ID / Title", ratio=2)
     table.add_column("Confidence", justify="right", width=10)
 
-    # Slicing
-    start = min(state.scroll_offset, max(0, len(facts) - 1))
-    end = min(len(facts), start + max_lines)
-
-    for fact in facts[start:end]:
+    for fact in facts:
         # Status styling
         st = fact.status.upper()
         if st == "VERIFIED":
@@ -107,8 +104,15 @@ def render_pkb_view(state: DashboardState, project_root: Optional[Path] = None, 
     content_grid.add_row(Text("─" * 60, style="dim"))
     content_grid.add_row(table)
 
-    return Panel(
+    viewport = VirtualViewport(
         content_grid,
+        state=state,
+        max_lines=max_lines,
+        indicator_label="Facts",
+    )
+
+    return Panel(
+        viewport,
         title=title_markup,
         title_align="left",
         border_style=border_color,

@@ -1748,6 +1748,78 @@ def auto_pipeline(
                     _record_stage_transition(run, d_name, critic_res.status, "COMPLETED", duration=critic_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
                     _check_abort()
 
+                    is_protocol_failure = (
+                        critic_res.response is not None
+                        and critic_res.response.exit_code == 0
+                        and not critic_res.machine_report.is_valid
+                        and critic_res.status not in ("BLOCKED", "REJECTED")
+                    )
+
+                    if is_protocol_failure:
+                        audit_label = "Closing Critic" if stage_def.is_closing_critic else stage_def.display_name
+                        val_err = "; ".join(critic_res.machine_report.validation_errors) if critic_res.machine_report.validation_errors else "Invalid machine report format"
+                        click.secho(f"\n⚠️ {audit_label} protocol validation error: {val_err}. Retrying (Attempt 2/2)...", fg="yellow")
+
+                        # Preserve attempt 1 artifacts
+                        if hasattr(run, "run_dir") and run.run_dir:
+                            prefix = f"{stage_def.sequence_number:02d}_{stage_def.name.lower()}"
+                            md_file = run.run_dir / f"{prefix}.md"
+                            json_file = run.run_dir / f"{prefix}.json"
+                            if md_file.exists():
+                                (run.run_dir / f"{prefix}_attempt_1.md").write_text(md_file.read_text(encoding="utf-8"), encoding="utf-8")
+                            if json_file.exists():
+                                (run.run_dir / f"{prefix}_attempt_1.json").write_text(json_file.read_text(encoding="utf-8"), encoding="utf-8")
+                            debug_raw = run.run_dir / "debug" / f"{stage_def.name.lower()}_raw.txt"
+                            if debug_raw.exists():
+                                (run.run_dir / "debug" / f"{stage_def.name.lower()}_attempt_1_raw.txt").write_text(debug_raw.read_text(encoding="utf-8"), encoding="utf-8")
+
+                        # Populate targeted repair feedback for attempt 2
+                        context.repair_feedback = (
+                            f"### Protocol Validation Failure in Previous Attempt (Attempt 1/2):\n"
+                            f"Validation errors: {val_err}\n"
+                            f"You MUST emit a valid Machine Report with ROLE: {stage_def.name.upper()} and valid YAML enclosed in a single ```yaml code block.\n"
+                            f"Do NOT copy prior stage roles or handoffs."
+                        )
+                        if hasattr(context.run, "set_auto_repair_feedback"):
+                            context.run.set_auto_repair_feedback(context.repair_feedback)
+
+                        try:
+                            _check_abort()
+                            critic_res_retry = execute_stage(
+                                stage_def,
+                                context,
+                                run_mgr,
+                                banner_prefix=f"[{stage_def.sequence_number}/{total_stages}] (Attempt 2/2)",
+                            )
+                            is_mock_exhaustion = (
+                                (critic_res_retry.response and "StopIteration" in (critic_res_retry.response.stderr or ""))
+                                or any("StopIteration" in str(err) for err in (critic_res_retry.machine_report.validation_errors or []))
+                            )
+                            if is_mock_exhaustion:
+                                pass
+                            else:
+                                critic_res = critic_res_retry
+                                stages_executed += 1
+                                click.echo(f"  ✓ {stage_def.display_name} audit retry completed | Status: {critic_res.status} ({critic_res.duration_seconds:.1f}s)")
+                                _record_stage_transition(run, d_name, critic_res.status, "COMPLETED", duration=critic_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
+                                _check_abort()
+
+                                # Preserve attempt 2 artifacts
+                                if hasattr(run, "run_dir") and run.run_dir:
+                                    prefix = f"{stage_def.sequence_number:02d}_{stage_def.name.lower()}"
+                                    md_file = run.run_dir / f"{prefix}.md"
+                                    json_file = run.run_dir / f"{prefix}.json"
+                                    if md_file.exists():
+                                        (run.run_dir / f"{prefix}_attempt_2.md").write_text(md_file.read_text(encoding="utf-8"), encoding="utf-8")
+                                    if json_file.exists():
+                                        (run.run_dir / f"{prefix}_attempt_2.json").write_text(json_file.read_text(encoding="utf-8"), encoding="utf-8")
+                        except StopIteration:
+                            pass
+                        finally:
+                            context.repair_feedback = None
+                            if hasattr(context.run, "set_auto_repair_feedback"):
+                                context.run.set_auto_repair_feedback(None)
+
                     if not critic_res.success or not critic_res.machine_report.is_valid or critic_res.status in ("BLOCKED", "FAILED", "REJECTED", "UNKNOWN"):
                         audit_label = "Closing Critic" if stage_def.is_closing_critic else stage_def.display_name
                         click.secho(f"\n⚠️ {audit_label} audit reported non-success status '{critic_res.status}'.", fg="red")
@@ -1758,6 +1830,8 @@ def auto_pipeline(
                             reason = f"{audit_label} validation error: {val_err}"
                         else:
                             reason = critic_res.machine_report.reason or f"{audit_label} audit failed with status '{critic_res.status}'"
+                        if reason:
+                            click.secho(f"   {reason}", fg="red")
                         _record_stage_transition(run, d_name, run.status, "COMPLETED", duration=critic_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, reason=reason, context=context)
                         _record_final_halt(run, run.status, reason)
                         run.save_metadata()

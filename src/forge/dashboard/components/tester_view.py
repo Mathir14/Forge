@@ -9,6 +9,7 @@ from rich.text import Text
 from rich.syntax import Syntax
 from forge.dashboard.state import DashboardState
 from forge.dashboard.components.navigation import render_tab_navigation
+from forge.dashboard.components.viewport import VirtualViewport
 
 
 def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
@@ -51,7 +52,7 @@ def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
     summary_table.add_column(ratio=1)
 
     status = tester_stage.status.upper()
-    status_style = "bold green" if status in ("APPROVED", "VERIFIED", "PASSED", "SUCCESS") else "bold red"
+    status_style = "bold green" if status in ("APPROVED", "VERIFIED", "PASSED", "PASS", "SUCCESS") else "bold red"
 
     summary_table.add_row(
         Text(f"STATUS: {status}", style=status_style),
@@ -73,7 +74,7 @@ def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
     matrix_table.add_column("Duration", justify="right", width=8)
 
     if journeys:
-        for j in journeys[:max_lines]:
+        for j in journeys:
             j_status = j["status"].upper()
             if j_status in ("PASS", "PASSED"):
                 res_text = Text("✓ PASS", style="bold green")
@@ -96,10 +97,17 @@ def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
 
     if failure_details:
         content_grid.add_row(Text("\nFailure Inspector & Evidence:", style="bold red"))
-        content_grid.add_row(Text(failure_details[:1000], style="dim red"))
+        content_grid.add_row(Text(failure_details, style="dim red"))
+
+    viewport = VirtualViewport(
+        content_grid,
+        state=state,
+        max_lines=max_lines,
+        indicator_label="Rows",
+    )
 
     return Panel(
-        content_grid,
+        viewport,
         title=title_markup,
         title_align="left",
         border_style=border_color,

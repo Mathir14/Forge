@@ -106,8 +106,8 @@ To cut a new release:
 ### Step 1: Bump Version & Validate Locally
 
 Update the version in:
-- `pyproject.toml` (e.g. `version = "0.1.0b11"`)
-- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b11"`)
+- `pyproject.toml` (e.g. `version = "0.1.0b13"`)
+- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b13"`)
 
 Run local tests to confirm:
 ```bash
@@ -117,11 +117,11 @@ pytest
 ### Step 2: Commit and Tag
 
 ```bash
-git commit -am "chore: release v0.1.0b11"
+git commit -am "chore: release v0.1.0b13"
 git push origin master
 
-git tag -a v0.1.0b11 -m "Release v0.1.0b11"
-git push origin v0.1.0b11
+git tag -a v0.1.0b13 -m "Release v0.1.0b13"
+git push origin v0.1.0b13
 ```
 
 ### Step 3: Monitor Staged Release in GitHub Actions
@@ -151,7 +151,28 @@ git push origin v0.1.0b11
 
 ---
 
-## 6. Release Notes: v0.1.0b11
+## 6. Release Notes: v0.1.0b13
+
+`v0.1.0b13` addresses run-016 operational defects, Critic protocol validation hardening, Tester completion lifecycle propagation, and terminal dashboard scrolling responsiveness:
+
+- **Critic Prompt Isolation & Contamination Remediation**: Delimited prior-stage outputs inside `<audit_evidence stage="...">` tags and sanitized nested YAML blocks (` ```yaml ` -> ` ```yaml-evidence `) in `PromptCompiler._compile_critic`. Prevents models from echoing prior Executor/Reviewer roles or handoffs. Injects authoritative schema requirements originating strictly from trusted Critic stage configuration.
+- **Strict Role Validation & Bounded Protocol Retry**: Updated `MachineReportValidator` to strictly preserve emitted roles (e.g. `ROLE: EXECUTOR`) rather than silently normalizing to the expected role. Implemented a bounded single retry (`Attempt 2/2`) in `auto_pipeline` for protocol validation failures, preserving attempt artifacts (`*_attempt_1.md`, `*_attempt_1.json`, `*_attempt_1_raw.txt`), delivering targeted repair feedback, and failing closed if the retry does not succeed.
+- **Tester Completion & Stage Synchronization**: Instrumented `TesterEngine.run()` to emit `AgentEventType.COMPLETE` with execution status (`PASS`), duration, and exit code. Handled unhandled exceptions with `AgentEventType.ERROR`. Updated `RunModel.apply_event` to mutate stage records and timeline duration rendering for sub-second executions (`<0.1s` and `<1.0s`), ensuring accurate live and post-mortem presentation.
+- **Virtual Viewport Slicing & Motion Responsiveness**: Introduced `VirtualViewport` renderable which slices pre-rendered Rich terminal rows (`console.render_lines`) with exact 1-row precision. Eliminates blank-line freezes caused by Markdown AST parser whitespace stripping, ensures line counter synchronization, dynamically bounds scroll offsets, and maintains row caching.
+- **ANSI/SGR Input Tokenizer & Mouse-Wheel Routing**: Implemented `parse_key_buffer` tokenizer handling SGR extended mouse events (`wheel_up:X:Y`, `wheel_down:X:Y`, `click:X:Y`), legacy mouse sequences, and multi-key escape bursts. Enabled SGR mouse tracking in terminal sessions. Added pane-aware routing (mouse wheel over timeline navigates stages; mouse wheel over content scrolls lines by 3 rows; click toggles focus). Unified scroll directions across Document views and Console history with Home/End jump support.
+
+---
+
+## 7. Release Notes: v0.1.0b12
+
+`v0.1.0b12` hardens agent recovery, working-tree concurrency, and lease portability across environments:
+
+- **Recovery Timeout & Lease Portability**: Resolved lease portability across multi-agent environments and hardened session recovery timeouts.
+- **Working-Tree Concurrency**: Hardened concurrent access to working-tree state and metadata across background worker processes.
+
+---
+
+## 8. Release Notes: v0.1.0b11
 
 `v0.1.0b11` addresses findings RC-01 through RC-04 from the adversarial release-candidate audit:
 
@@ -162,9 +183,9 @@ git push origin v0.1.0b11
 
 ---
 
-## 7. Release Notes: v0.1.0b10
+## 9. Release Notes: v0.1.0b10
 
-`v0.1.0b10` is a corrective release following the `v0.1.0b9` Native Windows release.
+`v0.1.0b10` is a corrective release following the `v0.1.0b9` Native Windows release:
 
 - **Windows RunLock mandatory-locking compatibility fix**: On Windows NT, byte-range locking via `msvcrt.locking` is kernel-enforced and mandatory.
 - **Windows lock byte moved away from owner metadata**: Windows file lock offset moved to `WINDOWS_LOCK_OFFSET` (1 GiB) instead of byte 0.

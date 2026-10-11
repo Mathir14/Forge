@@ -435,6 +435,16 @@ class TesterEngine:
 
         success = status in ("PASS", "NOT_TESTABLE") and exit_code == 0
 
+        self._emit_event(
+            AgentEventType.COMPLETE,
+            text=f"[tester] Empirical testing finished with status {status} ({duration:.2f}s)",
+            data={
+                "status": status,
+                "duration_seconds": duration,
+                "exit_code": exit_code,
+            },
+        )
+
         return StageResult(
             role=role,
             prompt=rendered_prompt,

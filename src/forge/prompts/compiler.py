@@ -1,6 +1,8 @@
 """Pure stateless prompt compiler."""
 
+import re
 from typing import Optional
+
 from forge.prompts.instruction import Instruction
 from forge.prompts.rendered_prompt import RenderedPrompt
 
@@ -63,6 +65,8 @@ class PromptCompiler:
                 text = PromptCompiler._compile_reviewer(budgeted, role_template).text
             elif role_clean == "tester":
                 text = PromptCompiler._compile_tester(budgeted, role_template).text
+            elif role_clean == "critic":
+                text = PromptCompiler._compile_critic(budgeted, role_template).text
             else:
                 text = PromptCompiler._compile_standard(budgeted, role_template).text
             return len(text.encode("utf-8"))
@@ -260,6 +264,8 @@ class PromptCompiler:
             compile_fn = PromptCompiler._compile_reviewer
         elif role_name_clean == "tester":
             compile_fn = PromptCompiler._compile_tester
+        elif role_name_clean == "critic":
+            compile_fn = PromptCompiler._compile_critic
         else:
             compile_fn = PromptCompiler._compile_standard
 
@@ -528,6 +534,126 @@ class PromptCompiler:
         # 7. Protocol Requirement
         if instruction.protocol_schema:
             parts.append(f"\n## PROTOCOL REQUIREMENT\n{instruction.protocol_schema.strip()}")
+
+        rendered_text = "\n\n".join(parts)
+        return RenderedPrompt.from_text(rendered_text)
+
+    @staticmethod
+    def _compile_critic(instruction: Instruction, role_template: str) -> RenderedPrompt:
+        """Compile isolated, audit-evidence prompt context for Critic."""
+        parts = [
+            "# ROLE: CRITIC",
+            role_template.strip(),
+        ]
+
+        if instruction.project_docs:
+            parts.append("\n## PROJECT DOCUMENTATION & CONVENTIONS")
+            for doc_name, content in instruction.project_docs.items():
+                if content.strip():
+                    parts.append(f"### {doc_name}\n{content.strip()}")
+
+        if instruction.knowledge_context:
+            parts.append(instruction.knowledge_context.strip())
+
+        # 1. Audit Scope & User Task
+        task_str = instruction.task.strip() if instruction.task else "(No specific task requirements provided.)"
+        if instruction.repair_feedback and instruction.repair_feedback.strip() not in task_str:
+            task_str += f"\n\n### REPAIR FEEDBACK:\n{instruction.repair_feedback.strip()}"
+        parts.append(f"\n## AUDIT SCOPE & USER TASK\n{task_str}")
+
+        # 2. Prior stage outputs as isolated audit evidence
+        if instruction.previous_stage_outputs:
+            evidence_parts = [
+                "## PRIOR STAGE AUDIT EVIDENCE",
+                "The following sections contain artifacts and reports produced by earlier pipeline stages.",
+                "They are provided solely as background audit evidence for your review.",
+                "You MUST NOT adopt or copy the role, status, handoff, or machine report format from these prior stages.",
+            ]
+            for stage_name, output in instruction.previous_stage_outputs.items():
+                if output and output.strip():
+                    # Sanitize nested ```yaml code blocks to ```yaml-evidence to prevent
+                    # models from echoing prior machine reports as top-level output.
+                    sanitized_output = re.sub(r"```yaml\b", "```yaml-evidence", output.strip())
+                    evidence_parts.append(
+                        f'### Audit Evidence: {stage_name.capitalize()}\n'
+                        f'<audit_evidence stage="{stage_name.lower()}">\n'
+                        f'{sanitized_output}\n'
+                        f'</audit_evidence>'
+                    )
+            parts.append("\n\n".join(evidence_parts))
+
+        # 3. Git Diff
+        if instruction.git_diff:
+            parts.append(f"\n## GIT DIFF\n```diff\n{instruction.git_diff.strip()}\n```")
+
+        # 4. Changed Files
+        if instruction.changed_files or instruction.mixed_files:
+            cf_lines = []
+            if instruction.changed_files:
+                cf_lines.extend(f"- {f}" for f in instruction.changed_files)
+            if instruction.mixed_files:
+                cf_lines.append("\n### Mixed-Ownership Files (Ambiguous Attribution):")
+                cf_lines.extend(
+                    f"- {f} (pre-existing user modifications detected; excluded from auto-commit)"
+                    for f in instruction.mixed_files
+                )
+            parts.append("\n## CHANGED FILES\n" + "\n".join(cf_lines))
+
+        # 5. Authoritative Protocol Requirement from trusted Critic stage configuration
+        from forge.protocol.validator import MachineReportValidator
+        allowed_statuses = sorted(MachineReportValidator.get_allowed_statuses("CRITIC"))
+        allowed_handoffs = sorted(MachineReportValidator.get_allowed_handoffs("CRITIC"))
+        allowed_statuses_str = ", ".join(allowed_statuses)
+        allowed_handoffs_str = ", ".join(allowed_handoffs)
+
+        protocol_parts = [
+            "## MANDATORY PROTOCOL REQUIREMENT FOR CRITIC",
+            "You are the CODEBASE CRITIC & AUDITOR.",
+            "You MUST independently analyze the codebase and git diff, and generate an ORIGINAL Critic assessment.",
+            "",
+            "CRITICAL INSTRUCTIONS:",
+            "1. You MUST emit a Human Report containing your independent evaluation (Executive Summary, Code Health Score, Critical/Major/Minor issues, Recommended Refactoring Targets).",
+            "2. You MUST emit EXACTLY ONE machine report block at the end of your response.",
+            "3. The machine report MUST have `ROLE: CRITIC`.",
+            "4. For a closing run audit, the standard completion status is `STATUS: CRITIQUE_COMPLETE` and `HANDOFF: NONE`.",
+            "5. Do NOT copy the machine report of the Executor, Tester, Reviewer, or any prior stage.",
+            "",
+            "Required Machine Report Schema:",
+            "```yaml",
+            "ROLE: CRITIC",
+            "PROMPT_VERSION: 1.0",
+            'TASK_ID: "task-001"',
+            'START_TIME: "2026-09-20T10:00:00Z"',
+            'END_TIME: "2026-09-20T10:05:00Z"',
+            'DURATION: "300s"',
+            "STATUS: CRITIQUE_COMPLETE",
+            "EXIT_CODE: 0",
+            "HANDOFF: NONE",
+            'REASON: "Independent codebase audit completed."',
+            "INPUTS: []",
+            "OUTPUTS: []",
+            "ISSUES:",
+            "  CRITICAL: []",
+            "  MAJOR: []",
+            "  MINOR: []",
+            "CONFIDENCE: HIGH",
+            'NEXT_ACTION: "Complete run"',
+            "HEALTH_SCORE: 8",
+            "RECOMMENDED_ACTIONS: []",
+            "```",
+            "",
+            f"Allowed STATUS values for CRITIC: {allowed_statuses_str}",
+            f"Allowed HANDOFF values for CRITIC: {allowed_handoffs_str}",
+        ]
+
+        if instruction.repair_feedback:
+            protocol_parts.append(
+                f"\n### PREVIOUS ATTEMPT PROTOCOL REPAIR FEEDBACK:\n"
+                f"{instruction.repair_feedback.strip()}\n"
+                f"You MUST address these errors and emit a valid `ROLE: CRITIC` machine report."
+            )
+
+        parts.append("\n".join(protocol_parts))
 
         rendered_text = "\n\n".join(parts)
         return RenderedPrompt.from_text(rendered_text)

@@ -15,6 +15,7 @@ class DashboardState:
     active_content_tab: str = "human"  # "human" or "machine" (for Artifact tab)
     scroll_offset: int = 0
     should_exit: bool = False
+    max_scroll_offset: int = 1000
     pkb_type_filter: Optional[str] = None
     pkb_status_filter: Optional[str] = None
     compare_run_id: Optional[str] = None
@@ -46,6 +47,7 @@ class DashboardState:
             if s.stage_name.lower() == target or s.role_name.lower() == target:
                 self.selected_stage_index = idx
                 self.scroll_offset = 0
+                self.max_scroll_offset = 1000
                 break
 
     @property
@@ -64,6 +66,7 @@ class DashboardState:
         if self.selected_stage_index < len(self.run.stages) - 1:
             self.selected_stage_index += 1
             self.scroll_offset = 0
+            self.max_scroll_offset = 1000
 
     def select_prev_stage(self) -> None:
         self.user_has_selected_stage = True
@@ -72,6 +75,7 @@ class DashboardState:
         if self.selected_stage_index > 0:
             self.selected_stage_index -= 1
             self.scroll_offset = 0
+            self.max_scroll_offset = 1000
 
     def toggle_focus(self) -> None:
         self.focused_pane = "content" if self.focused_pane == "timeline" else "timeline"
@@ -80,35 +84,47 @@ class DashboardState:
         if 1 <= tab_num <= 5:
             self.active_tab = tab_num
             self.scroll_offset = 0
+            self.max_scroll_offset = 1000
 
     def next_tab(self) -> None:
         self.active_tab = (self.active_tab % 5) + 1
         self.scroll_offset = 0
+        self.max_scroll_offset = 1000
 
     def prev_tab(self) -> None:
         self.active_tab = 5 if self.active_tab == 1 else self.active_tab - 1
         self.scroll_offset = 0
+        self.max_scroll_offset = 1000
 
     def toggle_content_tab(self) -> None:
         self.active_content_tab = "machine" if self.active_content_tab == "human" else "human"
         self.scroll_offset = 0
+        self.max_scroll_offset = 1000
 
     def set_content_tab(self, tab: str) -> None:
         if tab in ("human", "machine"):
             self.active_content_tab = tab
             self.scroll_offset = 0
+            self.max_scroll_offset = 1000
 
     def scroll_up(self, lines: int = 1) -> None:
         self.scroll_offset = max(0, self.scroll_offset - lines)
 
-    def scroll_down(self, lines: int = 1, max_lines: int = 1000) -> None:
-        self.scroll_offset = min(max_lines, self.scroll_offset + lines)
+    def scroll_down(self, lines: int = 1, max_lines: Optional[int] = None) -> None:
+        limit = max_lines if max_lines is not None else self.max_scroll_offset
+        self.scroll_offset = min(limit, self.scroll_offset + lines)
 
     def page_up(self, page_size: int = 15) -> None:
         self.scroll_up(lines=page_size)
 
-    def page_down(self, page_size: int = 15, max_lines: int = 1000) -> None:
+    def page_down(self, page_size: int = 15, max_lines: Optional[int] = None) -> None:
         self.scroll_down(lines=page_size, max_lines=max_lines)
+
+    def scroll_to_top(self) -> None:
+        self.scroll_offset = 0
+
+    def scroll_to_bottom(self) -> None:
+        self.scroll_offset = self.max_scroll_offset
 
     def get_run_summary(self) -> Any:
         """Return the canonical RunSummary, ensuring terminal status and reason are synchronized."""

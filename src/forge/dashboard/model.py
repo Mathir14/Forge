@@ -29,6 +29,13 @@ class MachineReportModel:
     is_valid: bool = False
     validation_errors: List[str] = field(default_factory=list)
 
+    @property
+    def emitted_role(self) -> str:
+        """Original role string declared in raw report before normalization."""
+        if self.raw_data:
+            return str(self.raw_data.get("role") or self.raw_data.get("ROLE") or self.role).upper()
+        return self.role.upper()
+
 
 @dataclass
 class StageAttemptModel:
@@ -147,6 +154,7 @@ class RunModel:
                         "CRITIQUE_COMPLETE",
                         "READY",
                         "PASSED",
+                        "PASS",
                         "COMPLETED",
                         "SUCCESS",
                         "DONE",
@@ -176,6 +184,17 @@ class RunModel:
 
         # 1b. Lifecycle: stage_record_update
         if lifecycle == "stage_record_update":
+            s_name = ev_data.get("stage_name") or ev_data.get("name") or ev_data.get("role_name")
+            seq = ev_data.get("sequence_number")
+            st_val = ev_data.get("status")
+            dur_val = ev_data.get("duration_seconds")
+            if s_name:
+                stage = self.get_stage(s_name, sequence_number=seq)
+                if stage:
+                    if st_val and st_val != "—":
+                        stage.status = str(st_val).upper()
+                    if dur_val is not None and float(dur_val) > 0:
+                        stage.duration_seconds = float(dur_val)
             if self.summary is not None:
                 self.summary.record_stage(
                     name=ev_data.get("name", ""),
@@ -298,6 +317,13 @@ class RunModel:
                     target_stage.duration_seconds = event.result.duration_seconds
                     if event.result.stdout:
                         target_stage.raw_content = event.result.stdout
+                elif ev_data:
+                    if "exit_code" in ev_data:
+                        target_stage.exit_code = ev_data["exit_code"]
+                    if "duration_seconds" in ev_data:
+                        target_stage.duration_seconds = float(ev_data["duration_seconds"])
+                    if "status" in ev_data:
+                        target_stage.status = str(ev_data["status"]).upper()
                 h_rep, m_rep = self._extract_human_and_machine_reports(target_stage.raw_content, target_stage.role_name)
                 if h_rep:
                     target_stage.human_report = h_rep
