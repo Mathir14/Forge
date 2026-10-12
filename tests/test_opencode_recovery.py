@@ -666,6 +666,391 @@ def test_recover_session_aborted_finish_reason_rejected(tmp_path):
         assert "finish status was 'aborted'" in orig_event.result.metadata.get("recovery_failure_reason", "")
 
 
+def test_recover_session_reasoning_only_without_text_fails_with_diagnostic(tmp_path):
+    """Verify assistant message with reasoning content but empty text fails recovery with precise diagnostic.
+
+    Directly reproduces the run-017 failure mode where the model produced chain-of-thought
+    reasoning tokens but no deliverable text or tool calls.
+    """
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_ed19dae8dffeQmn75exSQWSqiR"
+
+    reasoning_content = [
+        {
+            "type": "reasoning",
+            "text": "Reporting looks properly escaped. Now let me look at architecture tests...",
+            "state": {"reasoningField": "reasoning_content"},
+        }
+    ]
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_12e692666001c6GcsWue9veZcs",
+                        "role": "assistant",
+                        "finish": "stop",
+                        "content": reasoning_content,
+                    }
+                ]
+            }
+        return {"data": {"id": "ses_ed19dae8dffeQmn75exSQWSqiR", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(
+                exit_code=1,
+                duration_seconds=453.6,
+                stderr="Unexpected EOF before terminal event.",
+                metadata={"session_id": "ses_ed19dae8dffeQmn75exSQWSqiR"},
+            ),
+        )
+        recovered = adapter.recover_session(
+            terminal_event=orig_event,
+            session_id="ses_ed19dae8dffeQmn75exSQWSqiR",
+            cwd=tmp_path,
+        )
+
+        assert recovered is None
+        meta = orig_event.result.metadata
+        assert meta.get("recovery_failed") is True
+        assert meta.get("has_reasoning") is True
+        assert meta.get("finish_reason") == "stop"
+        assert meta.get("message_id") == "msg_12e692666001c6GcsWue9veZcs"
+        expected_reason = "Final assistant message contained reasoning content but empty text content."
+        assert meta.get("recovery_failure_reason") == expected_reason
+        assert "Unexpected EOF before terminal event." in orig_event.result.stderr
+        assert f"[Session Recovery Attempted: Failed - {expected_reason}]" in orig_event.result.stderr
+        # Verify private chain-of-thought content is never leaked into stderr or metadata
+        assert "Reporting looks properly escaped" not in orig_event.result.stderr
+        assert "Reporting looks properly escaped" not in str(meta)
+
+
+def test_recover_session_completely_empty_content_fails(tmp_path):
+    """Verify assistant message with completely empty content array fails recovery."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_empty_content"
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_empty",
+                        "role": "assistant",
+                        "finish": "stop",
+                        "content": [],
+                    }
+                ]
+            }
+        return {"data": {"id": "ses_empty_content", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(exit_code=1, duration_seconds=10.0, stderr="Unexpected EOF before terminal event."),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_empty_content", cwd=tmp_path)
+        assert recovered is None
+        assert orig_event.result.metadata.get("recovery_failure_reason") == "Final assistant message contained empty text content."
+
+
+def test_recover_session_incomplete_tool_calls_finish_status_rejected(tmp_path):
+    """Verify an assistant message with finish='tool-calls' is rejected during recovery as incomplete."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_tool_calls_pending"
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_pending_tools",
+                        "role": "assistant",
+                        "finish": "tool-calls",
+                        "content": [{"type": "tool_use", "name": "shell", "input": {"command": "ls"}}],
+                    }
+                ]
+            }
+        return {"data": {"id": "ses_tool_calls_pending", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(exit_code=1, duration_seconds=10.0, stderr="Unexpected EOF before terminal event."),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_tool_calls_pending", cwd=tmp_path)
+        assert recovered is None
+        assert "incomplete tool call step" in orig_event.result.metadata.get("recovery_failure_reason", "")
+
+
+def test_recover_session_raw_finish_tool_calls_and_type_assistant_rejected(tmp_path):
+    """Verify OpenCode v2.0 schema with rawFinish='tool_calls' and type='assistant' without role."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_raw_finish_test"
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_raw_finish_pending",
+                        "type": "assistant",
+                        "rawFinish": "tool_calls",
+                        "content": [{"type": "tool", "name": "read", "id": "call-123"}],
+                    }
+                ]
+            }
+        return {"data": {"id": "ses_raw_finish_test", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(exit_code=1, duration_seconds=10.0, stderr="Unexpected EOF before terminal event."),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_raw_finish_test", cwd=tmp_path)
+        assert recovered is None
+        assert "incomplete tool call step" in orig_event.result.metadata.get("recovery_failure_reason", "")
+        assert orig_event.result.metadata.get("finish_reason") == "tool_calls"
+
+
+def test_recover_session_user_message_type_rejected(tmp_path):
+    """Verify message with type='user' (without role) is rejected as unexpected role."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_user_msg_test"
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_user_001",
+                        "type": "user",
+                        "content": [{"type": "text", "text": "Please run audit"}],
+                    }
+                ]
+            }
+        return {"data": {"id": "ses_user_msg_test", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(exit_code=1, duration_seconds=10.0, stderr="Unexpected EOF before terminal event."),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_user_msg_test", cwd=tmp_path)
+        assert recovered is None
+        assert "expected 'assistant'" in orig_event.result.metadata.get("recovery_failure_reason", "")
+
+
+def test_recover_session_tool_use_spelling_rejected(tmp_path):
+    """Verify rawFinish='tool_use' (Anthropic spelling) is rejected as incomplete tool step."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_tool_use_test"
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_tool_use_pending",
+                        "type": "assistant",
+                        "rawFinish": "tool_use",
+                        "content": [{"type": "tool_use", "name": "bash", "id": "call-456"}],
+                    }
+                ]
+            }
+        return {"data": {"id": "ses_tool_use_test", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(exit_code=1, duration_seconds=10.0, stderr="Unexpected EOF before terminal event."),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_tool_use_test", cwd=tmp_path)
+        assert recovered is None
+        assert "incomplete tool call step" in orig_event.result.metadata.get("recovery_failure_reason", "")
+        assert orig_event.result.metadata.get("finish_reason") == "tool_use"
+
+
+def test_recover_session_finish_interrupted_rejected(tmp_path):
+    """Verify finish status 'interrupted' is rejected cleanly."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_interrupted_test"
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_interrupted",
+                        "role": "assistant",
+                        "finish": "interrupted",
+                        "content": [],
+                    }
+                ]
+            }
+        return {"data": {"id": "ses_interrupted_test", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(exit_code=1, duration_seconds=10.0, stderr="Unexpected EOF before terminal event."),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_interrupted_test", cwd=tmp_path)
+        assert recovered is None
+        assert "finish status was 'interrupted'" in orig_event.result.metadata.get("recovery_failure_reason", "")
+
+
+def test_recover_session_reasoning_and_valid_text_succeeds(tmp_path):
+    """Verify assistant message with both reasoning and valid text recovers text without reasoning leakage."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_reasoning_and_text"
+
+    audit_text = "# Code Audit\nAll checks pass.\n```yaml\nROLE: CRITIC\nSTATUS: APPROVED\n```"
+    reasoning_text = "Private chain of thought: the code looks completely sound."
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_complete_with_reasoning",
+                        "type": "assistant",
+                        "finish": "stop",
+                        "content": [
+                            {"type": "reasoning", "text": reasoning_text},
+                            {"type": "text", "text": audit_text},
+                        ],
+                    }
+                ]
+            }
+        return {
+            "data": {
+                "id": "ses_reasoning_and_text",
+                "outcome": "succeeded",
+                "tokens": {"input": 2000, "output": 300, "reasoning": 150},
+            }
+        }
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(exit_code=1, duration_seconds=15.0, stderr="Unexpected EOF before terminal event."),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_reasoning_and_text", cwd=tmp_path)
+        assert recovered is not None
+        rec_event, rec_resp = recovered
+        assert rec_event.event_type == AgentEventType.COMPLETE
+        assert rec_event.result.exit_code == 0
+        assert rec_event.result.stdout == audit_text
+        assert audit_text in rec_resp.stdout
+        # Assert private reasoning is NOT in stdout or raw_output
+        assert reasoning_text not in rec_event.result.stdout
+        assert reasoning_text not in rec_resp.stdout
+
+
+def test_recover_session_invalid_message_object_rejected(tmp_path):
+    """Verify recovery rejects daemon response when data array contains a non-dict object."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_invalid_obj_test"
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {"data": [None]}
+        return {"data": {"id": "ses_invalid_obj_test", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(exit_code=1, duration_seconds=10.0, stderr="Unexpected EOF before terminal event."),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_invalid_obj_test", cwd=tmp_path)
+        assert recovered is None
+        assert "Invalid or empty assistant message object" in orig_event.result.metadata.get("recovery_failure_reason", "")
+
+
+def test_recover_session_tool_turn_with_preface_text_rejected(tmp_path):
+    """Verify tool turn with preface text (e.g. Turn 1) cannot be mistaken for a completed audit."""
+    adapter = OpenCodeAdapter(extra_flags={"recovery_timeout": 5.0, "recovery_poll_interval": 0.1})
+    adapter._session_id = "ses_tool_preface_test"
+
+    preface_text = "I'll start by examining the repository state and recent changes."
+
+    def mock_query(endpoint, method="GET", cwd=None, timeout=10.0):
+        if "message" in endpoint:
+            return {
+                "data": [
+                    {
+                        "id": "msg_turn1_preface",
+                        "type": "assistant",
+                        "finish": "tool-calls",
+                        "content": [
+                            {"type": "text", "text": preface_text},
+                            {"type": "tool", "name": "git_status", "id": "call-001"},
+                        ],
+                    }
+                ]
+            }
+        return {"data": {"id": "ses_tool_preface_test", "outcome": "succeeded"}}
+
+    with patch.object(adapter, "_resolve_binary", return_value=("/bin/opencode", None)), \
+         patch.object(adapter, "_query_daemon_api", side_effect=mock_query):
+
+        orig_event = AgentEvent(
+            event_type=AgentEventType.ERROR,
+            timestamp=time.time(),
+            text="Unexpected EOF before terminal event.",
+            result=ExecutionResult(exit_code=1, duration_seconds=10.0, stderr="Unexpected EOF before terminal event."),
+        )
+        recovered = adapter.recover_session(terminal_event=orig_event, session_id="ses_tool_preface_test", cwd=tmp_path)
+        assert recovered is None
+        meta = orig_event.result.metadata
+        assert meta.get("recovery_failed") is True
+        assert meta.get("has_tools") is True
+        assert "incomplete tool call step" in meta.get("recovery_failure_reason", "")
+
+
+
+
+
 # ===========================================================================
 # 8. Run-012 Regression Tests: ECONNRESET, Writer Arbitration, UNKNOWN Handling
 # ===========================================================================

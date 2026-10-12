@@ -1595,23 +1595,71 @@ class OpenCodeAdapter(BaseAdapter):
             return None
 
         latest_msg = raw_items[0] if isinstance(raw_items[0], dict) else {}
-        msg_role = latest_msg.get("role", "assistant")
+        if not latest_msg:
+            reason = "Invalid or empty assistant message object returned by OpenCode daemon."
+            logger.warning("Session recovery failed for %s: %s", sid, reason)
+            self._record_recovery_failure(terminal_event, response, reason)
+            return None
+
+        msg_role = latest_msg.get("role") or latest_msg.get("type", "assistant")
         if msg_role != "assistant":
             reason = f"Latest message in session had role '{msg_role}', expected 'assistant'."
             logger.warning("Session recovery failed for %s: %s", sid, reason)
             self._record_recovery_failure(terminal_event, response, reason)
             return None
 
-        finish_reason = latest_msg.get("finish")
-        if finish_reason in ("error", "failed", "aborted", "cancelled"):
+        finish_reason = latest_msg.get("finish") or latest_msg.get("finish_reason") or latest_msg.get("rawFinish")
+        if finish_reason in ("error", "failed", "aborted", "cancelled", "interrupted"):
             reason = f"Final assistant message finish status was '{finish_reason}'."
             logger.warning("Session recovery failed for %s: %s", sid, reason)
-            self._record_recovery_failure(terminal_event, response, reason)
+            self._record_recovery_failure(
+                terminal_event,
+                response,
+                reason,
+                extra_metadata={"finish_reason": finish_reason, "message_id": latest_msg.get("id")},
+            )
+            return None
+
+        # Recognized tool-call finish reasons across supported providers and gateways:
+        # - "tool-calls": OpenCode native normalized status
+        # - "tool_calls": OpenAI Chat Completions API standard (and OpenCode rawFinish)
+        # - "tool_use": Anthropic Claude Messages API standard stop_reason
+        # - "tool_call", "function_call": Ollama, OpenAI legacy, and LiteLLM conventions
+        # - Hyphenated variants: OpenCode kebab-case schema normalizations
+        tool_finish_reasons = (
+            "tool-calls",
+            "tool_calls",
+            "tool-call",
+            "tool_call",
+            "tool-use",
+            "tool_use",
+            "function-call",
+            "function_call",
+            "function-calls",
+            "function_calls",
+        )
+        if finish_reason in tool_finish_reasons:
+            reason = f"Final assistant message is an incomplete tool call step (finish status '{finish_reason}')."
+            logger.warning("Session recovery failed for %s: %s", sid, reason)
+            self._record_recovery_failure(
+                terminal_event,
+                response,
+                reason,
+                session_active=False,
+                session_stopped=True,
+                extra_metadata={
+                    "finish_reason": finish_reason,
+                    "message_id": latest_msg.get("id"),
+                    "has_tools": True,
+                },
+            )
             return None
 
         content = latest_msg.get("content", [])
 
         text_blocks: List[str] = []
+        has_reasoning = False
+        has_tools = False
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict):
@@ -1620,6 +1668,10 @@ class OpenCodeAdapter(BaseAdapter):
                         t = block.get("text", "")
                         if t:
                             text_blocks.append(str(t))
+                    elif b_type == "reasoning":
+                        has_reasoning = True
+                    elif b_type in ("tool", "tool_use", "tool_call", "action"):
+                        has_tools = True
                 elif isinstance(block, str):
                     if block:
                         text_blocks.append(block)
@@ -1628,9 +1680,27 @@ class OpenCodeAdapter(BaseAdapter):
 
         recovered_text = "".join(text_blocks)
         if not recovered_text.strip():
-            reason = "Final assistant message contained empty text content."
+            if has_reasoning and not has_tools:
+                reason = "Final assistant message contained reasoning content but empty text content."
+            elif has_tools:
+                reason = "Final assistant message contained tool calls but empty text content."
+            else:
+                reason = "Final assistant message contained empty text content."
             logger.warning("Session recovery failed for %s: %s", sid, reason)
-            self._record_recovery_failure(terminal_event, response, reason)
+            extra_meta = {
+                "message_id": latest_msg.get("id"),
+                "finish_reason": finish_reason,
+                "has_reasoning": has_reasoning,
+                "has_tools": has_tools,
+            }
+            self._record_recovery_failure(
+                terminal_event,
+                response,
+                reason,
+                session_active=False,
+                session_stopped=True,
+                extra_metadata=extra_meta,
+            )
             return None
 
         token_usage: Dict[str, int] = {}
@@ -1701,6 +1771,7 @@ class OpenCodeAdapter(BaseAdapter):
         reason: str,
         session_active: bool = False,
         session_stopped: bool = True,
+        extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Annotate terminal event and response with diagnostic metadata when recovery fails."""
         diag_msg = f"[Session Recovery Attempted: Failed - {reason}]"
@@ -1712,6 +1783,8 @@ class OpenCodeAdapter(BaseAdapter):
             terminal_event.result.metadata["recovery_failure_reason"] = reason
             terminal_event.result.metadata["session_active"] = session_active
             terminal_event.result.metadata["session_stopped"] = session_stopped
+            if extra_metadata:
+                terminal_event.result.metadata.update(extra_metadata)
             if terminal_event.result.stderr:
                 terminal_event.result.stderr = f"{terminal_event.result.stderr}\n{diag_msg}"
             else:
@@ -1725,6 +1798,8 @@ class OpenCodeAdapter(BaseAdapter):
             response.metadata["recovery_failure_reason"] = reason
             response.metadata["session_active"] = session_active
             response.metadata["session_stopped"] = session_stopped
+            if extra_metadata:
+                response.metadata.update(extra_metadata)
             if response.stderr:
                 response.stderr = f"{response.stderr}\n{diag_msg}"
             else:

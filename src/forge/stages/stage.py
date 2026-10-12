@@ -709,7 +709,9 @@ class Stage:
             )
             success = False
 
-        raw_markdown = response.stdout or response.raw_output
+        raw_markdown = response.stdout or (
+            response.raw_output if not self._is_ndjson(response.raw_output) else ""
+        )
         result = StageResult(
             role=self.role,
             prompt=rendered_prompt,
