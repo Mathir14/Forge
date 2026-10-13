@@ -132,6 +132,305 @@ def test_apply_event_streaming_chunk_and_tools(temp_run_dir: Path):
     assert any("TOOL_FINISH: edit_file" in line for line in model.console_logs)
 
 
+def test_apply_event_standalone_tool_finish_displays_arguments(temp_run_dir: Path):
+    """Verify standalone TOOL_FINISH without prior TOOL_START formats and displays arguments."""
+    model = RunModel.from_dir(temp_run_dir)
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_FINISH,
+        timestamp=time.time(),
+        text="shell",
+        data={
+            "stage_name": "architect",
+            "tool": "shell",
+            "call_id": "call-sh-1",
+            "input": {"command": "git status"},
+            "status": "completed",
+        },
+    ))
+    assert any("TOOL_FINISH: shell ({'command': 'git status'})" in line for line in model.console_logs)
+
+
+def test_apply_event_paired_tool_start_and_finish_does_not_duplicate_arguments(temp_run_dir: Path):
+    """Verify paired TOOL_START and TOOL_FINISH displays arguments on start and avoids duplication on finish."""
+    model = RunModel.from_dir(temp_run_dir)
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_START,
+        timestamp=time.time(),
+        text="shell",
+        data={"stage_name": "architect", "tool": "shell", "call_id": "call-sh-2", "input": {"command": "ls -la"}},
+    ))
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_FINISH,
+        timestamp=time.time(),
+        text="shell",
+        data={"stage_name": "architect", "tool": "shell", "call_id": "call-sh-2", "input": {"command": "ls -la"}, "status": "completed"},
+    ))
+    assert any("⚡ TOOL_START: shell ({'command': 'ls -la'})" in line for line in model.console_logs)
+    assert any(line.endswith("✔ TOOL_FINISH: shell") for line in model.console_logs)
+    assert not any("✔ TOOL_FINISH: shell (" in line for line in model.console_logs)
+
+
+def test_apply_event_tool_error_formatting_and_red_styling(temp_run_dir: Path):
+    """Verify tool failure renders failure label and console_view styles line in bold red."""
+    from forge.dashboard.state import DashboardState
+    from forge.dashboard.components.console_view import render_console_view
+
+    model = RunModel.from_dir(temp_run_dir)
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_FINISH,
+        timestamp=time.time(),
+        text="run_command",
+        data={
+            "stage_name": "executor",
+            "tool": "run_command",
+            "call_id": "call-err-1",
+            "input": {"CommandLine": "cat missing.txt"},
+            "status": "error",
+            "error": True,
+        },
+    ))
+    assert any("✗ TOOL_ERROR: run_command ({'CommandLine': 'cat missing.txt'})" in line for line in model.console_logs)
+
+    state = DashboardState(run=model, focused_pane="content", active_tab=1)
+    panel = render_console_view(state)
+    assert panel is not None
+    rendered_text = panel.renderable
+    # Verify styled text contains the red error line
+    found_error_span = False
+    for span in rendered_text.spans:
+        if span.style == "bold red":
+            found_error_span = True
+            break
+    assert found_error_span, "Expected bold red style span for TOOL_ERROR in console_view"
+
+
+def test_apply_event_tool_calls_metadata_updated_on_finish_with_call_id(temp_run_dir: Path):
+    """Verify stage metadata tool_calls record updates from running to completed on unambiguous call_id."""
+    model = RunModel.from_dir(temp_run_dir)
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_START,
+        timestamp=time.time(),
+        text="edit_file",
+        data={"stage_name": "executor", "tool": "edit_file", "call_id": "c1", "input": {"file": "auth.py"}},
+    ))
+    stage = model.get_stage("executor")
+    assert len(stage.metadata["tool_calls"]) == 1
+    assert stage.metadata["tool_calls"][0]["status"] == "running"
+
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_FINISH,
+        timestamp=time.time(),
+        text="edit_file",
+        data={"stage_name": "executor", "tool": "edit_file", "call_id": "c1", "output": "file updated", "status": "completed"},
+    ))
+    assert len(stage.metadata["tool_calls"]) == 1
+    assert stage.metadata["tool_calls"][0]["status"] == "completed"
+    assert stage.metadata["tool_calls"][0]["output"] == "file updated"
+
+
+def test_apply_event_standalone_tool_finish_empty_input_clean_label(temp_run_dir: Path):
+    """Verify standalone TOOL_FINISH with empty input does not append empty parentheses."""
+    model = RunModel.from_dir(temp_run_dir)
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_FINISH,
+        timestamp=time.time(),
+        text="read",
+        data={"stage_name": "architect", "tool": "read", "input": {}, "status": "completed"},
+    ))
+    assert any(line.endswith("✔ TOOL_FINISH: read") for line in model.console_logs)
+    assert not any("✔ TOOL_FINISH: read (" in line for line in model.console_logs)
+
+
+def test_stage_boundary_clears_stale_tool_tracking_on_abnormal_termination_and_retry(temp_run_dir: Path):
+    """Verify tool tracking state does not leak across abnormal stage termination and retries."""
+    model = RunModel.from_dir(temp_run_dir)
+    arch_stage = model.get_stage("architect")
+    arch_key = arch_stage.stage_name if arch_stage else "architect"
+
+    # Attempt 1 of architect stage starts
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.CHUNK,
+        timestamp=time.time(),
+        text="",
+        data={"lifecycle": "stage_start", "stage_name": "architect", "sequence_number": 1},
+    ))
+    # In-flight tool call starts
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_START,
+        timestamp=time.time(),
+        text="read",
+        data={"stage_name": "architect", "tool": "read", "call_id": "c_stale_1", "input": {"file": "stale.txt"}},
+    ))
+    assert (arch_key, "c_stale_1") in model._started_tool_calls
+
+    # Attempt 1 terminates abnormally without TOOL_FINISH
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.CHUNK,
+        timestamp=time.time(),
+        text="",
+        data={"lifecycle": "stage_finish", "stage_name": "architect", "status": "FAILED", "duration_seconds": 1.0},
+    ))
+    # Stale tool tracking for architect should be purged on stage_finish
+    assert (arch_key, "c_stale_1") not in model._started_tool_calls
+
+    # Attempt 2 of architect stage starts
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.CHUNK,
+        timestamp=time.time(),
+        text="",
+        data={"lifecycle": "stage_start", "stage_name": "architect", "sequence_number": 1},
+    ))
+
+    # Attempt 2 emits standalone TOOL_FINISH with same call_id
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_FINISH,
+        timestamp=time.time(),
+        text="read",
+        data={"stage_name": "architect", "tool": "read", "call_id": "c_stale_1", "input": {"file": "fresh.txt"}, "status": "completed"},
+    ))
+    # Verify Attempt 2 renders tool arguments rather than suppressing them
+    assert any("✔ TOOL_FINISH: read ({'file': 'fresh.txt'})" in line for line in model.console_logs)
+
+
+def test_stage_boundary_clearing_preserves_other_stage_tracking(temp_run_dir: Path):
+    """Verify clearing tracking for one stage does not erase in-flight tracking for another stage."""
+    model = RunModel.from_dir(temp_run_dir)
+    arch_stage = model.get_stage("architect")
+    arch_key = arch_stage.stage_name if arch_stage else "architect"
+    plan_stage = model.get_stage("planner")
+    plan_key = plan_stage.stage_name if plan_stage else "planner"
+
+    # Start architect and initiate a tool call
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.CHUNK,
+        timestamp=time.time(),
+        data={"lifecycle": "stage_start", "stage_name": "architect", "sequence_number": 1},
+    ))
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_START,
+        timestamp=time.time(),
+        data={"stage_name": "architect", "tool": "shell", "call_id": "c_arch", "input": {"cmd": "ls"}},
+    ))
+
+    # Interleaved planner stage initiates a tool call
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_START,
+        timestamp=time.time(),
+        data={"stage_name": "planner", "tool": "shell", "call_id": "c_plan", "input": {"cmd": "pwd"}},
+    ))
+    assert (arch_key, "c_arch") in model._started_tool_calls
+    assert (plan_key, "c_plan") in model._started_tool_calls
+
+    # Finish architect stage
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.CHUNK,
+        timestamp=time.time(),
+        data={"lifecycle": "stage_finish", "stage_name": "architect", "status": "APPROVED", "duration_seconds": 2.0},
+    ))
+
+    # architect tool tracking is cleared, but planner tool tracking is strictly preserved
+    assert (arch_key, "c_arch") not in model._started_tool_calls
+    assert (plan_key, "c_plan") in model._started_tool_calls
+
+    # planner tool finish suppresses arguments because it was properly paired with its start
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_FINISH,
+        timestamp=time.time(),
+        data={"stage_name": "planner", "tool": "shell", "call_id": "c_plan", "status": "completed"},
+    ))
+    assert any(line.endswith("✔ TOOL_FINISH: shell") for line in model.console_logs)
+
+
+def test_stage_boundary_missing_ids_cleaned_up_on_retry(temp_run_dir: Path):
+    """Verify tool calls with empty/missing call_id are purged on boundary and behave correctly on retry."""
+    model = RunModel.from_dir(temp_run_dir)
+    exec_stage = model.get_stage("executor")
+    exec_key = exec_stage.stage_name if exec_stage else "executor"
+
+    # Attempt 1 starts
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.CHUNK,
+        timestamp=time.time(),
+        data={"lifecycle": "stage_start", "stage_name": "executor", "sequence_number": 2},
+    ))
+    # Tool start with missing call_id
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_START,
+        timestamp=time.time(),
+        data={"stage_name": "executor", "tool": "edit_file", "call_id": "", "input": {"file": "old.py"}},
+    ))
+    assert model._open_unidentified_tools.get((exec_key, "edit_file"), 0) == 1
+
+    # Stage encounters engine ERROR
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.ERROR,
+        timestamp=time.time(),
+        text="Process killed by SIGKILL",
+        data={"stage_name": "executor"},
+    ))
+    # Unidentified tool tracking for executor must be purged
+    assert model._open_unidentified_tools.get((exec_key, "edit_file"), 0) == 0
+
+    # Attempt 2 starts
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.CHUNK,
+        timestamp=time.time(),
+        data={"lifecycle": "stage_start", "stage_name": "executor", "sequence_number": 2},
+    ))
+    # Standalone finish with missing call_id in attempt 2
+    model.apply_event(AgentEvent(
+        event_type=AgentEventType.TOOL_FINISH,
+        timestamp=time.time(),
+        data={"stage_name": "executor", "tool": "edit_file", "call_id": "", "input": {"file": "new.py"}, "status": "completed"},
+    ))
+    # Must display arguments rather than assuming it was paired with Attempt 1's dead start
+    assert any("✔ TOOL_FINISH: edit_file ({'file': 'new.py'})" in line for line in model.console_logs)
+
+
+def test_console_view_styling_narrow_error_matching(temp_run_dir: Path):
+    """Verify console styling restricts bold red to TOOL_ERROR and stage/run ERROR, preserving plain narration."""
+    model = RunModel.from_dir(temp_run_dir)
+
+    model.console_logs = [
+        "  ✗ TOOL_ERROR: shell",
+        "✗ [Executor] ERROR: command timed out",
+        "  ✗ Unit test assertion failure in test_auth.py",
+        "  ✔ TOOL_FINISH: shell",
+        "▶ [architect] Stage execution started",
+        "✓ [architect] Finished with status: APPROVED (1.0s)",
+        "  ⚡ TOOL_START: run_command",
+    ]
+
+    state = DashboardState(run=model, focused_pane="content", active_tab=1)
+    panel = render_console_view(state)
+    assert panel is not None
+    rendered_text = panel.renderable
+
+    # Map each line in plain text to its applied style (if any)
+    line_styles = {}
+    for line in model.console_logs:
+        line_styles[line] = None
+
+    for span in rendered_text.spans:
+        span_slice = rendered_text.plain[span.start:span.end].strip()
+        for log_line in model.console_logs:
+            if span_slice == log_line.strip():
+                line_styles[log_line] = span.style
+
+    # 1. TOOL_ERROR is bold red
+    assert line_styles["  ✗ TOOL_ERROR: shell"] == "bold red"
+    # 2. ✗ [Executor] ERROR: ... is bold red
+    assert line_styles["✗ [Executor] ERROR: command timed out"] == "bold red"
+    # 3. Indented agent narration starting with ✗ is NOT bold red (default None)
+    assert line_styles["  ✗ Unit test assertion failure in test_auth.py"] is None
+    # 4. Normal TOOL_FINISH is green
+    assert line_styles["  ✔ TOOL_FINISH: shell"] == "green"
+    # 5. Other markers styled correctly
+    assert line_styles["▶ [architect] Stage execution started"] == "bold cyan"
+    assert line_styles["✓ [architect] Finished with status: APPROVED (1.0s)"] == "bold green"
+    assert line_styles["  ⚡ TOOL_START: run_command"] == "bold yellow"
+
+
 def test_apply_event_complete_and_error(temp_run_dir: Path):
     """Verify COMPLETE and ERROR stream events parse reports and update status."""
     model = RunModel.from_dir(temp_run_dir)

@@ -43,11 +43,12 @@ def render_console_view(state: DashboardState, max_lines: int = 35) -> Panel:
             text.append(f"[Lines {start + 1}–{end} of {total_lines}] (Auto-scroll: {'OFF' if state.scroll_offset > 0 else 'ON'})\n\n", style="dim")
 
         for line in visible_logs:
-            if line.startswith("▶"):
+            stripped = line.strip()
+            if stripped.startswith("▶"):
                 text.append(line + "\n", style="bold cyan")
-            elif line.startswith("✓"):
+            elif stripped.startswith("✓"):
                 text.append(line + "\n", style="bold green")
-            elif line.startswith("✗"):
+            elif "TOOL_ERROR" in line or (stripped.startswith("✗ [") and "] ERROR" in stripped):
                 text.append(line + "\n", style="bold red")
             elif "TOOL_START" in line:
                 text.append(line + "\n", style="bold yellow")

@@ -1,4 +1,9 @@
-"""OpenAI Codex CLI adapter."""
+"""OpenAI Codex CLI adapter.
+
+Note: CodexAdapter executes synchronously via non-streaming batch CLI ('codex exec').
+Internal model tool invocations are encapsulated by the Codex engine and are not
+observable as discrete stream events on the host event bus.
+"""
 
 import logging
 import shutil

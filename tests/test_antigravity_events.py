@@ -675,7 +675,37 @@ def test_antigravity_step_update_tool_error_decoded():
     assert events[0].data["tool"] == "replace_file_content"
     assert events[0].data["error"] is True
     assert events[0].data["status"] == "error"
+    assert events[0].data["output"] == "FileNotFoundError: /path/to/missing.py"
     assert events[1].event_type == AgentEventType.COMPLETE
+
+
+def test_antigravity_tool_error_does_not_overwrite_existing_output():
+    """Verify tool failure does not overwrite existing output when output is already present."""
+    adapter = AntigravityAdapter()
+    stream = [
+        json.dumps({
+            "event": "step_update",
+            "step_update": {
+                "step_index": 4,
+                "state": "DONE",
+                "step_type": "tool",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "name": "run_command",
+                    "output": "Partial execution trace",
+                    "error": "TimeoutExpired",
+                },
+            },
+        }),
+        json.dumps({"event": "result", "status": "success"}),
+    ]
+
+    events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+    assert len(events) == 2
+    assert events[0].data["tool"] == "run_command"
+    assert events[0].data["error"] is True
+    assert events[0].data["status"] == "error"
+    assert events[0].data["output"] == "Partial execution trace"
 
 
 def test_antigravity_full_captured_stream_decoding(caplog):

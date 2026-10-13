@@ -94,6 +94,8 @@ class RunModel:
     active_stage_name: Optional[str] = None
     stage_start_times: Dict[str, float] = field(default_factory=dict)
     summary: Optional[Any] = None
+    _started_tool_calls: Set[Tuple[str, str]] = field(default_factory=set, repr=False)
+    _open_unidentified_tools: Dict[Tuple[str, str], int] = field(default_factory=dict, repr=False)
 
     @property
     def task_fingerprint(self) -> str:
@@ -120,6 +122,17 @@ class RunModel:
             if s.role_name.lower() == target:
                 return s
         return None
+
+    def _clear_stage_tool_tracking(self, stage_name: str) -> None:
+        """Purge in-flight tool tracking state for a specific stage boundary."""
+        if not stage_name:
+            return
+        self._started_tool_calls = {
+            k for k in self._started_tool_calls if k[0] != stage_name
+        }
+        self._open_unidentified_tools = {
+            k: v for k, v in self._open_unidentified_tools.items() if k[0] != stage_name
+        }
 
     def apply_event(self, event: AgentEvent) -> None:
         """Process a live AgentEvent and incrementally update in-memory run state."""
@@ -174,6 +187,10 @@ class RunModel:
                         stage.duration_seconds = 0.0
                     stage.status = "RUNNING"
 
+                self._clear_stage_tool_tracking(stage.stage_name)
+                if s_name != stage.stage_name:
+                    self._clear_stage_tool_tracking(s_name)
+
                 self.active_stage_name = stage.stage_name
                 self.stage_start_times[stage.stage_name] = ts
                 self.is_active = True
@@ -220,6 +237,8 @@ class RunModel:
                     sequence_number=ev_data.get("sequence_number"),
                 )
             self._add_log(f"⏭ [{disp_name}] Skipped (already completed with status '{sk_status}')")
+            if s_name:
+                self._clear_stage_tool_tracking(s_name)
             return
 
         # 2. Lifecycle: stage_finish
@@ -253,6 +272,9 @@ class RunModel:
                             sequence_number=stage.sequence_number,
                         )
                     self._add_log(f"✓ [{stage.stage_name}] Finished with status: {stage.status} ({stage.duration_seconds:.1f}s)")
+                    self._clear_stage_tool_tracking(stage.stage_name)
+                    if s_name != stage.stage_name:
+                        self._clear_stage_tool_tracking(s_name)
             return
 
         # 3. Locate active stage for stream events
@@ -288,7 +310,8 @@ class RunModel:
         # 5. Stream Event: TOOL_START
         elif event.event_type == AgentEventType.TOOL_START:
             tool_name = ev_data.get("tool") or event.text or "tool"
-            call_id = ev_data.get("call_id", "")
+            raw_cid = ev_data.get("call_id")
+            call_id = str(raw_cid) if raw_cid is not None and str(raw_cid).strip() else ""
             tool_input = ev_data.get("input", {})
             if target_stage:
                 if "tool_calls" not in target_stage.metadata:
@@ -301,12 +324,49 @@ class RunModel:
                     "status": "running",
                 })
             inp_summary = str(tool_input)[:50] if tool_input else ""
+            stage_key = target_stage.stage_name if target_stage else (self.active_stage_name or "")
+            if call_id:
+                self._started_tool_calls.add((stage_key, call_id))
+            else:
+                self._open_unidentified_tools[(stage_key, tool_name)] = self._open_unidentified_tools.get((stage_key, tool_name), 0) + 1
             self._add_log(f"  ⚡ TOOL_START: {tool_name} ({inp_summary})")
 
         # 6. Stream Event: TOOL_FINISH
         elif event.event_type == AgentEventType.TOOL_FINISH:
             tool_name = ev_data.get("tool") or event.text or "tool"
-            self._add_log(f"  ✔ TOOL_FINISH: {tool_name}")
+            raw_cid = ev_data.get("call_id")
+            call_id = str(raw_cid) if raw_cid is not None and str(raw_cid).strip() else ""
+            tool_input = ev_data.get("input", {})
+            tool_output = ev_data.get("output")
+            is_err = bool(ev_data.get("error") or str(ev_data.get("status", "")).lower() in ("error", "failed"))
+            stage_key = target_stage.stage_name if target_stage else (self.active_stage_name or "")
+
+            # Check if this invocation was preceded by an observed TOOL_START
+            had_prior_start = False
+            if call_id and (stage_key, call_id) in self._started_tool_calls:
+                self._started_tool_calls.discard((stage_key, call_id))
+                had_prior_start = True
+            elif not call_id and self._open_unidentified_tools.get((stage_key, tool_name), 0) > 0:
+                self._open_unidentified_tools[(stage_key, tool_name)] -= 1
+                had_prior_start = True
+
+            # If unambiguous call_id exists, update matching running record in stage metadata
+            if target_stage and call_id and "tool_calls" in target_stage.metadata:
+                for rec in target_stage.metadata["tool_calls"]:
+                    if str(rec.get("call_id", "")) == call_id and rec.get("status") == "running":
+                        rec["status"] = "error" if is_err else "completed"
+                        if tool_output is not None:
+                            rec["output"] = tool_output
+                        break
+
+            # Render log: include input summary on standalone finish when arguments were not shown on start
+            inp_summary = str(tool_input)[:50] if tool_input else ""
+            arg_suffix = f" ({inp_summary})" if (inp_summary and not had_prior_start) else ""
+
+            if is_err:
+                self._add_log(f"  ✗ TOOL_ERROR: {tool_name}{arg_suffix}")
+            else:
+                self._add_log(f"  ✔ TOOL_FINISH: {tool_name}{arg_suffix}")
 
         # 7. Stream Event: COMPLETE
         elif event.event_type == AgentEventType.COMPLETE:
@@ -338,6 +398,7 @@ class RunModel:
             if target_stage:
                 target_stage.status = "FAILED"
                 target_stage.has_error = True
+                self._clear_stage_tool_tracking(target_stage.stage_name)
                 if event.result:
                     target_stage.exit_code = event.result.exit_code or 1
                     target_stage.duration_seconds = event.result.duration_seconds

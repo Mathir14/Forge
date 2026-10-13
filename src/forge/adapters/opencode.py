@@ -711,11 +711,23 @@ class OpenCodeAdapter(BaseAdapter):
         tool_input = state.get("input") or payload.get("input") or {}
         tool_output = state.get("output") or payload.get("output")
 
-        if (
+        raw_error = state.get("error") or payload.get("error") or part.get("error")
+        status_str = str(status).lower() if status is not None else ""
+        is_err = bool(raw_error or status_str in ("error", "failed"))
+
+        if tool_output is None and raw_error:
+            if isinstance(raw_error, dict):
+                tool_output = raw_error.get("message") or raw_error.get("error") or str(raw_error)
+            else:
+                tool_output = str(raw_error)
+
+        is_start = (
             event_type == "tool_start"
             or status == "running"
-            or (status is None and tool_output is None and event_type != "tool_finish")
-        ):
+            or (status is None and tool_output is None and raw_error is None and event_type != "tool_finish")
+        )
+
+        if is_start:
             return AgentEvent(
                 event_type=AgentEventType.TOOL_START,
                 timestamp=ts,
@@ -728,6 +740,7 @@ class OpenCodeAdapter(BaseAdapter):
                 },
             )
         else:
+            norm_status = "error" if is_err else (status or "completed")
             return AgentEvent(
                 event_type=AgentEventType.TOOL_FINISH,
                 timestamp=ts,
@@ -735,7 +748,8 @@ class OpenCodeAdapter(BaseAdapter):
                 data={
                     "tool": tool_name,
                     "call_id": call_id,
-                    "status": status or "completed",
+                    "status": norm_status,
+                    "error": is_err,
                     "output": tool_output,
                     "input": tool_input,
                     "session_id": session_id,

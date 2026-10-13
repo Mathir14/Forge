@@ -162,6 +162,100 @@ def test_opencode_tool_finish_events():
     assert events[1].data["output"] == "Wrote 42 bytes"
 
 
+def test_opencode_tool_error_preserves_error_string_and_flag():
+    """Verify tool failure preserves error string in output and sets error=True and status='error'."""
+    adapter = OpenCodeAdapter()
+    stream = [
+        json.dumps({
+            "type": "tool_use",
+            "timestamp": 1789970487500,
+            "sessionID": "ses_err",
+            "part": {
+                "type": "tool",
+                "tool": "shell",
+                "callID": "call-err-1",
+                "state": {
+                    "status": "error",
+                    "error": "Command failed: exit code 127",
+                    "input": {"command": "invalid_cmd"},
+                },
+            },
+        }),
+        json.dumps({
+            "type": "step_finish",
+            "part": {"reason": "stop"},
+        }),
+    ]
+
+    events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+    assert len(events) == 2
+    assert events[0].event_type == AgentEventType.TOOL_FINISH
+    assert events[0].data["tool"] == "shell"
+    assert events[0].data["call_id"] == "call-err-1"
+    assert events[0].data["status"] == "error"
+    assert events[0].data["error"] is True
+    assert events[0].data["output"] == "Command failed: exit code 127"
+    assert events[0].data["input"] == {"command": "invalid_cmd"}
+    assert events[1].event_type == AgentEventType.COMPLETE
+
+
+def test_opencode_tool_error_does_not_overwrite_existing_output():
+    """Verify tool failure does not overwrite meaningful existing output with error text."""
+    adapter = OpenCodeAdapter()
+    stream = [
+        json.dumps({
+            "type": "tool_use",
+            "part": {
+                "tool": "shell",
+                "callID": "call-err-2",
+                "state": {
+                    "status": "error",
+                    "output": "Partial standard output before crash",
+                    "error": "Segmentation fault",
+                    "input": {"command": "crash_test"},
+                },
+            },
+        }),
+        json.dumps({
+            "type": "step_finish",
+            "part": {"reason": "stop"},
+        }),
+    ]
+
+    events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+    assert len(events) == 2
+    assert events[0].data["status"] == "error"
+    assert events[0].data["error"] is True
+    assert events[0].data["output"] == "Partial standard output before crash"
+    assert events[0].data["input"] == {"command": "crash_test"}
+    assert events[1].event_type == AgentEventType.COMPLETE
+
+
+def test_opencode_tool_events_missing_optional_fields():
+    """Verify minimal or missing payload fields do not raise and produce safe defaults."""
+    adapter = OpenCodeAdapter()
+    stream = [
+        json.dumps({
+            "type": "tool_finish",
+        }),
+        json.dumps({
+            "type": "step_finish",
+            "part": {"reason": "stop"},
+        }),
+    ]
+
+    events = list(adapter._decode_stream_events(stream, start_time=time.time()))
+    assert len(events) == 2
+    assert events[0].event_type == AgentEventType.TOOL_FINISH
+    assert events[0].data["tool"] == "tool"
+    assert events[0].data["call_id"] == ""
+    assert events[0].data["status"] == "completed"
+    assert events[0].data["error"] is False
+    assert events[0].data["output"] is None
+    assert events[0].data["input"] == {}
+    assert events[1].event_type == AgentEventType.COMPLETE
+
+
 # ---------------------------------------------------------------------------
 # 3. Terminal COMPLETE & Intermediate Steps
 # ---------------------------------------------------------------------------

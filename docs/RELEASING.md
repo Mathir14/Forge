@@ -106,8 +106,8 @@ To cut a new release:
 ### Step 1: Bump Version & Validate Locally
 
 Update the version in:
-- `pyproject.toml` (e.g. `version = "0.1.0b13"`)
-- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b13"`)
+- `pyproject.toml` (e.g. `version = "0.1.0b14"`)
+- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b14"`)
 
 Run local tests to confirm:
 ```bash
@@ -117,11 +117,11 @@ pytest
 ### Step 2: Commit and Tag
 
 ```bash
-git commit -am "chore: release v0.1.0b13"
+git commit -am "chore: release v0.1.0b14"
 git push origin master
 
-git tag -a v0.1.0b13 -m "Release v0.1.0b13"
-git push origin v0.1.0b13
+git tag -a v0.1.0b14 -m "Release v0.1.0b14"
+git push origin v0.1.0b14
 ```
 
 ### Step 3: Monitor Staged Release in GitHub Actions
@@ -151,7 +151,20 @@ git push origin v0.1.0b13
 
 ---
 
-## 6. Release Notes: v0.1.0b13
+## 6. Release Notes: v0.1.0b14
+
+`v0.1.0b14` delivers cross-adapter tool-event rendering reliability, stage-boundary tool-tracking isolation, adapter session recovery hardening, and platform-safe duration testing:
+
+- **OpenCode Session Recovery Hardening & Artifact Extraction**: Hardened adapter session recovery transport handling and diagnostics in `OpenCodeAdapter` and `Stage.run()`, bounded session retry attempts, ensured stderr/stdout fallback streams are extracted properly into stage deliverables, and expanded regression test suites.
+- **Cross-Platform Duration Assertion Resilience**: Made sub-second duration assertions Windows-safe in `tests/test_run016_regressions.py`, handling coarse OS clock granularity (`0.0s`) on fast mock executions.
+- **Standalone Tool-Finish Argument Rendering**: Instrumented `RunModel.apply_event` to detect standalone `TOOL_FINISH` events from batch CLI adapters (e.g. OpenCode batch execution) and format invocation input arguments inline (`✔ TOOL_FINISH: tool ({args})`) rather than omitting them, while preserving clean names for paired start/finish streaming lifecycles (e.g. Antigravity streaming).
+- **Tool Error Diagnostics & Failure Preservation**: Updated `OpenCodeAdapter` and `AntigravityAdapter` to extract provider execution error payloads, flagging `data["error"] = True` and normalized `data["status"] = "error"`. Preserved error diagnostics in `data["output"]` without clobbering existing stdout/stderr text and prevented error events from routing to `TOOL_START`.
+- **Stage Boundary Tool-Tracking Isolation**: Added `RunModel._clear_stage_tool_tracking()` to purge dangling in-flight tool tracking keys from `_started_tool_calls` and `_open_unidentified_tools` at `stage_start`, `stage_finish`, `stage_skipped`, and `AgentEventType.ERROR` boundaries. Prevents in-flight tools from aborted stage attempts from contaminating retries, ensuring retried attempts display standalone tool arguments correctly while preserving tracking across concurrent/interleaved stages.
+- **Targeted Console Error Styling**: Restricted bold red text styling in `render_console_view` strictly to genuine `TOOL_ERROR` lines and stage/run `ERROR` lines (`"TOOL_ERROR" in line or (stripped.startswith("✗ [") and "] ERROR" in stripped)`). Ordinary agent streaming narration beginning with `✗` (e.g. indented test assertions or bullet points) retains default unstyled font.
+
+---
+
+## 7. Release Notes: v0.1.0b13
 
 `v0.1.0b13` addresses run-016 operational defects, Critic protocol validation hardening, Tester completion lifecycle propagation, and terminal dashboard scrolling responsiveness:
 
@@ -163,7 +176,7 @@ git push origin v0.1.0b13
 
 ---
 
-## 7. Release Notes: v0.1.0b12
+## 8. Release Notes: v0.1.0b12
 
 `v0.1.0b12` hardens agent recovery, working-tree concurrency, and lease portability across environments:
 
@@ -172,7 +185,7 @@ git push origin v0.1.0b13
 
 ---
 
-## 8. Release Notes: v0.1.0b11
+## 9. Release Notes: v0.1.0b11
 
 `v0.1.0b11` addresses findings RC-01 through RC-04 from the adversarial release-candidate audit:
 
@@ -183,7 +196,7 @@ git push origin v0.1.0b13
 
 ---
 
-## 9. Release Notes: v0.1.0b10
+## 10. Release Notes: v0.1.0b10
 
 `v0.1.0b10` is a corrective release following the `v0.1.0b9` Native Windows release:
 

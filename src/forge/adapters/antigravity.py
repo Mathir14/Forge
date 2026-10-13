@@ -250,6 +250,12 @@ class AntigravityAdapter(BaseAdapter):
             or state.get("input")
             or {}
         )
+        raw_error = (
+            tool_info.get("error")
+            or step_update.get("error")
+            or payload.get("error")
+            or part.get("error")
+        )
         tool_output = (
             tool_info.get("output")
             or tool_info.get("result")
@@ -259,6 +265,12 @@ class AntigravityAdapter(BaseAdapter):
             or payload.get("result")
             or state.get("output")
         )
+        if tool_output is None and raw_error:
+            if isinstance(raw_error, dict):
+                tool_output = raw_error.get("message") or raw_error.get("error") or str(raw_error)
+            else:
+                tool_output = str(raw_error)
+
         raw_status = (
             tool_info.get("status")
             or step_update.get("state")
@@ -268,17 +280,14 @@ class AntigravityAdapter(BaseAdapter):
         )
         status_str = str(raw_status).lower() if raw_status is not None else ""
         is_err = bool(
-            tool_info.get("error")
-            or step_update.get("error")
-            or payload.get("error")
-            or part.get("error")
+            raw_error
             or status_str in ("error", "failed")
         )
 
         is_start = (
             event_type in ("tool_start", "tool_call")
             or status_str in ("running", "active", "start")
-            or (raw_status is None and tool_output is None and event_type not in ("tool_finish", "tool_result"))
+            or (raw_status is None and tool_output is None and raw_error is None and event_type not in ("tool_finish", "tool_result"))
         )
 
         if is_start:
@@ -294,9 +303,7 @@ class AntigravityAdapter(BaseAdapter):
                 },
             )
         else:
-            norm_status = "completed" if status_str in ("done", "completed") else (raw_status or ("error" if is_err else "completed"))
-            if is_err:
-                norm_status = "error"
+            norm_status = "error" if is_err else ("completed" if status_str in ("done", "completed") else (raw_status or "completed"))
             return AgentEvent(
                 event_type=AgentEventType.TOOL_FINISH,
                 timestamp=ts,

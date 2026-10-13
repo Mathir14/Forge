@@ -227,7 +227,6 @@ class Stage:
         accumulated_stdout = ""
         accumulated_raw = ""
         token_usage: Dict[str, int] = {}
-        tool_calls: List[Dict[str, Any]] = []
         terminal_event: Optional[AgentEvent] = None
         timeout_reason: Optional[str] = None
         timeout_type: Optional[str] = None
@@ -389,8 +388,6 @@ class Stage:
                     elif event.event_type == AgentEventType.TOOL_START:
                         # Progress observed: reset idle timer
                         last_progress_time = time.time()
-                        if event.data:
-                            tool_calls.append(event.data)
 
                     elif event.event_type == AgentEventType.TOOL_FINISH:
                         # Progress observed: reset idle timer
