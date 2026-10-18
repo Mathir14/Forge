@@ -1,15 +1,14 @@
 """Execution context for active Forge stages."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional
 from forge.core.run import Run
 from forge.core.config import Config
-from forge.core.git import GitService
+from forge.core.git import GitBaseline, GitService
 from forge.core.role import Role
-
-if TYPE_CHECKING:
-    from forge.core.git import GitBaseline
 
 
 @dataclass

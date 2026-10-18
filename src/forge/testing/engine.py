@@ -9,6 +9,8 @@ Central coordinator that integrates:
 - Explicit coverage calculation and report compilation
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -44,6 +46,7 @@ from forge.testing.models import (
     DefectSeverity,
     Journey,
     JourneyResult,
+    JourneyStep,
     ProjectArchetype,
 )
 from forge.testing.planner import JourneyPlanner

@@ -4,6 +4,8 @@ Drives browser automation, monitors client telemetry, detects dead buttons,
 uncaught exceptions, failed network calls, and layout failures.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
@@ -23,6 +25,7 @@ from forge.testing.models import (
     DefectSeverity,
     Journey,
     JourneyResult,
+    JourneyStep,
 )
 
 logger = logging.getLogger(__name__)
