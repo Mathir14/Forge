@@ -1,11 +1,13 @@
 # Forge CLI Complete Reference Manual
 
-**Forge Version Inspected:** `0.1.0b11`  
-**Inspection Date:** 2026-10-07  
+**Forge Version Inspected:** `0.1.0b15`  
+**Inspection Date:** 2026-10-18  
 **Target Repository:** `/home/mathir/Forge`  
 **Verified Source Files:**
 - `src/forge/cli.py` (Command routing, argument parser, CLI error handling)
 - `src/forge/core/config.py` (Configuration cascade, schema, validation, inheritance)
+- `src/forge/core/git.py` (Git baseline capture, change attribution, auto-commit guards)
+- `src/forge/core/platform.py` (Cross-platform process groups, `taskkill` supervision, mandatory locking offset)
 - `src/forge/stages/stage.py` (Stage execution engine, streaming worker, timeouts, process tracking)
 - `src/forge/stages/definition.py` (Authoritative stage definitions, ordering, success statuses)
 - `src/forge/adapters/base.py` (Adapter base abstraction, process lifecycle, signal handlers)
@@ -14,10 +16,15 @@
 - `src/forge/adapters/antigravity.py` (Antigravity CLI adapter, argv transport, `--effort` handling)
 - `src/forge/adapters/codex.py` (OpenAI Codex CLI adapter, command construction)
 - `src/forge/dashboard/app.py` (Terminal UI layout, keyboard bindings, live event bus)
-- `src/forge/storage/run_manager.py` (Run directory structure, atomic artifact persistence)
-- `src/forge/storage/run_lock.py` (Exclusive run locking, ownership conflict diagnostics)
+- `src/forge/storage/run_manager.py` (Run directory structure, atomic artifact persistence, downstream invalidation)
+- `src/forge/storage/run_lock.py` (Exclusive run locking, ownership conflict diagnostics, stale lock recovery)
 - `src/forge/storage/knowledge.py` (Project Knowledge Base YAML projections, fact locking)
-- `src/forge/storage/git.py` (Git baseline capture, change attribution, auto-commit guards)
+- `src/forge/testing/engine.py` (Tester v2 engine orchestrator, journey execution)
+- `src/forge/testing/archetypes.py` (Application archetypes: WEB_SPA, API, CLI, LIBRARY)
+- `src/forge/testing/supervisor.py` (RuntimeSupervisor: process tree termination, port/env isolation)
+- `src/forge/testing/browser.py` (Browser driver factory, Playwright and MockBrowserDriver fallback)
+- `src/forge/testing/evidence.py` (Forensic evidence bundle generation)
+- `src/forge/protocol/validator.py` (Protocol validation rules, handoff checks)
 
 ---
 
@@ -39,6 +46,7 @@
    - [`forge execute`](#forge-execute)
    - [`forge test`](#forge-test)
    - [`forge review`](#forge-review)
+   - [`forge recover`](#forge-recover)
    - [`forge run`](#forge-run)
    - [`forge auto`](#forge-auto)
 6. [Subcommand Groups](#6-subcommand-groups)
@@ -68,23 +76,23 @@ forge [OPTIONS] COMMAND [ARGS]...
 
 | Option | Type | Description |
 |---|---|---|
-| `--version` | Flag | Displays the installed Forge version (`forge, version 0.1.0b11`) and exits immediately. |
+| `--version` | Flag | Displays the installed Forge version (`forge, version 0.1.0b15`) and exits immediately. |
 | `--help` | Flag | Displays top-level command list and usage summary. |
 
 ### Fundamental Design Principle: CLI Flags vs. Configuration
 
 > [!IMPORTANT]
-> In Forge v0.1.0b11, individual stage commands (`architect`, `planner`, `execute`, `test`, `review`, `critic`) **do not accept inline `--adapter`, `--model`, `--effort`, or `--timeout` flags**.
+> In Forge v0.1.0b15, individual stage commands (`architect`, `planner`, `execute`, `test`, `review`, `critic`) **do not accept inline `--adapter`, `--model`, `--effort`, or `--timeout` flags**.
 > 
 > Stage runtime settings (adapter selection, model IDs, reasoning effort, timeout limits, and approval policies) are configured declaratively in `forge.yaml` (or via `forge config set stages.<stage>.<property> <value>`).
 > 
-> CLI stage commands only accept positional task targets and run resumption switches (`--run <ID>`, `--post-run`). Pipeline commands (`forge run`, `forge auto`) accept pipeline execution flags (`--from-critic`, `--run`, `--auto-commit`, `--no-critic`, `--max-retries`, `--file`, `--dashboard`).
+> CLI stage commands only accept positional task targets and run resumption switches (`--run <ID>`, `--post-run`). Pipeline commands (`forge run`, `forge auto`) accept pipeline execution flags (`--from-critic`, `--run`, `--auto-commit`, `--no-critic`, `--max-retries`, `--file`, `--dashboard`). Administrative recovery is managed via `forge recover`.
 
 ---
 
 ## 2. Command Matrix
 
-Forge exposes **15 top-level commands** and **13 subcommands** (total **28 distinct command entry points**):
+Forge exposes **16 top-level command entry points** (14 top-level commands + 2 subcommand groups) and **13 subcommands** (total **29 distinct command entry points**):
 
 | Command | Arguments | Options | Interactive | Executes Agent | Modifies Workspace | Writes `.forge/` | Typical Purpose |
 |---|---|---|:---:|:---:|:---:|:---:|---|
@@ -99,6 +107,7 @@ Forge exposes **15 top-level commands** and **13 subcommands** (total **28 disti
 | `forge execute` | None | `--run TEXT`, `--help` | No | Yes | Yes (Writes code) | Yes (`03_executor.*`) | Implement approved plan into codebase |
 | `forge test` | None | `--run TEXT`, `--help` | No | Yes | Yes (Test harnesses, artifacts) | Yes (`04_tester.*`) | Black-box behavioral evaluation & browser testing |
 | `forge review` | None | `--run TEXT`, `--help` | No | Yes | No | Yes (`05_reviewer.*`) | Adversarial security and correctness code review |
+| `forge recover` | None | `--run TEXT` (req), `--stage TEXT` (req), `--session TEXT` (req), `--help` | No | No | No | Yes (`.forge/runs/run-XXX/`) | Reconstruct completed stage output from daemon session |
 | `forge run` | `[TASK]` | `-c/--from-critic`, `--run TEXT`, `--auto-commit`, `--no-critic`, `--help` | Yes (Prompt gates) | Yes | Yes | Yes | Standard step-by-step pipeline with manual confirmation |
 | `forge auto` | `[TASK]` | `-f/--file`, `-c`, `--run`, `-r/--max-retries`, `--auto-commit`, `--no-critic`, `-d/--dashboard`, `--help` | No (or TUI if `-d`) | Yes | Yes | Yes | Fully autonomous self-repair loop |
 | `forge config show` | None | `--raw`, `--json`, `--help` | No | No | No | No | Display effective configuration |
@@ -130,6 +139,7 @@ Forge exposes **15 top-level commands** and **13 subcommands** (total **28 disti
 | `forge init` | No | No | Creates `.ai/`, `forge.yaml`, `.gitignore` | Modifies `.gitignore` | **Low**: Will not overwrite existing role files or forge.yaml. |
 | `forge config set/edit/reset/auth-set` | No | No | Modifies `forge.yaml` or `~/.forge/config.yaml` | None | **Medium**: Can misconfigure timeouts/adapters; guarded by schema validation. |
 | `forge knowledge lock/unlock` | No | No | Modifies `.forge/knowledge/*.yaml` | None | **Low**: Changes fact lifecycle status metadata. |
+| `forge recover` | No | No | No | None | **Low**: Administrative recovery; reconstructs stage deliverables and transitions in run metadata; does not mutate source code. |
 | `forge critic` | No | **Yes** | Low (Inspects files, may run background shell tools) | Baseline capture | **Medium**: Invoked tools could alter files if auto-approved. |
 | `forge architect` | No | **Yes** | No (Generates specification artifact in `.forge/runs/`) | Baseline capture | **Low**: Read-only against repository code. |
 | `forge planner` | No | **Yes** | No (Generates plan artifact in `.forge/runs/`) | Baseline capture | **Low**: Read-only against repository code. |
@@ -143,7 +153,7 @@ Forge exposes **15 top-level commands** and **13 subcommands** (total **28 disti
 
 ## 4. The Multi-Agent Orchestration Pipeline
 
-Forge stages are ordered sequentially with strict prerequisite gates and status protocols:
+Forge stages are ordered sequentially with strict prerequisite gates, status protocols, and fail-closed arbitration:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -184,13 +194,36 @@ Forge stages are ordered sequentially with strict prerequisite gates and status 
 
 | Sequence | Stage Name | Phase | Default Adapter | Default Timeout | Prerequisite Gate | Success Statuses | Non-Success / Halt Statuses |
 |:---:|---|:---:|---|:---:|---|---|---|
-| `00` | `critic` | `pre_run` | `opencode` | 900s / 1200s | None | `CRITIQUE_COMPLETE`, `APPROVED`, `SUCCESS`, `COMPLETED`, `PASSED` | `FAILED`, `BLOCKED`, `REJECTED` |
+| `00` | `critic` | `pre_run` | `opencode` | 900s | None | `CRITIQUE_COMPLETE`, `APPROVED`, `SUCCESS`, `COMPLETED`, `PASSED` | `FAILED`, `BLOCKED`, `REJECTED` |
 | `01` | `architect` | `pre_run` | `opencode` | 900s | Valid `TASK` string or `--file` | `APPROVED`, `READY`, `SUCCESS`, `COMPLETED` | `FAILED`, `BLOCKED`, `REJECTED` |
 | `02` | `planner` | `pre_run` | `opencode` | 900s | Succeeded Stage 01 (`architect`) | `READY`, `APPROVED`, `SUCCESS`, `COMPLETED` | `FAILED`, `BLOCKED`, `REJECTED` |
-| `03` | `executor` | `pre_run` | `antigravity` | 1200s | Succeeded Stage 02 (`planner`) | `SUCCESS`, `APPROVED`, `COMPLETED` | `FAILED`, `BLOCKED`, `REJECTED` |
+| `03` | `executor` | `pre_run` | `antigravity` | 1200s | Succeeded Stage 02 (`planner`) | `SUCCESS`, `APPROVED`, `COMPLETED`, `COMPLETE` | `FAILED`, `BLOCKED`, `REJECTED` |
 | `04` | `tester` | `pre_run` | `opencode` | 900s | Succeeded Stage 03 (`executor`) | `PASS`, `APPROVED`, `SUCCESS`, `COMPLETED`, `NOT_TESTABLE` | `FAIL`, `FAILED`, `BLOCKED`, `CHANGES_REQUIRED` |
 | `05` | `reviewer` | `pre_run` | `opencode` | 900s | Succeeded Stage 03 (`executor`) | `APPROVED` | `CHANGES_REQUIRED`, `REJECTED`, `FAILED`, `BLOCKED` |
 | `06` | `critic` | `post_run` | `opencode` | 1200s | Succeeded Stage 05 (`reviewer`) | `CRITIQUE_COMPLETE`, `APPROVED`, `SUCCESS`, `COMPLETED`, `PASSED` | `FAILED`, `BLOCKED`, `REJECTED` |
+
+### Fail-Closed Verdict Arbitration & Depth Classification
+
+Forge enforces deterministic, fail-closed arbitration across pipeline stages:
+1. **Tester Verdict Arbitration**:
+   - `PASSED`: All executed journeys, probe assertions, or test suites completed without errors.
+   - `FAILED`: Any test assertion failed, syntax errors were raised, or deliverables were incomplete.
+   - `BLOCKED`: The application server could not be started, ports were in conflict, or prerequisite drivers were unavailable.
+2. **Reviewer Arbitration**:
+   - `APPROVED`: The git diff strictly addresses the planned work packages without regression, security vulnerabilities, or unbounded modifications.
+   - `CHANGES_REQUIRED`: Code defects, omissions, or style violations were detected; in `forge auto`, triggers automated repair loop back to Stage 03 (`executor`).
+   - `REJECTED`: Fundamental architectural violation or out-of-scope modifications.
+3. **Depth Classification**:
+   - `FUNCTIONAL_VERIFIED`: Comprehensive behavioral verification executed against running application endpoints or real browser DOM interactions with full assertion suites.
+   - `SHALLOW_SMOKE`: Server booted and responded to basic health checks (e.g. HTTP 200 on `/_stcore/health`), but deep interaction journeys or mock drivers were used.
+
+### Downstream Artifact Invalidation
+
+When an upstream stage is rerun (e.g., executing `01_architect` or `03_executor` in an existing run):
+1. Forge calls `invalidate_stage_and_downstream_artifacts(run, from_sequence_number)`.
+2. All canonical deliverables (`0X_<stage>.md`, `0X_<stage>.json`) with sequence numbers $\ge \text{from\_sequence\_number}$ are moved to `.forge/runs/run-XXX/history/invalidated_seq_{seq}_{timestamp}/`.
+3. Cached stage fingerprints, input fingerprints, artifact hashes, upstream hashes, template hashes, and prompt hashes for all downstream stages are purged from `metadata.json`.
+4. This guarantees that stale downstream deliverables cannot satisfy subsequent prerequisite gates or cause improper cache hits.
 
 ---
 
@@ -237,17 +270,17 @@ forge doctor [OPTIONS]
 
 [Configuration Defaults]
   • Adapter: opencode
-  • Model:   opencode/big-pickle
+  • Model:   (provider default)
   • Effort:  medium
   • Timeout: 300s
 
 [Configured Stages]
-  • Critic     -> opencode [model: opencode/big-pickle] [effort: high] [timeout: 1200s]
-  • Architect  -> opencode [model: opencode/big-pickle] [effort: high] [timeout: 900s]
-  • Planner    -> opencode [model: opencode/big-pickle] [effort: high] [timeout: 900s]
-  • Executor   -> antigravity [model: gemini-3.8-flash] [effort: high] [timeout: 1200s]
-  • Tester     -> opencode [model: opencode/big-pickle] [effort: high] [timeout: 900s]
-  • Reviewer   -> opencode [model: opencode/big-pickle] [effort: high] [timeout: 900s]
+  • Critic     -> opencode [effort: high] [timeout: 900s]
+  • Architect  -> opencode [effort: high] [timeout: 900s]
+  • Planner    -> opencode [effort: high] [timeout: 900s]
+  • Executor   -> antigravity [model: gemini-3.7-flash-high] [effort: high] [timeout: 1200s]
+  • Tester     -> opencode [effort: high] [timeout: 900s]
+  • Reviewer   -> opencode [effort: high] [timeout: 900s]
 
 [Tester]
   Browser Driver
@@ -496,7 +529,7 @@ forge execute [OPTIONS]
 ### `forge test`
 
 #### Purpose
-Executes the Tester role (Stage 04, sequence 04) to empirically verify observable software behavior, run automated test suites, execute Playwright/Chromium UI workflows, and produce evidence artifacts.
+Executes the Tester role (Stage 04, sequence 04, default adapter: `opencode`) using the Tester v2 behavioral evaluation engine. Empirically verifies observable software behavior, runs automated test suites, executes Playwright/Chromium UI workflows, and generates forensic evidence bundles.
 
 #### Syntax
 ```bash
@@ -509,15 +542,46 @@ forge test [OPTIONS]
 | `--run` | Option (`TEXT`) | Latest run (`run_mgr.latest()`) | Run ID containing completed Executor output. |
 | `--help` | Flag | — | Show usage message. |
 
+#### Tester v2 Architecture & Capabilities
+
+1. **Supported Application Archetypes**:
+   - `WEB_SPA`: Browser-driven web applications (React, Next.js, Vue, Vite, etc.) and Streamlit web applications. Streamlit applications are automatically detected via dependency analysis or `import streamlit` entry points in `app.py`, `streamlit_app.py`, or `main.py`, launched on default port 8501, and verified via readiness probes on `/_stcore/health`.
+   - `API`: HTTP/REST/GraphQL service daemons (FastAPI, Express, Flask, Django REST). Validated via HTTP probe sequences and OpenAPI schemas.
+   - `CLI`: Command-line tools (Click, Typer, console scripts). Verified via automated invocation, stdin streaming, exit code assertion, and stderr inspection.
+   - `LIBRARY`: Reusable packages and SDKs. Validated by executing project test suites (`pytest`, `unittest`) within an isolated sandbox.
+
+2. **Runtime Supervision & Process Tree Cleanup**:
+   - `RuntimeSupervisor` checks port availability prior to launch. If the configured port is already occupied by a foreign process, it aborts immediately with diagnostic advice rather than killing foreign processes.
+   - Launches application servers in isolated process groups using a sanitized environment whitelist (`STANDARD_ENV_WHITELIST`), injecting `FORGE_TEST_PORT` and `FORGE_RUN_ID`.
+   - Polls HTTP endpoints with exponential backoff until healthy or timed out.
+   - Cleans up child processes upon completion using platform-appropriate process tree termination (`os.killpg` with process group guards on POSIX; `taskkill /F /T /PID` on Windows).
+
+3. **Browser Automation & Fallback Mechanics**:
+   - `BrowserDriverFactory` attempts to instantiate `PlaywrightBrowserDriver` using headless Chromium.
+   - If Playwright is not installed or Chromium binaries are missing, Forge logs a warning and transparently falls back to `MockBrowserDriver`.
+   - In fallback mode, simulated browser DOM events and synthetic assertions are recorded, and the run is marked with depth classification `SHALLOW_SMOKE` rather than `FUNCTIONAL_VERIFIED`.
+
+4. **Forensic Evidence Collection**:
+   - Evidence is persisted in `.forge/runs/run-XXX/` and project `tests/evidence/`.
+   - Includes full-page PNG screenshots, HAR network request traces, browser console errors, probe execution logs, and JUnit XML test reports.
+
 #### Prerequisites
-- Requires an existing run where Stage 03 (`executor`) succeeded with one of: `SUCCESS`, `APPROVED`, `COMPLETED`.
+- Requires an existing run where Stage 03 (`executor`) succeeded with one of: `SUCCESS`, `APPROVED`, `COMPLETED`, `COMPLETE`.
+
+#### Permutations
+
+| Invocation | Classification | Description |
+|---|---|---|
+| `forge test` | **Conditionally Valid** | Runs Tester v2 on the latest completed Executor run. |
+| `forge test --run run-002` | **Conditionally Valid** | Runs Tester v2 against run `run-002`. |
+| `forge test --run run-999` | **Invalid** | Error: Run `run-999` not found. |
 
 ---
 
 ### `forge review`
 
 #### Purpose
-Executes the Reviewer role (Stage 05, sequence 05) to conduct an adversarial code and security audit on modified files and git diffs.
+Executes the Reviewer role (Stage 05, sequence 05, default adapter: `opencode`) to conduct an adversarial code, security, and regression audit on modified files, git diffs, and Tester evidence.
 
 #### Syntax
 ```bash
@@ -533,6 +597,49 @@ forge review [OPTIONS]
 #### Prerequisites
 - Requires an existing run where Stage 03 (`executor`) succeeded.
 - Only status `APPROVED` satisfies the gate. If issues are found, the reviewer emits `CHANGES_REQUIRED` or `REJECTED`.
+
+#### Permutations
+
+| Invocation | Classification | Description |
+|---|---|---|
+| `forge review` | **Conditionally Valid** | Reviews diffs and test results for the latest run. |
+| `forge review --run run-002` | **Conditionally Valid** | Reviews diffs and test results for run `run-002`. |
+| `forge review --run run-999` | **Invalid** | Error: Run `run-999` not found. |
+
+---
+
+### `forge recover`
+
+#### Purpose
+Administrative state reconstruction command. Recovers and reconstructs a completed stage result (human Markdown deliverable and machine JSON report) from an external background daemon session into the target run directory `.forge/runs/run-XXX/`.
+
+#### Syntax
+```bash
+forge recover [OPTIONS]
+```
+
+#### Options
+| Option | Type | Required | Default | Description |
+|---|---|:---:|---|---|
+| `--run` | Option (`TEXT`) | **Yes** | — | Target Run ID to recover (e.g. `run-012`). |
+| `--stage` | Option (`TEXT`) | **Yes** | — | Stage name to recover (e.g. `executor`, `planner`). |
+| `--session` | Option (`TEXT`) | **Yes** | — | Daemon session ID to recover artifacts from. |
+| `--help` | Flag | No | — | Show usage message. |
+
+#### Behavior & Safety
+- **Target Validation**: Validates that `--run` exists in `.forge/runs/` and that `--stage` resolves to a recognized stage in `StageOrder`.
+- **Artifact Reconstruction**: Queries the daemon session manager, parses the session's streamed chunks, extracts final markdown and JSON deliverables, and writes `0X_<stage>.md` and `0X_<stage>.json`.
+- **State Transition**: On successful extraction, records the transition in `metadata.json` as `COMPLETED`, persists elapsed duration, and saves run metadata.
+- **Fail-Closed Handling**: If the session cannot be found or its output fails protocol schema validation, outputs recovery failure diagnostics and exits with an error code.
+- **Safety**: Modifies only `.forge/runs/<run_id>/` metadata and deliverables. Does not modify workspace source code or Git history.
+
+#### Permutations
+
+| Invocation | Classification | Description |
+|---|---|---|
+| `forge recover --run run-003 --stage executor --session sess-abc123` | **Valid / Administrative** | Reconstructs Stage 03 (`executor`) deliverables from daemon session `sess-abc123` into `run-003`. |
+| `forge recover --run run-003 --stage invalid_stage --session sess-abc123` | **Invalid** | Error: Unknown stage name 'invalid_stage'. |
+| `forge recover --run run-003` | **Invalid** | Error: Missing option '--stage' / '--session'. |
 
 ---
 
@@ -857,7 +964,7 @@ version: '2.0'
 
 defaults:
   adapter: opencode
-  model: opencode/big-pickle
+  model: null
   effort: medium
   timeout: 300
   auto_approve: false
@@ -865,7 +972,7 @@ defaults:
 stages:
   critic:
     effort: high
-    timeout: 1200
+    timeout: 900
   architect:
     effort: high
     timeout: 900
@@ -874,10 +981,10 @@ stages:
     timeout: 900
   executor:
     adapter: antigravity
-    model: gemini-3.8-flash
+    model: gemini-3.7-flash-high
     effort: high
     timeout: 1200
-    auto_approve: true
+    auto_approve: false
   tester:
     effort: high
     timeout: 900
@@ -891,6 +998,17 @@ execution:
   default_timeout: 300
 ```
 
+### Settings Affecting Cache Validity
+
+Forge guarantees that stage results are re-executed whenever any material input changes. The stage input fingerprint (`compute_stage_input_fingerprint`) captures:
+- **Task Specification**: Canonical SHA-256 fingerprint of the user prompt or requirements file.
+- **Stage Metadata**: Stage sequence number and role name.
+- **Upstream Artifacts**: Exact SHA-256 digests of all prior stage deliverables (`0X_<stage>.md` and `0X_<stage>.json`).
+- **Prompt Template**: SHA-256 digest of the Jinja role template in `.ai/roles/<stage>.md` and `.ai/templates/protocol.md`.
+- **Configuration Fingerprint**: Active stage configuration parameters (`adapter`, `model`, `effort`, `timeout`, `auto_approve`, `extra_flags`).
+
+If any of these values change between invocations, the input fingerprint changes, bypassing cached deliverables and triggering fresh stage execution.
+
 ---
 
 ## 9. Run Lifecycle, Lock Ownership, & Artifact Layout
@@ -901,7 +1019,7 @@ Every pipeline run creates an isolated directory in `.forge/runs/run-XXX/`:
 
 ```text
 .forge/runs/run-002/
-├── metadata.json                 # Run status, task, timestamps, prompt hashes
+├── metadata.json                 # Run status, task, timestamps, prompt/artifact fingerprints
 ├── git_baseline.json             # Git SHA, branch, unstaged/staged diff baseline
 ├── run.lock                      # Exclusive file lock (deleted upon clean exit)
 ├── 00_critic.md                  # Human report for Stage 00
@@ -919,6 +1037,9 @@ Every pipeline run creates an isolated directory in `.forge/runs/run-XXX/`:
 ├── 05_reviewer.json              # Machine report protocol for Stage 05
 ├── 06_critic.md                  # Closing audit report
 ├── 06_critic.json                # Closing audit machine report
+├── history/                      # Invalidated or overwritten stage deliverables
+│   └── invalidated_seq_3_.../    # Preserved downstream artifacts when upstream was rerun
+├── tests/evidence/               # Forensic evidence bundle (screenshots, logs, traces)
 └── debug/                        # Raw adapter diagnostics
     ├── critic_prompt.md          # Exact rendered prompt sent to adapter
     ├── critic_stdout.txt         # Text chunks extracted from stream
@@ -926,14 +1047,29 @@ Every pipeline run creates an isolated directory in `.forge/runs/run-XXX/`:
     └── critic_raw.txt            # Raw unparsed NDJSON event stream
 ```
 
-### Exclusive Run Locking (`run.lock`)
+### Multi-Layer Artifact Freshness Fingerprinting
 
-To prevent concurrent processes from clobbering run artifacts:
+Forge guarantees reproducibility and cache integrity through cryptographic fingerprinting:
+1. **Input Fingerprint**: Combines task SHA-256, sequence number, role name, upstream artifact hashes, role template SHA-256, and configuration fingerprint.
+2. **Artifact Content Digest**: When a stage succeeds, Forge calculates SHA-256 digests of the generated `.md` and `.json` deliverables and records them in `metadata.json`.
+3. **Upstream Timestamp Guard**: Tracks file modification times (`mtime`) of upstream artifacts as a defense-in-depth sanity check against out-of-order edits.
+
+### Downstream Artifact Invalidation
+
+When an upstream stage is re-executed (e.g. running `forge execute --run run-002` after code changes):
+1. Forge executes `invalidate_stage_and_downstream_artifacts(run, from_sequence_number=3)`.
+2. All canonical deliverables with sequence number $\ge 3$ are cleanly moved into `.forge/runs/run-002/history/invalidated_seq_3_<timestamp>/`.
+3. Cached stage fingerprints, input fingerprints, artifact hashes, template hashes, and prompt hashes for affected stages are removed from `metadata.json`.
+4. Downstream stages (`tester`, `reviewer`, `critic`) must re-execute against the fresh executor output before subsequent gates can pass.
+
+### Exclusive Run Locking & Mandatory Offset
+
+To prevent concurrent processes from corrupting run state:
 - When a run is executed or resumed, Forge acquires an exclusive non-blocking kernel lock on `run.lock` (`flock` on Linux/macOS, `msvcrt.locking` on Windows).
-- On Windows, kernel locking operates cleanly to ensure owner metadata remains readable by concurrent processes for diagnostic inspection while preventing simultaneous execution.
+- **Windows Mandatory Locking Offset**: On Windows, `msvcrt.locking` locks bytes exclusively. Forge applies the lock at offset `WINDOWS_LOCK_OFFSET = 1073741824` (1 GiB). This permits concurrent inspection processes to read owner metadata at offset 0 without lock contention, while preventing concurrent pipeline execution.
 - `run.lock` stores owner metadata: PID, process group ID (PGID), hostname, username, command line, start timestamp, and Forge version.
-- If another process attempts to access the same run, Forge raises `RunOwnershipError` and displays owner details.
-- Stale locks from crashed or terminated processes are automatically detected and safely recovered when the owning PID is no longer alive.
+- If another process attempts to operate on the same run, Forge raises `RunOwnershipError` and displays owner details.
+- Stale locks from crashed or abruptly terminated processes are detected via process liveness probing and safely recovered.
 
 ### Safe Git Auto-Commit Behavior
 
@@ -944,6 +1080,12 @@ When `--auto-commit` is enabled:
    - **Mixed Ownership Changes**: Files that already had uncommitted user changes *before* Forge began and were further modified by Forge.
 3. Forge auto-commits **only Pure Forge Changes** with message `feat: <task>`.
 4. If Mixed Ownership files are detected, Forge **skips committing them**, outputs a warning, and leaves them unstaged for manual developer review.
+
+### Local Threat Model Boundaries
+
+Forge's integrity checks are designed to prevent accidental regressions, cache desynchronization, and tool deadlocks in collaborative and multi-agent development:
+- **Protected Against**: Stale cache reuse, out-of-order stage completion, accidental auto-commit of pre-existing uncommitted work, and concurrent process conflicts on the same run.
+- **Out of Scope**: Forge does not claim cryptographic isolation against malicious local actors or compromised processes with direct filesystem write access to the `.forge/` directory. Workspace integrity relies on OS-level user and process isolation.
 
 ---
 
@@ -1016,6 +1158,45 @@ When `--auto-commit` is enabled:
 - **Resolution**:
   - In `forge run`: Review issues in `.forge/runs/run-XXX/05_reviewer.md`, fix them manually, or re-run `forge execute --run <ID>`.
   - In `forge auto`: Forge automatically triggers an auto-repair iteration loop, feeding the reviewer issues back to Executor.
+
+#### 6. Application Server Startup Failure in Tester (`BLOCKED`)
+- **Symptom**: Stage 04 (`tester`) halts with status `BLOCKED` and message: `Application server failed to become healthy on port <port> within <timeout>s`.
+- **Cause**: The application under test crashed during startup, threw an unhandled import error, or the requested port (e.g. 8501 for Streamlit or 8000 for FastAPI) was already occupied by a foreign process.
+- **Resolution**: Inspect `.forge/runs/run-XXX/tests/evidence/` and `debug/tester_stderr.txt` for traceback errors. If a port conflict occurred, terminate the external process or supply an explicit free port in `forge.yaml` via `stages.tester.extra_flags.port`.
+
+#### 7. Non-Interactive Execution Deadlock (`StageValidationError`)
+- **Symptom**: An agent adapter halts indefinitely or terminates with `StageValidationError` during non-interactive runs.
+- **Cause**: The underlying CLI binary paused waiting for interactive terminal confirmation inside an automated pipe.
+- **Resolution**: Enable `auto_approve` for that stage in `forge.yaml` (`stages.<stage>.auto_approve: true`) or configure bypass flags in `extra_flags`.
+
+#### 8. Missing CLI Adapter Binary
+- **Symptom**: `AdapterExecutionError: Executable 'agy' not found on PATH.`
+- **Cause**: The executable for the configured adapter (`opencode`, `agy`, or `codex`) is not installed or not in PATH.
+- **Resolution**: Run `forge doctor` to verify installed tools, install the missing CLI tool, or switch to an available adapter using `forge config set stages.<stage>.adapter <adapter>`.
+
+#### 9. Missing Adapter Capabilities (`CapabilityValidationError`)
+- **Symptom**: `CapabilityValidationError: Stage 'executor' requires capabilities ['code_edit', 'shell'] but adapter 'my_adapter' only supports ['code_read'].`
+- **Cause**: An adapter lacking required tool-execution capabilities was assigned to an active stage.
+- **Resolution**: Run `forge adapters` to inspect the registered capabilities matrix and assign an adapter that supports all stage requirements.
+
+#### 10. Antigravity Prompt Transport Size Exceeded
+- **Symptom**: `PromptTransportError: Rendered prompt (145230 bytes) exceeds Antigravity argv limit (131072 bytes).`
+- **Cause**: Rendered task context and upstream artifacts exceeded Antigravity's 128 KB argument buffer limit (`MAX_PROMPT_BYTES = 131072`).
+- **Resolution**: Compact upstream task requirements or switch the stage adapter to `opencode`, which streams prompts unboundedly via standard input.
+
+#### 11. Auto-Commit Skipped for Mixed-Ownership Files
+- **Symptom**: `⚠️ Auto-commit skipped: repository contains mixed-ownership modifications.`
+- **Cause**: Files modified by Forge already had uncommitted user edits prior to the run.
+- **Resolution**: Forge deliberately leaves mixed-ownership files unstaged to prevent accidental commits. Review the diff with `git diff` and commit your changes manually.
+
+#### 12. Browser Automation Falling Back to Mock Driver
+- **Symptom**: `Failed starting 'playwright' driver: ... Falling back to MockBrowserDriver.`
+- **Cause**: Missing Playwright Python package or uninstalled Chromium binaries.
+- **Resolution**: Install optional browser automation dependencies:
+  ```bash
+  pip install forge-orchestrator[browser]
+  playwright install chromium
+  ```
 
 ---
 
@@ -1093,6 +1274,13 @@ forge test --run run-003
 forge review --run run-003
 ```
 
+### Administrative Recovery
+
+```bash
+# Recover and reconstruct stage deliverables from a background daemon session
+forge recover --run run-003 --stage executor --session sess-daemon-9876
+```
+
 ### Orchestrated Pipelines
 
 ```bash
@@ -1132,7 +1320,6 @@ forge auto -d "Implement Redis cache layer"
 
 # Autonomous loop with bundled flags (Critic resume, live dashboard, auto-commit)
 forge auto -cd --auto-commit
-
 ```
 
 ### Configuration Management

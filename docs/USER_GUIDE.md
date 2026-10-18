@@ -8,13 +8,14 @@ Welcome to the complete user manual for **Forge**, an open-source, CLI-first mul
 
 1. [Introduction](#1-introduction)
 2. [Installation](#2-installation)
-3. [Requirements](#3-requirements)
+3. [Requirements & Platform Support](#3-requirements--platform-support)
 4. [Configuration](#4-configuration)
 5. [Creating or Opening a Project](#5-creating-or-opening-a-project)
 6. [CLI Commands](#6-cli-commands)
    - [Environment & Diagnostics](#environment--diagnostics)
    - [Run Inspection & Dashboard](#run-inspection--dashboard)
    - [Individual Stages](#individual-stages)
+   - [Recovery](#recovery)
    - [Pipeline Execution](#pipeline-execution)
    - [Configuration Management](#configuration-management)
    - [Project Knowledge Base](#project-knowledge-base)
@@ -22,9 +23,9 @@ Welcome to the complete user manual for **Forge**, an open-source, CLI-first mul
 8. [Dashboard](#8-dashboard)
 9. [Adapters](#9-adapters)
 10. [Knowledge System](#10-knowledge-system)
-11. [Testing System](#11-testing-system)
+11. [Testing System (Tester v2)](#11-testing-system-tester-v2)
 12. [Common Workflows](#12-common-workflows)
-13. [Troubleshooting](#13-troubleshooting)
+13. [Reliability, Security & Troubleshooting](#13-reliability-security--troubleshooting)
 14. [FAQ](#14-faq)
 
 ---
@@ -33,9 +34,9 @@ Welcome to the complete user manual for **Forge**, an open-source, CLI-first mul
 
 Forge coordinates specialized artificial intelligence coding agents into a disciplined software engineering pipeline. Rather than relying on a single model to design, implement, and self-evaluate code in an unmonitored loop, Forge enforces separation of concerns across dedicated engineering roles:
 
-- **Auditing**: Codebase Critic evaluates architecture and identifies technical debt.
-- **System Design**: Software Architect defines module boundaries and interfaces without touching code.
-- **Task Breakdown**: Project Planner organizes work into dependency-ordered implementation tasks.
+- **Auditing**: Codebase Critic evaluates architecture, technical debt, and security flaws.
+- **System Design**: Software Architect defines module boundaries and interfaces without modifying code.
+- **Task Breakdown**: Project Planner organizes work into dependency-ordered implementation tasks with acceptance criteria.
 - **Implementation**: Software Executor implements code changes and runs builds, linters, and unit tests.
 - **Empirical Verification**: Empirical Tester boots running applications to exercise native public interfaces (Web browsers, APIs, CLIs, Libraries) and collects forensic evidence.
 - **Adversarial Review**: Diff-First Reviewer evaluates Git diffs and concrete test reports before approving changes.
@@ -56,7 +57,13 @@ Install Forge into your active Python environment using `pip`:
 pip install forge-orchestrator
 ```
 
-### Development Installation
+For pre-release versions:
+
+```bash
+pip install --pre forge-orchestrator
+```
+
+### Development Installation from Source
 
 To contribute to Forge or install directly from the source repository along with development and testing dependencies:
 
@@ -75,7 +82,7 @@ Forge officially supports both **Native Windows** and **WSL2** as first-class de
 Forge runs natively on Windows NT (Windows 10, Windows 11, and Windows Server 2019+):
 
 - **Environment Prerequisites**:
-  - Python (>= 3.10) and Git (>= 2.25) installed and available in your system `PATH`.
+  - Python (`>= 3.10`, supported through 3.14) and Git (`>= 2.25`) installed and available in your system `PATH`.
   - Windows Terminal (default in Windows 11) is recommended for truecolor ANSI rendering and box-drawing in the interactive dashboard.
 - **Install Forge**:
   ```powershell
@@ -91,14 +98,14 @@ Forge runs natively on Windows NT (Windows 10, Windows 11, and Windows Server 20
   - Install your desired AI coding tools (e.g. OpenCode via `npm install -g opencode`, Google Antigravity, or OpenAI Codex) directly in your Windows environment.
   - Tools installed via npm place `.cmd` and `.ps1` shims in `%APPDATA%\npm`. Ensure this directory is included in your user or system `PATH`.
 - **Built-in Windows Abstractions**:
-  - **Process Trees & Cleanup**: Forge launches child processes within isolated Windows process groups (`CREATE_NEW_PROCESS_GROUP`) and cleanly tears down entire subprocess trees using native `taskkill /F /T /PID`, with protective guards preventing Forge from terminating itself or system PIDs.
+  - **Process Trees & Cleanup**: Forge launches child processes within isolated Windows process groups (`CREATE_NEW_PROCESS_GROUP`) and cleanly tears down entire subprocess trees using native `taskkill /F /T /PID`, with protective guards preventing Forge from terminating itself or system PIDs (`<= 4`).
   - **Script Wrapping**: Executes `.cmd` and `.bat` wrappers automatically through `cmd.exe /c` without hanging or leaking file handles.
   - **Kernel Run Locking**: Enforces process mutual exclusion using native Windows `msvcrt.locking`, preserving full diagnostic readability of run owner metadata.
   - **Filesystem & Paths**: Seamlessly handles backslashes, drive letters (`C:\`), paths containing spaces, and semicolon (`;`) `PATH` delimiters.
 
 #### WSL2 (Windows Subsystem for Linux)
 
-If you prefer operating inside a Linux container or distribution on Windows:
+If you prefer operating inside a Linux distribution on Windows:
 
 - **Run as Linux**: Forge runs as a standard Linux process inside your WSL2 distribution (e.g., Ubuntu).
 - **Install Forge inside WSL2**:
@@ -113,7 +120,7 @@ If you prefer operating inside a Linux container or distribution on Windows:
   ```
 - **Agent Tool Isolation**:
   > [!IMPORTANT]
-  > **CLI Agent Tools in WSL2**: When running Forge inside WSL2, all CLI agent tools you use (**OpenCode**, **Antigravity**, or **Codex**) must be installed natively within the WSL2 Linux distribution (e.g. `npm install -g opencode` inside your WSL bash shell). Running Windows-installed agent binaries or npm wrappers exposed across the Windows mount (such as `/mnt/c/Users/.../AppData/Roaming/npm/opencode` or `.cmd` files) is not supported for the Linux Forge process and will be rejected with an informative diagnostic error. Ensure your Linux `$PATH` places native Linux binary directories (`/home/<user>/.opencode/bin`, `/usr/local/bin`) before any `/mnt/c/` PATH entries.
+  > **CLI Agent Tools in WSL2**: When running Forge inside WSL2, all CLI agent tools you use (**OpenCode**, **Antigravity**, or **Codex**) must be installed natively within the WSL2 Linux distribution (e.g. `npm install -g opencode` inside your WSL bash shell). Running Windows-installed agent binaries or npm wrappers exposed across the Windows mount (such as `/mnt/c/Users/.../AppData/Roaming/npm/opencode` or `.cmd` files) is not supported for the Linux Forge process and will be rejected with an informative diagnostic error. Ensure your Linux `$PATH` places native Linux binary directories (`/home/<user>/.opencode/bin`, `/usr/local/bin`) before any `/mnt/c/` entries.
 
 ### Browser Automation Setup (Optional)
 
@@ -123,6 +130,9 @@ The Tester role can drive real headless browsers during web application verifica
 pip install playwright
 playwright install chromium
 ```
+
+> [!NOTE]
+> If Playwright or Chromium is not installed, Forge automatically and gracefully falls back to `MockBrowserDriver` for in-memory simulation, allowing dry-runs and headless unit tests to execute without failing.
 
 ### Verifying Installation
 
@@ -135,12 +145,12 @@ forge doctor
 
 ---
 
-## 3. Requirements
+## 3. Requirements & Platform Support
 
 | Component | Requirement | Details |
 | :--- | :--- | :--- |
 | **Operating System** | Linux, WSL2, macOS, Native Windows | Uses standard POSIX process groups and file locking (`flock`) on Linux/macOS, and Windows process trees (`CREATE_NEW_PROCESS_GROUP`, `taskkill`) and file locking (`msvcrt`) on Windows. |
-| **Python** | `>= 3.10` | Standard CPython interpreter. |
+| **Python** | `>= 3.10` | Standard CPython interpreter (tested on Python 3.10, 3.11, 3.12, 3.13, and 3.14). |
 | **Git** | `>= 2.25` | Must be available in `PATH` for baseline tracking, diff generation, and commits. |
 | **CLI Agent Tools** | At least one installed | • **OpenCode** (`opencode`)<br>• **Google Antigravity** (`agy` or `antigravity`)<br>• **OpenAI Codex** (`codex`) |
 | **Browser Testing** | Optional | `playwright` with Chromium browser binaries installed. |
@@ -154,7 +164,8 @@ Forge uses a cascading configuration system. Configuration files are loaded and 
 1. **Built-in Defaults**: Hardcoded defaults defined by Forge.
 2. **Global User Configuration**: `~/.forge/config.yaml` (applies to all projects on your machine).
 3. **Project Configuration**: `forge.yaml` in your project root.
-4. **Local Workspace Configuration**: `.forge/config.yaml` in your project root (highest precedence).
+4. **Local Workspace Configuration**: `.forge/config.yaml` in your project root (highest file precedence).
+5. **Command-Line Flags**: Passed directly to CLI commands (e.g. `--auto-commit`, `--no-critic`, `--max-retries`).
 
 ### `forge.yaml` Schema Reference
 
@@ -196,6 +207,13 @@ stages:
 
   tester:
     effort: high
+    extra_flags:
+      # Optional explicit override for target archetype (WEB_SPA, API, CLI, LIBRARY)
+      archetype: null
+      # Optional explicit server command override
+      start_command: null
+      # Optional explicit port override
+      port: null
 
   reviewer:
     effort: high
@@ -221,7 +239,7 @@ execution:
 | | `auth_provider`| `str?` | `null` | Provider identifier. |
 | | `auth_scopes`  | `str` | `""` | Granted authorization scopes. |
 | | `auth_token_ttl`| `int` | `3600` | Authentication token validity duration in seconds. |
-| | `extra_flags`  | `dict`| `{}` | Custom key-value flags passed as `--<key> <value>` to the CLI. |
+| | `extra_flags`  | `dict`| `{}` | Custom key-value flags passed to the CLI. |
 | **`stages.<role>`** | `adapter` | `str?` | *inherited* | CLI adapter override for this specific role. |
 | | `model` | `str?` | *inherited* | Model override for this specific role. |
 | | `effort` | `str?` | *inherited* | Effort tier override for this specific role. |
@@ -233,9 +251,16 @@ execution:
 | | `auto_commit` | `bool` | `false` | Automatically commit code changes upon approved completion. |
 | | `default_timeout` | `int` | `300` | Global default stage execution timeout ceiling in seconds. |
 
-### Boolean Coercion Rules
+### Settings Affecting Cache Validity
 
-Forge parses configuration values strictly. Accepted truthy values are `true`, `yes`, `on`, `1`. Accepted falsy values are `false`, `no`, `off`, `0`, and empty strings. Ambiguous values cause a validation failure.
+Forge includes configuration values in its stage cache fingerprints (`compute_stage_config_fingerprint`). If you modify any of the following settings for a stage:
+- Assigned `adapter`
+- Chosen `model`
+- Selected `effort` tier
+- `extra_flags`
+- Underlying role prompt templates (`Role.template_hash`)
+
+Forge detects that the input configuration has changed, invalidates cached artifacts for that stage and all downstream stages, and forces fresh execution upon resumption.
 
 ---
 
@@ -291,7 +316,7 @@ forge doctor
 
 ## 6. CLI Commands
 
-Forge exposes 13 top-level commands and 2 command groups (`config` and `knowledge`).
+Forge exposes 14 top-level commands and 2 command groups (`config` and `knowledge`):
 
 ```text
 forge
@@ -306,6 +331,7 @@ forge
 ├── execute            # Run Executor role (Stage 03)
 ├── test               # Run Tester role (Stage 04)
 ├── review             # Run Reviewer role (Stage 05)
+├── recover            # Recover stage result from external daemon session
 ├── run                # Run interactive pipeline with confirmation checkpoints
 ├── auto               # Run autonomous loop with self-repair
 ├── config             # Configuration management command group
@@ -460,7 +486,7 @@ Each stage can be executed individually to inspect its prompt compilation, verif
 
 #### `forge test`
 
-- **Purpose**: Executes the Tester role (Stage 04) to empirically verify observable software behavior. Automatically detects project archetypes, supervises background dev servers, exercises user journeys via native drivers, captures forensic evidence, and issues a structured verdict (`PASS`, `FAIL`, `BLOCKED`, `NOT_TESTABLE`).
+- **Purpose**: Executes the Tester role (Stage 04) to empirically verify observable software behavior. Automatically detects project archetypes (`WEB_SPA`, `API`, `CLI`, `LIBRARY`), supervises background dev servers, exercises user journeys via native drivers, captures forensic evidence, and issues a structured verdict (`PASS`, `FAIL`, `BLOCKED`, `NOT_TESTABLE`).
 - **Syntax**: `forge test [OPTIONS]`
 - **Arguments / Options**:
   - `--run TEXT`: Target Run ID containing Executor output (defaults to latest run).
@@ -483,6 +509,24 @@ Each stage can be executed individually to inspect its prompt compilation, verif
   forge review --run run-008
   ```
 - **Expected Behaviour**: Compiles the review prompt containing the bounded Git diff, original requirements, Executor report, and Tester results, executes the Reviewer adapter, validates the emitted machine report, and writes `05_reviewer.md` and `05_reviewer.json`.
+
+---
+
+### Recovery
+
+#### `forge recover`
+
+- **Purpose**: Recovers and reconstructs a completed stage result from an external daemon session (e.g. an OpenCode or background daemon session that executed asynchronously).
+- **Syntax**: `forge recover --run TEXT --stage TEXT --session TEXT`
+- **Arguments / Options**:
+  - `--run TEXT`: Target Run ID to recover (e.g. `run-012`). [Required]
+  - `--stage TEXT`: Stage name to recover (e.g. `executor`). [Required]
+  - `--session TEXT`: External daemon session ID to recover from. [Required]
+- **Example**:
+  ```bash
+  forge recover --run run-012 --stage executor --session sess-7a8b9c
+  ```
+- **Expected Behaviour**: Connects to the recorded session ID, extracts completed deliverables, parses and validates the machine report, updates stage metadata in `metadata.json`, and writes canonical deliverables into the run directory.
 
 ---
 
@@ -663,9 +707,8 @@ Forge enforces a strict sequence of stages defined in `StageOrder`. Each stage p
 
 ### Machine Protocol Schema
 
-Every agent must format its verdict in a standardized YAML block:
+Every agent must format its verdict in a standardized YAML block within markdown output:
 
-```yaml
 ```yaml
 ROLE: ARCHITECT
 STATUS: APPROVED
@@ -679,7 +722,6 @@ ISSUES:
   MAJOR: []
   MINOR: []
 KNOWLEDGE_PROPOSALS: []
-```
 ```
 
 ### Protocol Validation Rules
@@ -745,7 +787,7 @@ The Forge terminal dashboard (`forge dashboard`) provides an interactive interfa
 ### Terminal Compatibility & Windows Environment
 
 - **Recommended Terminal**: On Windows, modern **Windows Terminal** (or VS Code's integrated terminal) is strongly recommended. Windows Terminal natively supports truecolor 24-bit ANSI escape codes, full UTF-8 Unicode glyphs, and box-drawing characters used by Rich.
-- **Legacy Console (`conhost.exe`)**: Traditional `cmd.exe` or PowerShell running in legacy Windows Console Host (`conhost.exe`) may experience degraded rendering, character clipping, or font fallback issues for box-drawing glyphs. If running inside a legacy console, ensure your console code page is UTF-8 (`chcp 65001`) and a TrueType font (such as Cascadia Code or Consolas) is selected.
+- **Legacy Console (`conhost.exe`)**: Traditional `cmd.exe` or PowerShell running in legacy Windows Console Host (`conhost.exe`) may experience degraded rendering or font fallback issues for box-drawing glyphs. If running inside a legacy console, ensure your console code page is UTF-8 (`chcp 65001`) and a TrueType font (such as Cascadia Code or Consolas) is selected.
 - **Cancellation & Navigation**: Press `q` to cleanly exit inspection mode at any time without affecting run state. In live execution mode, pressing `Ctrl+C` sends a cancellation signal to the active run, cleanly terminating running agent subprocesses before exiting.
 
 ---
@@ -840,9 +882,9 @@ payload: {}
 
 ---
 
-## 11. Testing System
+## 11. Testing System (Tester v2)
 
-The **Tester** stage (`04_tester`) is powered by `TesterEngine`, an empirical black-box testing engine that validates observable runtime behavior.
+The **Tester** stage (`04_tester`) is powered by `TesterEngine`, an empirical black-box testing engine that validates observable runtime software behavior without modifying target production code.
 
 ### Testing Architecture
 
@@ -850,42 +892,59 @@ The **Tester** stage (`04_tester`) is powered by `TesterEngine`, an empirical bl
 ┌─────────────────────────────────────────────────────────────┐
 │                        TesterEngine                         │
 ├──────────────────────────────┬──────────────────────────────┤
-│ 1. Archetype Auto-Detection  │ Web SPA, API, CLI, Library   │
-│ 2. Runtime Supervision       │ Background server lifecycle  │
-│ 3. Journey Planning          │ 4-tier prioritized journeys  │
+│ 1. Archetype Auto-Detection  │ WEB_SPA, API, CLI, LIBRARY   │
+│ 2. Runtime Supervision       │ Background process lifecycle │
+│ 3. Journey Planning          │ Entrypoint and route planner │
 │ 4. Interaction Drivers       │ Browser, API, CLI, Library   │
 │ 5. Resource Budgets          │ Timeout, journey & step caps │
 │ 6. Forensic Evidence Bundle  │ Screenshots, logs, scripts   │
-│ 7. Verdict & Coverage        │ PASS, FAIL, BLOCKED metrics  │
-└──────────────────────────────┴──────────────────────────────┘
+│ 7. Verdict Arbitration       │ PASS, FAIL, BLOCKED metrics  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 1. Archetype Auto-Detection
+### 1. Supported Archetypes & Auto-Detection
 
-`ArchetypeDetector` inspects package manifests, configuration files, and directory layouts to determine how the project should be exercised:
-- **`WEB_SPA`**: Detected via `package.json`, `vite.config.*`, `next.config.*`, etc.
-- **`API`**: Detected via FastAPI, Flask, Django, Express, or route decorators.
-- **`CLI`**: Detected via `click`, `argparse`, `pyproject.toml` console scripts, or CLI bin files.
-- **`LIBRARY`**: Pure Python, TypeScript, or Go libraries tested via direct imports and export assertions.
+`ArchetypeDetector` inspects package manifests, configuration files, and directory layouts to classify the project:
 
-### 2. Runtime Supervision
+- **`WEB_SPA`**: Web applications and Single Page Applications:
+  - Frontend frameworks: React, Next.js, Vue, Nuxt, Svelte, Vite, Astro, Angular.
+  - Python interactive web apps: **Streamlit** (detected via `streamlit` in dependencies or `import streamlit` in entrypoint files; launches `streamlit run` on port 8501 and monitors `/_stcore/health`).
+  - Conventional static HTML/JS web apps (`index.html`, served via Python `http.server`).
+  - *Driver*: `WebInteractionDriver` (Playwright Chromium, with automatic fallback to `MockBrowserDriver`).
+- **`API`**: HTTP/REST/GraphQL service daemons:
+  - Python: FastAPI (`uvicorn`), Flask, Django, Starlette.
+  - Node.js: Express, NestJS, Fastify, Koa, Hapi.
+  - *Driver*: `ApiInteractionDriver` with session headers, JSON payload assertion, and intent-aware status checking.
+- **`CLI`**: Interactive and non-interactive command-line applications:
+  - Python: Click, Typer, Argparse, `project.scripts` in `pyproject.toml`, or `cli.py` entrypoint.
+  - Node.js: `bin` in `package.json`.
+  - *Driver*: `CliInteractionDriver` with command execution, argument flags, exit code verification, and stderr/stdout assertion.
+- **`LIBRARY`**: Reusable packages, SDKs, and libraries:
+  - Python / Node / Go packages tested via direct consumer sandbox imports.
+  - *Driver*: `LibraryInteractionDriver` asserting function exports and type signatures.
 
-For Web and API applications, `RuntimeSupervisor` manages the local server lifecycle:
-- Launches the application in an isolated POSIX process group (`os.setsid`).
-- Polls ports and HTTP endpoints with exponential backoff until ready (up to 25s timeout).
-- Captures standard output and error telemetry.
-- Guarantees clean process tree teardown (`SIGTERM` followed by `SIGKILL` if needed).
+### 2. Runtime Supervision & Environment Isolation
 
-### 3. Interaction Drivers
+For Web and API applications, `RuntimeSupervisor` manages the background server lifecycle:
+- **Port Conflict Protection**: Uses `is_port_in_use` and `find_free_port`. If a port conflict is detected, supervisor refuses to start and records a port conflict without terminating foreign processes.
+- **Environment Isolation**: Cleans execution environment, sets `PYTHONNOUSERSITE=1`, strips host secret tokens, and isolates Python virtual environments (`venv_path`).
+- **Readiness Probing**: Polls ports and HTTP endpoints with exponential backoff until ready (configurable timeout up to 25s).
+- **Process Tree Teardown**: Guarantees termination of the process and all spawned descendants using `os.killpg` on POSIX and `taskkill /F /T /PID` on Windows.
 
-- **Web Driver** (`WebInteractionDriver`): Drives Chromium via Playwright (or in-memory mock fallback). Navigates URLs, clicks buttons, enters text, asserts DOM mutations, detects dead clicks, captures unhandled browser console exceptions, and records full-page screenshots.
-- **API Driver** (`ApiInteractionDriver`): Probes REST/GraphQL endpoints, manages authorization headers and session cookies, and asserts response schemas and status codes.
-- **CLI Driver** (`CliInteractionDriver`): Invokes commands with arguments and stdin payloads, asserts exit codes, and checks error streams.
-- **Library Driver** (`LibraryInteractionDriver`): Imports modules and verifies public functions and type contracts.
+### 3. Interaction Drivers & Browser Fallback
+
+- **Web Driver** (`WebInteractionDriver`): Drives Chromium via Playwright. Navigates routes, clicks selectors, fills input fields, asserts DOM mutations, detects dead clicks, captures console errors, and writes full-page PNG screenshots.
+  - **Graceful Fallback**: If Playwright or Chromium is absent, `BrowserDriverFactory` catches the launch failure and returns `MockBrowserDriver`. MockBrowserDriver simulates in-memory DOM navigation and assertion for unit testing environments.
+- **API Driver** (`ApiInteractionDriver`): Probes REST/GraphQL endpoints with intent-aware status validation:
+  - Expected negative tests (e.g. GET non-existent resource returning 404 or invalid credentials returning 401) pass as intended.
+  - Security bypasses (endpoint expected to reject but returning 200) flag critical defects.
+  - Server crashes (unhandled 500) trigger critical defect reporting.
+- **CLI Driver** (`CliInteractionDriver`): Discovers CLI entry points (e.g. `cli.py` even when internal module files were modified), runs commands with arguments, and checks exit codes and outputs.
+- **Library Driver** (`LibraryInteractionDriver`): Validates module imports, class definitions, and exported function contracts.
 
 ### 4. Forensic Evidence Bundle
 
-All test artifacts are organized in `.forge/runs/<run_id>/evidence/`:
+Test evidence is persisted in `.forge/runs/<run_id>/evidence/`:
 
 ```text
 .forge/runs/run-012/evidence/
@@ -899,15 +958,24 @@ All test artifacts are organized in `.forge/runs/<run_id>/evidence/`:
 │   ├── process_stdout.log        # Dev server standard output
 │   └── process_stderr.log        # Dev server standard error
 └── reproduction/
-    ├── repro_journey_01.sh       # Executable reproduction script
+    ├── repro_journey_01.sh       # Executable shell reproduction script
     └── repro_defect_01.py        # Standalone Python reproduction script
 ```
 
-### 5. Verdict & Coverage
+### 5. Verdict Arbitration & Depth Classification
 
-`04_tester.json` records:
-- **Verdict**: `PASS`, `FAIL`, `BLOCKED` (dev server failed to start), or `NOT_TESTABLE`.
-- **Coverage**: Planned journeys, executed journeys, passed journeys, failed journeys, and confidence rating (`HIGH`, `MEDIUM`, `LOW`).
+`TesterReportGenerator.arbitrate_verdict` strictly enforces fail-closed verdict arbitration:
+
+| Verdict | Exit Code | Handoff | Trigger Condition |
+| :--- | :---: | :--- | :--- |
+| **`PASS`** | `0` | `REVIEWER` | All journeys succeeded with `FUNCTIONAL_VERIFIED` depth and zero defects. |
+| **`FAIL`** | `1` | `EXECUTOR` | Genuine application defect detected (`FUNCTIONAL_ASSERTION_FAILURE`, `DEAD_INTERACTION`, `CLI_CRASH`, `UNHANDLED_EXCEPTION`, `NETWORK_FAILURE`). |
+| **`BLOCKED`** / **`PARTIAL`** | `1` | `NONE` | Test infrastructure or test setup gap (`INVALID_INTERACTION`, `TEST_CONFIGURATION_GAP`, `PREREQUISITE_FAILURE`, `ASSERTION_MISMATCH`). Never blames Executor for test gaps. |
+| **`NOT_TESTABLE`** | `0` / `1` | `REVIEWER` / `NONE` | No executable target found. Fails closed (code 1, handoff NONE) if application code was modified; succeeds (code 0, handoff REVIEWER) if only non-code docs were touched. |
+
+- **Coverage Depth Classification**:
+  - **`FUNCTIONAL_VERIFIED`**: Journeys exercised and asserted observable functional logic of modified components.
+  - **`SHALLOW_SMOKE`**: Journeys only completed surface navigation or server ping without meaningful behavioral assertions on modified components. Flags `confidence: MEDIUM` and prevents false pass verdicts.
 
 ---
 
@@ -995,70 +1063,66 @@ forge auto --file specs/webhook_system.md --max-retries 4 --auto-commit
 
 ---
 
-## 13. Troubleshooting
+## 13. Reliability, Security & Troubleshooting
 
-### 1. Run Ownership Conflict (`RunOwnershipError`)
+### Artifact Freshness & Downstream Invalidation
 
+Forge implements a multi-layer artifact integrity and freshness verification system in `is_stage_completed`:
+
+1. **Deliverable Hash Verification**: Computes the SHA256 of candidate `.json` and `.md` deliverables and verifies that they match the recorded `artifact_hashes` in `metadata.json`.
+2. **Upstream Content & Provenance Hashes**: Verifies that all upstream deliverables on which the stage was built still exist, match their recorded SHA256 hashes, and match the active `task_fingerprint` and `run_id`.
+3. **Input Fingerprint**: Re-computes `compute_stage_input_fingerprint` combining task fingerprint, stage sequence number, role name, upstream hashes, template hash, and configuration fingerprint. If any input has changed, cached artifacts are rejected.
+4. **Modification Time Invariant**: As defense-in-depth, a candidate deliverable is rejected if any upstream deliverable has a newer filesystem modification time.
+5. **Downstream Invalidation**: Whenever an upstream stage executes fresh, `invalidate_stage_and_downstream_artifacts` archives all downstream deliverables from that sequence number forward to `history/invalidated_seq_...` and clears metadata, ensuring stale deliverables cannot linger or satisfy subsequent resume steps.
+
+> [!NOTE]
+> **Local Threat Model Boundary**: Forge's artifact integrity checks protect against accidental stale-cache reuse, unexpected upstream edits, and unintentional file corruption. They do not claim cryptographic protection against an adversarial local user with direct shell write permissions to `.forge/`.
+
+### Runtime Isolation & Process Supervision
+
+- **Process Groups & Trees**: Child processes run in isolated process groups (`start_new_session=True` on POSIX, `CREATE_NEW_PROCESS_GROUP` on Windows).
+- **Clean Teardown**: When shutting down dev servers, Forge reaps the entire process tree (`SIGTERM` followed by `SIGKILL` on POSIX; `taskkill /F /T /PID` on Windows). Forge includes safeguards preventing it from terminating its own process or system PIDs.
+- **Port Safety**: Forge verifies port occupancy before starting servers and never terminates processes on ports it did not spawn.
+- **Environment Isolation**: Forge executes targets with `PYTHONNOUSERSITE=1` and sanitizes environment variables to prevent host credentials from leaking into test processes.
+
+### Common Diagnostics & Error Handling
+
+#### 1. Run Ownership Conflict (`RunOwnershipError`)
 - **Symptom**: `RunOwnershipError: Run 'run-XXX' is currently locked by an active Forge process.`
 - **Cause**: Another running process is executing on that run directory, or a previous run crashed without releasing its kernel lock.
-- **Resolution**:
-  - Check the owner details printed in the terminal error (PID, Hostname, User, Started timestamp).
-  - If the process is still running, wait for it to finish or terminate it cleanly:
-    - **Linux/macOS/WSL2**: `kill <PID>`
-    - **Native Windows**: `taskkill /F /PID <PID>` (or inspect active processes via `tasklist | findstr forge`)
-  - If the process terminated abnormally or the recorded PID no longer exists, simply re-running your command will automatically detect the dead PID and safely recover the stale lock without manual file deletion.
+- **Resolution**: Check the owner details printed in the terminal error (PID, Hostname, User, Started timestamp). If the PID no longer exists, re-running your command automatically recovers the stale lock.
 
-### 2. Non-Interactive Execution Deadlock (`StageValidationError`)
-
+#### 2. Non-Interactive Execution Deadlock (`StageValidationError`)
 - **Symptom**: `StageValidationError: Stage 'executor' cannot run non-interactively with auto_approve=false.`
 - **Cause**: Forge was run in a non-interactive shell (such as a CI/CD pipeline or redirected stdin) with `auto_approve: false`. The CLI agent would hang waiting for user keyboard input that cannot arrive.
-- **Resolution**:
-  - Run the command in an interactive terminal (TTY).
-  - Or enable auto-approval: `forge config set stages.executor.auto_approve true`.
+- **Resolution**: Run the command in an interactive terminal (TTY), or enable auto-approval: `forge config set stages.executor.auto_approve true`.
 
-### 3. Missing CLI Adapter Binary
-
+#### 3. Missing CLI Adapter Binary
 - **Symptom**: `Adapter tool 'opencode' is not installed or not in PATH.`
 - **Cause**: The configured CLI binary cannot be located by the operating system.
-- **Resolution**:
-  - Run `forge doctor` to check tool availability.
-  - Install the tool or add its directory to your system `PATH`.
-  - Alternatively, configure an available tool in `forge.yaml` (e.g. `adapter: antigravity` or `adapter: codex`).
+- **Resolution**: Run `forge doctor` to check tool availability. Install the tool or add its directory to your system `PATH`. Alternatively, configure an available tool in `forge.yaml` (e.g. `adapter: antigravity` or `adapter: codex`).
 
-### 4. Missing Adapter Capabilities (`CapabilityValidationError`)
-
+#### 4. Missing Adapter Capabilities (`CapabilityValidationError`)
 - **Symptom**: `Capability validation error for stage 'executor': Configured adapter is missing: code_edit, shell.`
 - **Cause**: The adapter assigned to a stage does not support the capabilities required by that stage.
-- **Resolution**:
-  - Run `forge adapters` to inspect which adapters provide which capabilities.
-  - Assign an adapter that supports code editing and shell execution (`antigravity`, `opencode`, or `codex`) to the Executor stage in `forge.yaml`.
+- **Resolution**: Run `forge adapters` to inspect which adapters provide which capabilities. Assign an adapter that supports code editing and shell execution (`antigravity`, `opencode`, or `codex`) to the Executor stage in `forge.yaml`.
 
-### 5. Antigravity Prompt Transport Size Exceeded
-
+#### 5. Antigravity Prompt Transport Size Exceeded
 - **Symptom**: `Prompt size (135000 bytes) exceeds Antigravity CLI argv transport limit (130000 bytes).`
 - **Cause**: Google Antigravity receives prompts via the `-p` command-line argument, which is bounded by the operating system argument string limit (`MAX_ARG_STRLEN`).
-- **Resolution**:
-  - Break tasks into smaller units of work.
-  - Use `opencode` or `codex` (which accept prompts via `stdin` without argument limits) for very large context prompts.
+- **Resolution**: Break tasks into smaller units of work, or use `opencode` or `codex` (which accept prompts via `stdin` without argument limits) for very large context prompts.
 
-### 6. Application Server Startup Failure in Tester (`BLOCKED`)
-
+#### 6. Application Server Startup Failure in Tester (`BLOCKED`)
 - **Symptom**: Tester stage finishes with status `BLOCKED` and message `"Application runtime failed to become ready."`
-- **Cause**: The application dev server crashed on startup, encountered a missing dependency, or did not respond on the expected port within 25 seconds.
-- **Resolution**:
-  - Inspect server logs in `.forge/runs/<run_id>/evidence/telemetry/process_stdout.log` and `process_stderr.log`.
-  - Fix missing environment variables or dependencies in your project.
+- **Cause**: The application dev server crashed on startup, encountered a missing dependency, or did not respond on the expected port within the timeout.
+- **Resolution**: Inspect server logs in `.forge/runs/<run_id>/evidence/telemetry/process_stdout.log` and `process_stderr.log`. Fix missing environment variables or dependencies in your project.
 
-### 7. Auto-Commit Skipped for Mixed-Ownership Files
-
+#### 7. Auto-Commit Skipped for Mixed-Ownership Files
 - **Symptom**: `⚠️ Skipped auto-commit for mixed-ownership file(s)`
 - **Cause**: A file modified by Forge already had uncommitted user changes before the Forge run started. Forge refuses to automatically commit mixed files to prevent accidentally committing unrelated user work.
-- **Resolution**:
-  - Review the changed file using `git diff <file>`.
-  - Stage and commit your changes manually using `git commit`.
+- **Resolution**: Review the changed file using `git diff <file>`. Stage and commit your changes manually using `git commit`.
 
-### 8. Browser Automation Falling Back to Mock Driver
-
+#### 8. Browser Automation Falling Back to Mock Driver
 - **Symptom**: `forge doctor` displays `⚠️ Browser automation is unavailable. Web/UI interactions will fall back to MockBrowserDriver.`
 - **Cause**: `playwright` or Chromium browser binaries are not installed.
 - **Resolution**:
