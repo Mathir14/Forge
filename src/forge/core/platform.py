@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +96,71 @@ def safe_kill(proc: subprocess.Popen) -> None:
         pass
 
 
+def find_descendant_pids(parent_pid: int) -> Set[int]:
+    """Discover all live descendant process IDs of a given PID.
+
+    Traverses the process hierarchy recursively. Never includes parent_pid.
+    """
+    if not isinstance(parent_pid, int) or parent_pid <= 1:
+        return set()
+
+    descendants: Set[int] = set()
+    to_scan = {parent_pid}
+
+    if IS_LINUX and os.path.exists("/proc"):
+        while to_scan:
+            curr = to_scan.pop()
+            children = set()
+            try:
+                for pid_dir in os.listdir("/proc"):
+                    if not pid_dir.isdigit():
+                        continue
+                    try:
+                        stat_path = f"/proc/{pid_dir}/stat"
+                        with open(stat_path, "r") as f:
+                            content = f.read()
+                        rparen = content.rfind(")")
+                        if rparen != -1:
+                            fields = content[rparen + 2:].split()
+                            ppid = int(fields[1])
+                            if ppid == curr:
+                                child_pid = int(pid_dir)
+                                if child_pid not in descendants and child_pid != parent_pid:
+                                    children.add(child_pid)
+                                    descendants.add(child_pid)
+                    except (FileNotFoundError, ProcessLookupError, PermissionError, IndexError, ValueError):
+                        pass
+            except Exception:
+                pass
+            to_scan.update(children)
+    elif IS_POSIX:
+        # Fallback for Darwin/BSD: use 'pgrep -P <pid>' or 'ps'
+        try:
+            res = subprocess.run(
+                ["pgrep", "-P", str(parent_pid)],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+            for line in res.stdout.splitlines():
+                if line.strip().isdigit():
+                    c_pid = int(line.strip())
+                    if c_pid != parent_pid and c_pid not in descendants:
+                        descendants.add(c_pid)
+                        descendants.update(find_descendant_pids(c_pid))
+        except Exception:
+            pass
+
+    return descendants
+
+
 def terminate_process_tree(
     proc: subprocess.Popen,
     timeout: float = 1.0,
     force: bool = True,
     safe_kill_fn: Optional[Any] = None,
-) -> None:
+) -> bool:
     """Terminate or kill a process and all its child/descendant processes cleanly.
 
     CRITICAL REGRESSION SAFETY REQUIREMENT:
@@ -111,8 +170,9 @@ def terminate_process_tree(
     On POSIX:
     - Verifies child PID is a valid integer > 1.
     - Guards against caller's process group (os.getpgrp()), caller PID, and PGID <= 1.
-    - Sends SIGTERM to the process group, waits 0.1s, then escalates to SIGKILL.
-    - Falls back to safe_kill(proc) if process group signaling is disallowed.
+    - Tracks and reaps all descendant processes recursively.
+    - Sends SIGTERM, polls with timeout for exit, then escalates to SIGKILL if force=True.
+    - Returns True if all owned processes in the tree exited cleanly, False otherwise.
 
     On Windows:
     - Verifies PID is a valid integer > 4 (protecting System/Idle processes) and != os.getpid().
@@ -125,16 +185,23 @@ def terminate_process_tree(
         if type(pid) is not int or pid <= 1:
             if type(pid) is not int:
                 _kill(proc)
-            return
+            return True
 
         current_pid = os.getpid()
+        if pid == current_pid:
+            _kill(proc)
+            return True
+
+        # Discover all descendant PIDs before beginning termination
+        descendants = find_descendant_pids(pid)
+        all_pids = {pid} | descendants
 
         if os.name == "posix":
             try:
                 pgid = os.getpgid(pid)
             except (ProcessLookupError, PermissionError, OSError):
                 _kill(proc)
-                return
+                return True
 
             current_pgid = os.getpgrp() if hasattr(os, "getpgrp") else None
             if (
@@ -142,10 +209,9 @@ def terminate_process_tree(
                 or pgid <= 1
                 or (current_pgid is not None and pgid == current_pgid)
                 or pgid == current_pid
-                or pid == current_pid
             ):
                 _kill(proc)
-                return
+                return True
 
             try:
                 os.killpg(pgid, signal.SIGTERM)
@@ -156,11 +222,23 @@ def terminate_process_tree(
             except Exception:
                 _kill(proc)
 
+            # Ensure any detached descendants are also reaped
+            for d_pid in descendants:
+                if d_pid != current_pid and is_pid_alive(d_pid):
+                    try:
+                        os.kill(d_pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+
+            # Final check of liveness
+            remaining = [p for p in all_pids if is_pid_alive(p)]
+            return len(remaining) == 0
+
         elif os.name == "nt" or sys.platform == "win32":
             # Guard against system processes (PID <= 4 on Windows) or caller PID
             if pid <= 4 or pid == current_pid:
                 _kill(proc)
-                return
+                return True
 
             if proc.poll() is None:
                 try:
@@ -173,10 +251,13 @@ def terminate_process_tree(
                 except Exception:
                     pass
             _kill(proc)
+            return not is_pid_alive(pid)
         else:
             _kill(proc)
+            return True
     except Exception:
         _kill(proc)
+        return True
 
 
 def is_pid_alive(pid: int) -> bool:

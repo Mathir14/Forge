@@ -64,6 +64,11 @@ def clean_validator_rules():
 @pytest.fixture(autouse=True)
 def isolate_test_environment(tmp_path_factory, monkeypatch):
     """Ensure tests run in a completely isolated and deterministic environment."""
+    # Capture user site and user bin dynamically before HOME redirection
+    import site
+    orig_user_site = site.getusersitepackages()
+    orig_user_bin = str(Path.home() / ".local" / "bin")
+
     test_home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(test_home))
     monkeypatch.setenv("USERPROFILE", str(test_home))
@@ -86,4 +91,13 @@ def isolate_test_environment(tmp_path_factory, monkeypatch):
     src_dir = str(Path(__file__).resolve().parent.parent / "src")
     existing_pythonpath = os.environ.get("PYTHONPATH", "")
     new_pythonpath = f"{src_dir}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else src_dir
+
+    existing_path = os.environ.get("PATH", "")
+    if os.environ.get("FORGE_ALLOW_USER_SITE", "1") == "1":
+        if orig_user_site and Path(orig_user_site).exists() and orig_user_site not in new_pythonpath:
+            new_pythonpath = f"{new_pythonpath}{os.pathsep}{orig_user_site}"
+        if orig_user_bin and Path(orig_user_bin).exists() and orig_user_bin not in existing_path:
+            existing_path = f"{orig_user_bin}{os.pathsep}{existing_path}"
+
     monkeypatch.setenv("PYTHONPATH", new_pythonpath)
+    monkeypatch.setenv("PATH", existing_path)

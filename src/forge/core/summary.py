@@ -22,6 +22,9 @@ class StageSummaryItem:
         if self.execution_state == "SKIPPED":
             return "✓"
         clean = (self.status or "").upper().strip()
+        if clean == "NOT_TESTABLE":
+            if self.reason and any(kw in self.reason.lower() for kw in ("rejected", "halt", "fail", "error", "blocked")):
+                return "✗"
         from forge.stages.definition import StageOrder
         if StageOrder.is_success_status(clean, self.role_name):
             return "✓"

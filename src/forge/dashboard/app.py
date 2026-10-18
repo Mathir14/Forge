@@ -75,6 +75,8 @@ class DashboardApp:
     def _apply_terminal_state(self) -> None:
         """Inspect halt_holder and run_model/disk state to establish final terminal banner info."""
         self.run_model.is_active = False
+        if hasattr(self.run_model, "_flush_stream_buffer"):
+            self.run_model._flush_stream_buffer()
 
         # 1. Check halt_holder if provided
         if self.halt_holder and self.halt_holder[0] is not None:
@@ -154,9 +156,13 @@ class DashboardApp:
         failed_stage = None
         for s in self.run_model.stages:
             st_upper = str(s.status or "").upper().strip()
-            if st_upper in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED") or (s.exit_code is not None and s.exit_code != 0):
-                failed_stage = s
-                break
+            is_doc_bypass = False
+            if st_upper == "NOT_TESTABLE":
+                is_doc_bypass, _ = StageOrder.is_doc_only_not_testable_bypass(s, run_dir=self.run_dir)
+            if not is_doc_bypass:
+                if st_upper in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED", "PARTIAL", "NOT_TESTABLE") or (s.exit_code is not None and s.exit_code != 0):
+                    failed_stage = s
+                    break
 
         if failed_stage:
             st_upper = str(failed_stage.status or "FAILED").upper().strip()
@@ -181,7 +187,7 @@ class DashboardApp:
             return
 
         # If run status is explicitly failed/rejected at the run level
-        if status in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED"):
+        if status in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED", "PARTIAL", "NOT_TESTABLE"):
             self.state.terminal_status = status
             self.state.terminal_stage = "Pipeline"
             self.state.terminal_reason = (

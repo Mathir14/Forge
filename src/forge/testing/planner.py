@@ -8,6 +8,7 @@ Formulates and prioritizes user journeys according to strict prioritization rule
 """
 
 import logging
+from pathlib import Path
 import re
 from typing import List, Optional
 
@@ -34,6 +35,7 @@ class JourneyPlanner:
         executor_report: str = "",
         base_url: str = "http://127.0.0.1:3000",
         max_journeys: int = 5,
+        project_root: Optional[Path] = None,
     ) -> List[Journey]:
         files = changed_files or []
         journeys: List[Journey] = []
@@ -43,7 +45,7 @@ class JourneyPlanner:
         elif archetype == ProjectArchetype.API:
             journeys = cls._plan_api_journeys(task, git_diff, files, base_url)
         elif archetype == ProjectArchetype.CLI:
-            journeys = cls._plan_cli_journeys(task, git_diff, files)
+            journeys = cls._plan_cli_journeys(task, git_diff, files, project_root=project_root)
         elif archetype == ProjectArchetype.LIBRARY:
             journeys = cls._plan_library_journeys(task, git_diff, files)
         else:
@@ -220,11 +222,60 @@ class JourneyPlanner:
         return journeys
 
     @classmethod
-    def _plan_cli_journeys(cls, task: str, git_diff: str, files: List[str]) -> List[Journey]:
+    def _plan_cli_journeys(
+        cls,
+        task: str,
+        git_diff: str,
+        files: List[str],
+        project_root: Optional[Path] = None,
+    ) -> List[Journey]:
         journeys = []
 
         # Find CLI entry point
-        cmd_name = "python -m forge.cli" if any("forge" in f for f in files) else "python main.py"
+        cmd_name = None
+        for f in files:
+            f_norm = f.replace("\\", "/")
+            if "forge" in f_norm:
+                cmd_name = "python -m forge.cli"
+                break
+            elif f_norm.endswith("cli.py"):
+                cmd_name = f"python {f_norm}"
+                break
+            elif f_norm.endswith("main.py"):
+                cmd_name = f"python {f_norm}"
+                break
+            elif f_norm.endswith("app.py"):
+                cmd_name = f"python {f_norm}"
+                break
+            elif f_norm.endswith("run.py"):
+                cmd_name = f"python {f_norm}"
+                break
+
+        if not cmd_name and project_root:
+            if (project_root / "cli.py").exists():
+                cmd_name = "python cli.py"
+            elif (project_root / "src" / "forge" / "cli.py").exists():
+                cmd_name = "python -m forge.cli"
+            elif (project_root / "pyproject.toml").exists():
+                try:
+                    toml_txt = (project_root / "pyproject.toml").read_text(encoding="utf-8")
+                    m = re.search(r'\[project\.scripts\]\s*\n\s*([a-zA-Z0-9_\-]+)\s*=\s*["\']([^"\':]+):', toml_txt)
+                    if m:
+                        mod = m.group(2)
+                        if (project_root / f"{mod}.py").exists():
+                            cmd_name = f"python {mod}.py"
+                except Exception:
+                    pass
+            if not cmd_name:
+                if (project_root / "main.py").exists():
+                    cmd_name = "python main.py"
+                elif (project_root / "app.py").exists():
+                    cmd_name = "python app.py"
+                elif (project_root / "run.py").exists():
+                    cmd_name = "python run.py"
+
+        if not cmd_name:
+            cmd_name = "python cli.py" if any("cli" in f for f in files) else "python main.py"
 
         # Priority 1: Task command invocation
         journeys.append(

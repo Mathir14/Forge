@@ -196,7 +196,7 @@ class PromptCompiler:
         if current_byte_size() <= max_prompt_bytes:
             return budgeted
 
-        if budgeted.role_name.lower().strip() == "reviewer" and budgeted.tester_report and current_byte_size() > target_bytes:
+        if budgeted.role_name.lower().strip() in ("reviewer", "critic") and budgeted.tester_report and current_byte_size() > target_bytes:
             current_sz = current_byte_size()
             excess = current_sz - target_bytes
             t_bytes = len(budgeted.tester_report.encode("utf-8"))
@@ -213,7 +213,7 @@ class PromptCompiler:
         if current_byte_size() <= max_prompt_bytes:
             return budgeted
 
-        if budgeted.role_name.lower().strip() == "reviewer" and budgeted.tester_machine_report and current_byte_size() > target_bytes:
+        if budgeted.role_name.lower().strip() in ("reviewer", "critic") and budgeted.tester_machine_report and current_byte_size() > target_bytes:
             current_sz = current_byte_size()
             excess = current_sz - target_bytes
             tm_bytes = len(budgeted.tester_machine_report.encode("utf-8"))
@@ -389,10 +389,12 @@ class PromptCompiler:
 
         if tester_parts:
             behavioral_guidance = (
-                "Treat Tester findings as objective behavioral evidence.\n"
+                "Treat Tester findings as objective empirical behavioral evidence.\n"
                 "Reviewer remains solely responsible for implementation quality, architecture, security, and maintainability.\n"
                 "Cross-examine code changes and tests against observed runtime behaviors:\n"
-                "- If Tester reported PASS: verify that code achieving the pass does not rely on hacks, mock bypasses, or security flaws.\n"
+                "- Audit Coverage Depth: check whether Tester achieved 'FUNCTIONAL_VERIFIED' or only 'SHALLOW_SMOKE'.\n"
+                "- If Tester reported PASS: do not rubber-stamp! Check whether the pass was merely shallow empty-state navigation while modified features remained unexercised.\n"
+                "- Inspect Unexercised Changed Functionality: verify if any components modified by Executor were left unexercised by journeys.\n"
                 "- If Tester reported FAIL: verify root causes in the diff and evaluate code-level defects.\n"
                 "- If Tester reported NOT_TESTABLE: verify that static tests and mocks adequately cover changes.\n"
                 "- If Tester reported BLOCKED: inspect environmental or dependency issues in the code."
@@ -581,6 +583,21 @@ class PromptCompiler:
                         f'</audit_evidence>'
                     )
             parts.append("\n\n".join(evidence_parts))
+
+        # 2b. Empirical Tester Evidence & Coverage Depth
+        if instruction.tester_report or instruction.tester_machine_report:
+            tester_eval_parts = [
+                "## EMPIRICAL TESTER AUDIT EVIDENCE",
+                "Review the empirical Tester report and coverage depth metrics below:",
+                "- Cross-examine whether the Tester achieved 'FUNCTIONAL_VERIFIED' coverage or merely 'SHALLOW_SMOKE'.",
+                "- Scrutinize whether changed components were genuinely exercised or left unexercised.",
+                "- Do not treat an empty-state PASS as comprehensive validation of changed functionality.",
+            ]
+            if instruction.tester_report and instruction.tester_report.strip():
+                tester_eval_parts.append(f"### Tester Markdown Report\n{instruction.tester_report.strip()}")
+            if instruction.tester_machine_report and instruction.tester_machine_report.strip():
+                tester_eval_parts.append(f"### Tester Machine Protocol (JSON)\n```json\n{instruction.tester_machine_report.strip()}\n```")
+            parts.append("\n\n".join(tester_eval_parts))
 
         # 3. Git Diff
         if instruction.git_diff:

@@ -96,6 +96,8 @@ class RunModel:
     summary: Optional[Any] = None
     _started_tool_calls: Set[Tuple[str, str]] = field(default_factory=set, repr=False)
     _open_unidentified_tools: Dict[Tuple[str, str], int] = field(default_factory=dict, repr=False)
+    _stream_buffer: str = field(default="", repr=False)
+    _stream_stage: Optional[str] = field(default=None, repr=False)
 
     @property
     def task_fingerprint(self) -> str:
@@ -134,6 +136,52 @@ class RunModel:
             k: v for k, v in self._open_unidentified_tools.items() if k[0] != stage_name
         }
 
+    def _flush_stream_buffer(self) -> None:
+        """Flush any pending stream buffer text to console logs."""
+        if not self._stream_buffer:
+            self._stream_stage = None
+            return
+
+        buf = self._stream_buffer.replace("\r\n", "\n").replace("\r", "\n")
+        self._stream_buffer = ""
+        self._stream_stage = None
+
+        lines = buf.split("\n")
+        for i, line in enumerate(lines):
+            if line.strip():
+                self._add_log(f"  {line.rstrip()}")
+            elif self.console_logs and self.console_logs[-1].strip() != "":
+                if any(rem.strip() for rem in lines[i + 1:]):
+                    self._add_log("")
+
+    def _process_chunk_text(self, chunk_text: str, stage_name: Optional[str] = None) -> None:
+        """Accumulate streaming chunk text and emit completed lines."""
+        if not chunk_text:
+            return
+
+        # If chunk is from a different stage, flush previous buffer first
+        if self._stream_stage and stage_name and self._stream_stage != stage_name:
+            self._flush_stream_buffer()
+
+        if stage_name:
+            self._stream_stage = stage_name
+
+        norm_text = chunk_text.replace("\r\n", "\n").replace("\r", "\n")
+        self._stream_buffer += norm_text
+
+        if "\n" not in self._stream_buffer:
+            return
+
+        parts = self._stream_buffer.split("\n")
+        completed_lines = parts[:-1]
+        self._stream_buffer = parts[-1]
+
+        for line in completed_lines:
+            if line.strip():
+                self._add_log(f"  {line.rstrip()}")
+            elif self.console_logs and self.console_logs[-1].strip() != "":
+                self._add_log("")
+
     def apply_event(self, event: AgentEvent) -> None:
         """Process a live AgentEvent and incrementally update in-memory run state."""
         import time
@@ -143,6 +191,7 @@ class RunModel:
 
         # 1. Lifecycle: stage_start
         if lifecycle == "stage_start":
+            self._flush_stream_buffer()
             s_name = ev_data.get("stage_name") or ev_data.get("role_name")
             seq = ev_data.get("sequence_number")
             if s_name:
@@ -171,6 +220,8 @@ class RunModel:
                         "COMPLETED",
                         "SUCCESS",
                         "DONE",
+                        "PARTIAL",
+                        "NOT_TESTABLE",
                     ) or stage.duration_seconds > 0:
                         att_num = len(stage.attempts) + 1
                         stage.attempts.append(StageAttemptModel(
@@ -225,6 +276,7 @@ class RunModel:
 
         # 1c. Lifecycle: stage_skipped
         if lifecycle == "stage_skipped":
+            self._flush_stream_buffer()
             s_name = ev_data.get("stage_name") or ev_data.get("role_name") or ev_data.get("display_name")
             sk_status = ev_data.get("status", "APPROVED")
             disp_name = ev_data.get("display_name") or (s_name.capitalize() if s_name else "Stage")
@@ -243,6 +295,7 @@ class RunModel:
 
         # 2. Lifecycle: stage_finish
         if lifecycle == "stage_finish":
+            self._flush_stream_buffer()
             s_name = ev_data.get("stage_name") or ev_data.get("role_name")
             seq = ev_data.get("sequence_number")
             if s_name:
@@ -300,15 +353,12 @@ class RunModel:
                     target_stage.human_report = target_stage.raw_content[:sec_match.start()].strip()
                 else:
                     target_stage.human_report = target_stage.raw_content.strip()
-            clean_chunk = chunk_text.strip()
-            if clean_chunk:
-                first_line = clean_chunk.splitlines()[0]
-                if len(first_line) > 100:
-                    first_line = first_line[:97] + "..."
-                self._add_log(f"  {first_line}")
+            stage_name = target_stage.stage_name if target_stage else (self.active_stage_name or s_name)
+            self._process_chunk_text(chunk_text, stage_name=stage_name)
 
         # 5. Stream Event: TOOL_START
         elif event.event_type == AgentEventType.TOOL_START:
+            self._flush_stream_buffer()
             tool_name = ev_data.get("tool") or event.text or "tool"
             raw_cid = ev_data.get("call_id")
             call_id = str(raw_cid) if raw_cid is not None and str(raw_cid).strip() else ""
@@ -333,6 +383,7 @@ class RunModel:
 
         # 6. Stream Event: TOOL_FINISH
         elif event.event_type == AgentEventType.TOOL_FINISH:
+            self._flush_stream_buffer()
             tool_name = ev_data.get("tool") or event.text or "tool"
             raw_cid = ev_data.get("call_id")
             call_id = str(raw_cid) if raw_cid is not None and str(raw_cid).strip() else ""
@@ -370,6 +421,7 @@ class RunModel:
 
         # 7. Stream Event: COMPLETE
         elif event.event_type == AgentEventType.COMPLETE:
+            self._flush_stream_buffer()
             if target_stage:
                 target_stage.status = "APPROVED"
                 if event.result:
@@ -395,6 +447,7 @@ class RunModel:
 
         # 8. Stream Event: ERROR
         elif event.event_type == AgentEventType.ERROR:
+            self._flush_stream_buffer()
             if target_stage:
                 target_stage.status = "FAILED"
                 target_stage.has_error = True

@@ -19,7 +19,7 @@ class TestingBudget:
     __test__ = False
     max_runtime_seconds: float = 120.0
     max_journeys: int = 5
-    max_interactions_per_journey: int = 15
+    max_interactions_per_journey: int = 25
     max_screenshots: int = 10
     max_navigation_depth: int = 4
 
@@ -30,7 +30,7 @@ class TestingBudget:
         return cls(
             max_runtime_seconds=float(data.get("max_runtime_seconds", 120.0)),
             max_journeys=int(data.get("max_journeys", 5)),
-            max_interactions_per_journey=int(data.get("max_interactions_per_journey", 15)),
+            max_interactions_per_journey=int(data.get("max_interactions_per_journey", 25)),
             max_screenshots=int(data.get("max_screenshots", 10)),
             max_navigation_depth=int(data.get("max_navigation_depth", 4)),
         )

@@ -1,5 +1,6 @@
 """Storage manager for Forge runs and stage artifacts."""
 
+import hashlib
 import json
 import logging
 import re
@@ -9,6 +10,63 @@ import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from forge.core.run import Run
+
+
+def compute_file_sha256(path: Path) -> str:
+    """Compute deterministic SHA-256 hex digest of file contents."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_stage_config_fingerprint(
+    adapter: Optional[str] = None,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    extra_flags: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Compute deterministic SHA-256 fingerprint for material stage execution configuration."""
+    adapter_str = adapter if isinstance(adapter, str) else str(adapter or "opencode")
+    model_str = model if isinstance(model, str) else str(model or "default")
+    effort_str = effort if isinstance(effort, str) else str(effort or "default")
+    parts = [
+        f"adapter:{adapter_str.lower().strip()}",
+        f"model:{model_str.strip()}",
+        f"effort:{effort_str.strip()}",
+    ]
+    if extra_flags and isinstance(extra_flags, (dict, list)):
+        try:
+            flags_str = json.dumps(extra_flags, sort_keys=True, default=str)
+        except Exception:
+            flags_str = str(extra_flags)
+        parts.append(f"flags:{flags_str}")
+    elif extra_flags:
+        parts.append(f"flags:{str(extra_flags)}")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def compute_stage_input_fingerprint(
+    task_fingerprint: str,
+    sequence_number: int,
+    role_name: str,
+    upstream_hashes: Dict[str, str],
+    template_hash: Optional[str] = None,
+    config_fingerprint: Optional[str] = None,
+) -> str:
+    """Compute deterministic SHA-256 fingerprint for material stage inputs."""
+    tokens = [
+        f"task:{task_fingerprint}",
+        f"stage:{sequence_number}:{role_name}",
+    ]
+    for filename in sorted(upstream_hashes.keys()):
+        tokens.append(f"{filename}:{upstream_hashes[filename]}")
+    if template_hash:
+        tokens.append(f"template:{template_hash}")
+    if config_fingerprint:
+        tokens.append(f"config:{config_fingerprint}")
+    return hashlib.sha256("|".join(tokens).encode("utf-8")).hexdigest()
 
 
 class RunManager:
@@ -182,12 +240,36 @@ class RunManager:
         json_data: Dict[str, Any],
         prompt_hash: Optional[str] = None,
         adapter_name: Optional[str] = None,
+        template_hash: Optional[str] = None,
+        config_fingerprint: Optional[str] = None,
     ) -> Tuple[Path, Path]:
         """Save paired 0X_role.md and 0X_role.json files atomically."""
         run.run_dir.mkdir(parents=True, exist_ok=True)
         prefix = f"{sequence_number:02d}_{role_name}"
         md_file = run.run_dir / f"{prefix}.md"
         json_file = run.run_dir / f"{prefix}.json"
+
+        # Collect upstream hashes for existing deliverables of upstream stages
+        upstream_hashes: Dict[str, str] = {}
+        if hasattr(run, "run_dir") and run.run_dir and run.run_dir.exists():
+            from forge.stages.definition import StageOrder
+            for u_def in StageOrder.standard_pipeline_stages(no_critic=False):
+                if u_def.sequence_number < sequence_number:
+                    u_json = run.run_dir / f"{u_def.sequence_number:02d}_{u_def.name}.json"
+                    u_md = run.run_dir / f"{u_def.sequence_number:02d}_{u_def.name}.md"
+                    if u_json.exists():
+                        upstream_hashes[u_json.name] = compute_file_sha256(u_json)
+                    if u_md.exists():
+                        upstream_hashes[u_md.name] = compute_file_sha256(u_md)
+
+        input_fingerprint = compute_stage_input_fingerprint(
+            task_fingerprint=getattr(run, "task_fingerprint", "") or "",
+            sequence_number=sequence_number,
+            role_name=role_name,
+            upstream_hashes=upstream_hashes,
+            template_hash=template_hash,
+            config_fingerprint=config_fingerprint,
+        )
 
         with tempfile.NamedTemporaryFile(
             "w", dir=run.run_dir, prefix=f".tmp_{prefix}_md_", delete=False, encoding="utf-8"
@@ -203,6 +285,19 @@ class RunManager:
                 run.metadata["stage_fingerprints"] = {}
             run.metadata["stage_fingerprints"][role_name] = run.task_fingerprint
 
+        json_payload["input_fingerprint"] = input_fingerprint
+        if upstream_hashes:
+            json_payload["upstream_hashes"] = upstream_hashes
+        if template_hash:
+            json_payload["template_hash"] = template_hash
+            if "template_hashes" not in run.metadata or not isinstance(run.metadata["template_hashes"], dict):
+                run.metadata["template_hashes"] = {}
+            run.metadata["template_hashes"][role_name] = template_hash
+        if config_fingerprint:
+            json_payload["config_fingerprint"] = config_fingerprint
+            if "config_fingerprints" not in run.metadata or not isinstance(run.metadata["config_fingerprints"], dict):
+                run.metadata["config_fingerprints"] = {}
+            run.metadata["config_fingerprints"][role_name] = config_fingerprint
         json_payload["role"] = role_name
         json_payload["sequence_number"] = sequence_number
         if hasattr(run, "run_id") and run.run_id:
@@ -214,6 +309,23 @@ class RunManager:
             json.dump(json_payload, f, indent=2)
             tmp_json = Path(f.name)
         tmp_json.replace(json_file)
+
+        # Compute content hashes of saved artifacts for tamper detection
+        json_hash = compute_file_sha256(json_file)
+        md_hash = compute_file_sha256(md_file)
+        if "artifact_hashes" not in run.metadata or not isinstance(run.metadata["artifact_hashes"], dict):
+            run.metadata["artifact_hashes"] = {}
+        run.metadata["artifact_hashes"][role_name] = {
+            "json": json_hash,
+            "md": md_hash,
+        }
+        if "input_fingerprints" not in run.metadata or not isinstance(run.metadata["input_fingerprints"], dict):
+            run.metadata["input_fingerprints"] = {}
+        run.metadata["input_fingerprints"][role_name] = input_fingerprint
+        if "upstream_hashes" not in run.metadata or not isinstance(run.metadata["upstream_hashes"], dict):
+            run.metadata["upstream_hashes"] = {}
+        if upstream_hashes:
+            run.metadata["upstream_hashes"][role_name] = upstream_hashes
 
         if prompt_hash:
             run.prompt_hashes[role_name] = prompt_hash
@@ -229,6 +341,86 @@ class RunManager:
         old_fp = compute_task_fingerprint(old_task) if old_task else run.task_fingerprint
         run._archive_stale_artifacts(old_fp)
         run.save_metadata()
+
+    def invalidate_stage_and_downstream_artifacts(self, run: Run, from_sequence_number: int) -> List[str]:
+        """Invalidate and remove all canonical stage deliverables and metadata from from_sequence_number forward.
+
+        Ensures that when an upstream stage executes fresh, downstream deliverables from
+        previous runs or attempts cannot linger or falsely satisfy subsequent resumptions.
+        """
+        invalidated_files: List[str] = []
+        if not hasattr(run, "run_dir") or not run.run_dir or not run.run_dir.exists():
+            return invalidated_files
+
+        stage_file_pattern = re.compile(r"^0*(\d+)_([a-zA-Z0-9_\-]+)\.(json|md)$")
+        stale_history_dir = run.run_dir / "history" / f"invalidated_seq_{from_sequence_number}_{int(time.time() * 1000)}"
+
+        for p in list(run.run_dir.iterdir()):
+            if p.is_file() and "_attempt_" not in p.name:
+                m = stage_file_pattern.match(p.name)
+                if m:
+                    file_seq = int(m.group(1))
+                    if file_seq >= from_sequence_number:
+                        try:
+                            stale_history_dir.mkdir(parents=True, exist_ok=True)
+                            dest = stale_history_dir / p.name
+                            shutil.move(str(p), str(dest))
+                            invalidated_files.append(p.name)
+                        except Exception as e:
+                            logging.warning("Failed to archive stale artifact %s: %s", p, e)
+                            try:
+                                p.unlink(missing_ok=True)
+                                invalidated_files.append(p.name)
+                            except Exception:
+                                pass
+
+        from forge.stages.definition import StageOrder
+        affected_stage_names = {
+            s.name.lower()
+            for s in StageOrder.all_stages()
+            if s.sequence_number >= from_sequence_number
+        }
+
+        for key in (
+            "stage_fingerprints",
+            "input_fingerprints",
+            "artifact_hashes",
+            "upstream_hashes",
+            "template_hashes",
+            "config_fingerprints",
+        ):
+            if key in run.metadata and isinstance(run.metadata[key], dict):
+                for s_name in list(run.metadata[key].keys()):
+                    if s_name.lower() in affected_stage_names:
+                        run.metadata[key].pop(s_name, None)
+
+        if hasattr(run, "prompt_hashes") and isinstance(run.prompt_hashes, dict):
+            for s_name in list(run.prompt_hashes.keys()):
+                if s_name.lower() in affected_stage_names:
+                    run.prompt_hashes.pop(s_name, None)
+
+        if hasattr(run, "adapters_used") and isinstance(run.adapters_used, dict):
+            for s_name in list(run.adapters_used.keys()):
+                if s_name.lower() in affected_stage_names:
+                    run.adapters_used.pop(s_name, None)
+
+        if run.summary is not None:
+            for s_def in StageOrder.all_stages():
+                if s_def.sequence_number >= from_sequence_number:
+                    stage_entry = run.summary.get_stage(s_def.display_name) or run.summary.get_stage(s_def.name.capitalize())
+                    if stage_entry:
+                        stage_entry.status = "—"
+                        stage_entry.execution_state = "NOT REACHED"
+            run.summary.final_status = None
+            run.summary.reason = None
+            run.summary = run.summary
+
+        change_prod = StageOrder.change_producer()
+        if from_sequence_number <= change_prod.sequence_number:
+            run.metadata["auto_committed"] = False
+
+        run.save_metadata()
+        return invalidated_files
 
     def recover_stage_from_session(
         self,
@@ -282,7 +474,7 @@ class RunManager:
         is_success = (
             response.exit_code == 0
             and report.is_valid
-            and report.status not in ("REJECTED", "FAILED", "BLOCKED", "CHANGES_REQUIRED")
+            and report.status not in ("REJECTED", "FAILED", "BLOCKED", "CHANGES_REQUIRED", "PARTIAL")
         )
 
         stage_result = StageResult(

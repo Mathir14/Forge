@@ -11,7 +11,7 @@ class MachineReportValidator:
         "ARCHITECT": {"APPROVED", "READY", "SUCCESS", "COMPLETED", "FAILED", "BLOCKED", "REJECTED"},
         "PLANNER": {"READY", "APPROVED", "SUCCESS", "COMPLETED", "FAILED", "BLOCKED", "REJECTED"},
         "EXECUTOR": {"SUCCESS", "APPROVED", "COMPLETED", "FAILED", "BLOCKED", "REJECTED"},
-        "TESTER": {"PASS", "FAIL", "BLOCKED", "NOT_TESTABLE", "APPROVED", "CHANGES_REQUIRED", "REJECTED", "PASSED", "FAILED"},
+        "TESTER": {"PASS", "FAIL", "BLOCKED", "NOT_TESTABLE", "APPROVED", "CHANGES_REQUIRED", "REJECTED", "PASSED", "FAILED", "PARTIAL"},
         "REVIEWER": {"APPROVED", "CHANGES_REQUIRED", "BLOCKED", "REJECTED", "FAILED"},
     }
 
@@ -137,6 +137,32 @@ class MachineReportValidator:
                 f"Protocol invariant violation: Planner success status '{status}' requires active handoff (e.g. 'EXECUTOR'), got 'NONE'."
             )
 
+        # Invariant 4: Failing statuses cannot hand off to REVIEWER
+        if status in ("FAIL", "FAILED") and handoff == "REVIEWER":
+            errors.append(
+                f"Protocol invariant violation: Failure status '{status}' cannot hand off to 'REVIEWER'. "
+                "Failing stages cannot proceed to Reviewer verification."
+            )
+
+        # Invariant 5: Tester routing invariants
+        if role == "TESTER":
+            if status in ("PASS", "PASSED", "APPROVED") and handoff == "EXECUTOR":
+                errors.append(
+                    f"Protocol invariant violation: Tester success status '{status}' cannot hand off to 'EXECUTOR'. "
+                    "Passing tests must proceed to 'REVIEWER' or 'NONE'."
+                )
+            elif status in ("FAIL", "FAILED") and handoff not in ("EXECUTOR", "NONE"):
+                errors.append(
+                    f"Protocol invariant violation: Tester failure status '{status}' requires handoff to 'EXECUTOR' or 'NONE', got '{handoff}'."
+                )
+
+        # Invariant 6: Reviewer routing invariants
+        if role == "REVIEWER":
+            if status in ("APPROVED", "SUCCESS", "COMPLETED") and handoff != "NONE":
+                errors.append(
+                    f"Protocol invariant violation: Reviewer approval status '{status}' requires handoff 'NONE', got '{handoff}'."
+                )
+
         # 3.2 ADR-015 PKB Protocol Invariants & Proposal Validation
         proposals_raw = normalized_data.get("KNOWLEDGE_PROPOSALS", [])
         proposals: List[KnowledgeProposal] = []
@@ -184,10 +210,20 @@ class MachineReportValidator:
 
         # 4. Extract standard fields
         exit_code = 0
-        try:
-            exit_code = int(normalized_data.get("EXIT_CODE", 0))
-        except (ValueError, TypeError):
-            pass
+        raw_exit_code = normalized_data.get("EXIT_CODE")
+        if raw_exit_code is not None:
+            try:
+                exit_code = int(raw_exit_code)
+            except (ValueError, TypeError):
+                errors.append(f"Invalid EXIT_CODE '{raw_exit_code}': must be an integer")
+                exit_code = 1
+
+        # Invariant 7: Success status contradicts non-zero EXIT_CODE
+        from forge.stages.definition import StageOrder
+        if status != "NOT_TESTABLE" and StageOrder.is_success_status(status, expected_role.lower()) and exit_code != 0:
+            errors.append(
+                f"Protocol invariant violation: Success status '{status}' contradicts non-zero EXIT_CODE ({exit_code})."
+            )
 
         reason = normalized_data.get("REASON")
         confidence = normalized_data.get("CONFIDENCE")
@@ -217,7 +253,7 @@ class MachineReportValidator:
         is_valid = len(errors) == 0
         if not is_valid:
             from forge.stages.definition import StageOrder
-            if StageOrder.is_success_status(status, expected_role.lower()):
+            if status != "NOT_TESTABLE" and StageOrder.is_success_status(status, expected_role.lower()):
                 status = "FAILED"
         return MachineReport(
             role=role,

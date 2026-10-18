@@ -93,7 +93,11 @@ class Stage:
             )
             if not is_mock:
                 from forge.testing.engine import TesterEngine
-                engine = TesterEngine(context=context, run_manager=self.run_manager)
+                engine = TesterEngine(
+                    context=context,
+                    run_manager=self.run_manager,
+                    adapter=self.adapter,
+                )
                 return engine.run()
 
         # 1. Prepare

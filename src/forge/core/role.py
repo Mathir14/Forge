@@ -26,6 +26,13 @@ class Role:
         from forge.stages.requirements import StageRequirementsRegistry
         return StageRequirementsRegistry.get(self.name)
 
+    @property
+    def template_hash(self) -> str:
+        """Deterministic 16-char SHA-256 hash of role template and protocol content."""
+        import hashlib
+        raw = f"{self.template_content.strip()}|{self.protocol_content.strip()}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
     @classmethod
     def load(
         cls,

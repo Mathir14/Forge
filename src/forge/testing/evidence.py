@@ -12,6 +12,8 @@ reproduce and verify defect fixes directly.
 
 import json
 import logging
+import re
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,17 +26,98 @@ logger = logging.getLogger(__name__)
 class EvidenceCollector:
     """Collects and stores multi-modal empirical evidence for test runs."""
 
-    def __init__(self, run_dir: Path):
-        self.run_dir = run_dir
-        self.evidence_dir = run_dir / "evidence"
+    def __init__(self, run_dir: Path, attempt: Optional[int] = None):
+        self.run_dir = Path(run_dir)
+        self.evidence_dir = self.run_dir / "evidence"
         self.screenshots_dir = self.evidence_dir / "screenshots"
         self.telemetry_dir = self.evidence_dir / "telemetry"
         self.repro_dir = self.evidence_dir / "repro"
+        self.attempts_dir = self.evidence_dir / "attempts"
 
-        # Ensure directories exist
+        # Determine attempt number if not explicitly provided or invalid
+        if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
+            self.attempt = attempt
+        else:
+            self.attempt = self._detect_attempt_number()
+
+        # If this is a retry attempt (attempt > 1), isolate prior attempt's evidence
+        if self.attempt > 1:
+            self._archive_prior_evidence(prior_attempt=self.attempt - 1)
+
+        # Ensure canonical directories exist
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
         self.telemetry_dir.mkdir(parents=True, exist_ok=True)
         self.repro_dir.mkdir(parents=True, exist_ok=True)
+
+    def _detect_attempt_number(self) -> int:
+        """Detect current attempt number from existing run artifacts."""
+        existing_attempts = list(self.run_dir.glob("*_tester_attempt_*.json"))
+        if existing_attempts:
+            max_num = 1
+            for p in existing_attempts:
+                m = re.search(r"_attempt_(\d+)\.json", p.name)
+                if m:
+                    max_num = max(max_num, int(m.group(1)))
+            return max_num + 1
+
+        if self.attempts_dir.exists():
+            att_dirs = [d for d in self.attempts_dir.iterdir() if d.is_dir() and d.name.startswith("attempt_")]
+            if att_dirs:
+                max_att = 1
+                for d in att_dirs:
+                    try:
+                        num = int(d.name.split("_")[1])
+                        max_att = max(max_att, num)
+                    except (IndexError, ValueError):
+                        pass
+                return max_att + 1
+
+        has_existing_evidence = any(
+            p.exists() and any(p.iterdir())
+            for p in (self.screenshots_dir, self.repro_dir, self.telemetry_dir)
+        )
+        if has_existing_evidence:
+            return 2
+
+        return 1
+
+    def _archive_prior_evidence(self, prior_attempt: int) -> Optional[Path]:
+        """Move existing un-archived evidence to evidence/attempts/attempt_{prior_attempt}/."""
+        has_files = any(
+            p.exists() and any(f.is_file() for f in p.iterdir())
+            for p in (self.screenshots_dir, self.repro_dir, self.telemetry_dir)
+        )
+        if not has_files:
+            return None
+
+        target_dir = self.attempts_dir / f"attempt_{prior_attempt}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        for sub in ("screenshots", "telemetry", "repro"):
+            src_sub = self.evidence_dir / sub
+            if src_sub.exists():
+                dst_sub = target_dir / sub
+                dst_sub.mkdir(parents=True, exist_ok=True)
+                for f in src_sub.iterdir():
+                    if f.is_file():
+                        shutil.move(str(f), str(dst_sub / f.name))
+
+        logger.info("Archived attempt %d evidence to %s", prior_attempt, target_dir)
+        return target_dir
+
+    def archive_current_attempt(self, attempt_number: int) -> Path:
+        """Explicitly archive current attempt's evidence into evidence/attempts/attempt_{attempt_number}/."""
+        target_dir = self.attempts_dir / f"attempt_{attempt_number}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for sub in ("screenshots", "telemetry", "repro"):
+            src_sub = self.evidence_dir / sub
+            if src_sub.exists():
+                dst_sub = target_dir / sub
+                dst_sub.mkdir(parents=True, exist_ok=True)
+                for f in src_sub.iterdir():
+                    if f.is_file():
+                        shutil.copy2(str(f), str(dst_sub / f.name))
+        return target_dir
 
     def capture_screenshot(
         self,
@@ -108,6 +191,7 @@ class EvidenceCollector:
             DefectCategory.NETWORK_FAILURE,
             DefectCategory.LAYOUT_REGRESSION,
             DefectCategory.BROKEN_NAVIGATION,
+            DefectCategory.INVALID_INTERACTION,
         ):
             # Generate Playwright Python reproduction script
             repro_file = self.repro_dir / f"repro_{safe_id}.py"

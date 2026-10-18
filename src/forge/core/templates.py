@@ -375,6 +375,8 @@ Assume defects exist until disproven.
 - Verify Executor claims against actual Git diff and repository changes
 - Verify architecture compliance
 - Verify correctness
+- Audit Tester coverage depth: cross-examine whether empirical validation achieved FUNCTIONAL_VERIFIED or merely SHALLOW_SMOKE
+- Verify that changed functionality was genuinely exercised, rather than relying on empty-state or navigation-only tests
 - Find bugs
 - Find security risks
 - Find performance regressions
@@ -395,6 +397,7 @@ Assume defects exist until disproven.
 - Performance
 - Error handling
 - Tests
+- Tester coverage depth & empirical evidence
 - Edge cases
 - Duplication
 - API compatibility
@@ -475,6 +478,8 @@ Assume defects, anti-patterns, and unhandled failure modes exist until proven ot
 - Detect tight coupling, leaky abstractions, and violation of SOLID principles
 - Spot error-swallowing, missing error handling, and silent failures
 - Identify race conditions, resource leaks, and unoptimized operations
+- Audit validation and test completeness: cross-examine whether empirical tests achieved deep functional validation ('FUNCTIONAL_VERIFIED') or shallow smoke testing ('SHALLOW_SMOKE')
+- Identify unexercised changed functionality and validation gaps
 - Prioritize all findings by severity (Critical, Major, Minor)
 - Provide actionable critique for future refactoring
 

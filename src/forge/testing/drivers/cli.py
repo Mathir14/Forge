@@ -92,6 +92,24 @@ class CliInteractionDriver(InteractionDriver):
                     repro_script = evidence.generate_reproduction_script(defect, journey)
                     defect.evidence_paths["reproduction_script"] = str(repro_script)
                     defects.append(defect)
+                elif step.expected_state and step.expected_state.strip():
+                    expected_val = step.expected_state.strip()
+                    if expected_val not in combined and str(res.returncode) != expected_val:
+                        defect_id = f"DEF-{journey.id}-CLI-ASSERT-{step_idx + 1}"
+                        defect = Defect(
+                            id=defect_id,
+                            title=f"CLI command '{cmd}' output assertion failed",
+                            category=DefectCategory.FUNCTIONAL_ASSERTION_FAILURE,
+                            severity=DefectSeverity.MAJOR,
+                            journey_id=journey.id,
+                            steps_to_reproduce=list(repro_steps_log),
+                            expected=f"Output containing: {expected_val}",
+                            actual=f"Actual stdout: {res.stdout[:300]}\nActual stderr: {res.stderr[:300]}",
+                            telemetry={"exit_code": res.returncode, "stdout": res.stdout, "stderr": res.stderr},
+                        )
+                        repro_script = evidence.generate_reproduction_script(defect, journey)
+                        defect.evidence_paths["reproduction_script"] = str(repro_script)
+                        defects.append(defect)
 
                 steps_completed += 1
 

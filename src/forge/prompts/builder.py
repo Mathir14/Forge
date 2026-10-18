@@ -145,10 +145,10 @@ class InstructionBuilder:
                     except Exception as e:
                         logging.warning("Failed to read change producer artifact %s: %s", exec_file, e)
 
-        # Resolve complete Tester report (both markdown and machine report JSON) for Reviewer
+        # Resolve complete Tester report (both markdown and machine report JSON) for Reviewer and Critic
         tester_report: Optional[str] = None
         tester_machine_report: Optional[str] = None
-        if role.name == "reviewer":
+        if role.name in ("reviewer", "critic"):
             tester_report = previous_stage_outputs.get("tester")
             if not tester_report and context.run and hasattr(context.run, "run_dir"):
                 from forge.stages.definition import StageOrder
@@ -183,7 +183,16 @@ class InstructionBuilder:
                         try:
                             tj_obj = json.loads(t_json_content)
                             if isinstance(tj_obj, dict):
-                                prov_keys = {"task_fingerprint", "role", "sequence_number", "run_id"}
+                                prov_keys = {
+                                    "task_fingerprint",
+                                    "role",
+                                    "sequence_number",
+                                    "run_id",
+                                    "input_fingerprint",
+                                    "upstream_hashes",
+                                    "template_hash",
+                                    "config_fingerprint",
+                                }
                                 clean_obj = {k: v for k, v in tj_obj.items() if k not in prov_keys}
                                 t_json_content = json.dumps(clean_obj)
                         except Exception:

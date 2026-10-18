@@ -5,6 +5,7 @@ from typing import List, Optional, Set, Tuple, Union, Any, FrozenSet
 from pathlib import Path
 import json
 import re
+import subprocess
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,7 @@ class StageDefinition:
         base = set(self.success_statuses)
         base.update({"FAILED", "BLOCKED"})
         if self.is_verifier or self.role_type == "verifier":
-            base.update({"CHANGES_REQUIRED", "REJECTED", "FAIL"})
+            base.update({"CHANGES_REQUIRED", "REJECTED", "FAIL", "PARTIAL"})
         elif self.role_type in ("planning", "producer", "analysis", "audit", "general"):
             base.update({"REJECTED"})
         return frozenset(base)
@@ -280,7 +281,6 @@ class StageOrder:
         "COMPLETED",
         "COMPLETE",
         "COMMITTED",
-        "NOT_TESTABLE",
     })
 
     @classmethod
@@ -352,6 +352,7 @@ class StageOrder:
         run_dir: Optional[Union[str, Path]] = None,
         task_fingerprint: Optional[str] = None,
         run_id: Optional[str] = None,
+        context: Optional[Any] = None,
     ) -> Tuple[bool, Optional[str], Optional[str]]:
         """Centrally verify if a pipeline execution positively establishes full successful completion
         based exclusively on physical, valid, correctly provenanced stage deliverables.
@@ -505,10 +506,20 @@ class StageOrder:
                 art_status = str(art_data.get("status") or art_data.get("STATUS") or "").upper().strip()
                 if not art_status or art_status in ("PENDING", "UNKNOWN", "RUNNING", "IN_PROGRESS", "NOT REACHED", "—", ""):
                     return False, req_def.display_name, f"Stage '{req_def.display_name}' did not complete (status '{art_status}')."
-                if art_status in ("FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED"):
+                if art_status in ("FAILED", "FAIL", "BLOCKED", "REJECTED", "CHANGES_REQUIRED", "PARTIAL"):
                     return False, req_def.display_name, f"Stage '{req_def.display_name}' finished with non-success status '{art_status}'."
-                if not cls.is_success_status(art_status, req_def.name):
+
+                if art_status == "NOT_TESTABLE" and req_def.name == "tester":
+                    can_bypass, bypass_err = cls.is_doc_only_not_testable_bypass(
+                        stage_result=art_data,
+                        run_dir=run_dir,
+                        context=context,
+                    )
+                    if not can_bypass:
+                        return False, req_def.display_name, f"Stage '{req_def.display_name}' finished with non-success status 'NOT_TESTABLE' ({bypass_err})."
+                elif not cls.is_success_status(art_status, req_def.name):
                     return False, req_def.display_name, f"Stage '{req_def.display_name}' finished with non-success status '{art_status}'."
+
                 art_ec = art_data.get("exit_code")
                 if art_ec is not None and art_ec != 0:
                     return False, req_def.display_name, f"Stage '{req_def.display_name}' failed with exit code {art_ec}."
@@ -522,7 +533,18 @@ class StageOrder:
                 if not status_str or status_str in ("PENDING", "UNKNOWN", "RUNNING", "IN_PROGRESS", "NOT REACHED", "—", ""):
                     return False, req_def.display_name, f"Pipeline terminated before stage '{req_def.display_name}' completed."
 
-                if not cls.is_success_status(status_str, req_def.name) and status_str not in ("SKIPPED", "COMPLETE"):
+                if status_str in ("FAILED", "FAIL", "BLOCKED", "REJECTED", "CHANGES_REQUIRED", "PARTIAL"):
+                    return False, req_def.display_name, f"Stage '{req_def.display_name}' finished with non-success status '{status_str}'."
+
+                if status_str == "NOT_TESTABLE" and req_def.name == "tester":
+                    can_bypass, bypass_err = cls.is_doc_only_not_testable_bypass(
+                        stage_result=stage_inst,
+                        run_dir=run_dir,
+                        context=context,
+                    )
+                    if not can_bypass:
+                        return False, req_def.display_name, f"Stage '{req_def.display_name}' finished with non-success status 'NOT_TESTABLE' ({bypass_err})."
+                elif not cls.is_success_status(status_str, req_def.name) and status_str not in ("SKIPPED", "COMPLETE"):
                     return False, req_def.display_name, f"Stage '{req_def.display_name}' finished with non-success status '{status_str}'."
 
                 inst_meta = getattr(stage_inst, "metadata", None)
@@ -541,6 +563,272 @@ class StageOrder:
                         return False, req_def.display_name, f"Stage '{req_def.display_name}' has mismatched sequence number."
 
         return True, None, "All stages completed successfully."
+
+    @classmethod
+    def is_doc_only_not_testable_bypass(
+        cls,
+        stage_result: Any,
+        context: Optional[Any] = None,
+        changed_files: Optional[List[str]] = None,
+        run_dir: Optional[Union[str, Path]] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """Centrally evaluate whether a Tester NOT_TESTABLE result qualifies as an ADR-002
+        documentation-only bypass.
+
+        A documentation-only bypass is permitted IF AND ONLY IF:
+        1. Role is 'tester' and status is 'NOT_TESTABLE'.
+        2. Handoff is strictly 'REVIEWER' (never 'NONE' or 'EXECUTOR').
+        3. Exit code is 0 (both adapter response and machine report).
+        4. Machine report data contains NO empirical verification artifacts (no COVERAGE, no archetype, no evidence directory).
+        5. Changed files / task context modified NO application code files (strictly non-code files such as markdown, documentation, or config).
+
+        Returns: (can_bypass: bool, reason: Optional[str])
+        """
+        # 1. Resolve role, status, handoff, exit_code, and coverage data
+        if isinstance(stage_result, dict):
+            role = str(stage_result.get("role") or stage_result.get("ROLE") or "").lower().strip()
+            status = str(stage_result.get("status") or stage_result.get("STATUS") or "").upper().strip()
+            handoff = str(stage_result.get("handoff") or stage_result.get("HANDOFF") or "").upper().strip()
+            exit_code = stage_result.get("exit_code") if stage_result.get("exit_code") is not None else stage_result.get("EXIT_CODE", 0)
+            mr_data = stage_result.get("machine_report", {}) if isinstance(stage_result.get("machine_report"), dict) else {}
+            has_coverage = bool(
+                stage_result.get("COVERAGE")
+                or (isinstance(stage_result.get("DATA"), dict) and (stage_result["DATA"].get("archetype") or stage_result["DATA"].get("evidence_directory")))
+                or (isinstance(mr_data, dict) and (mr_data.get("data", {}).get("COVERAGE") or mr_data.get("data", {}).get("DATA", {}).get("archetype")))
+            )
+        else:
+            role = str(getattr(stage_result, "role_name", "") or getattr(getattr(stage_result, "role", None), "name", "") or "").lower().strip()
+            if not role and hasattr(stage_result, "stage_name"):
+                m = re.match(r"^(\d+)_([a-zA-Z0-9_\-]+)$", str(stage_result.stage_name))
+                if m:
+                    role = m.group(2).lower().strip()
+            status = str(getattr(stage_result, "status", "") or "").upper().strip()
+            handoff = str(getattr(stage_result, "handoff", "") or "").upper().strip()
+            mr = getattr(stage_result, "machine_report", None)
+            if not handoff and mr:
+                handoff = str(getattr(mr, "handoff", "") or "").upper().strip()
+            resp = getattr(stage_result, "response", None)
+            resp_ec = getattr(resp, "exit_code", 0) if resp is not None else 0
+            rep_ec = getattr(mr, "exit_code", 0) if mr is not None else 0
+            stage_ec = getattr(stage_result, "exit_code", None)
+            exit_code = stage_ec if stage_ec is not None else (rep_ec if rep_ec != 0 else resp_ec)
+
+            mr_data = getattr(mr, "data", {}) if mr else {}
+            if not isinstance(mr_data, dict):
+                mr_data = {}
+            raw_json = getattr(stage_result, "json_dict", {}) if hasattr(stage_result, "json_dict") else {}
+            if not isinstance(raw_json, dict):
+                raw_json = {}
+            has_coverage = bool(
+                mr_data.get("COVERAGE")
+                or (isinstance(mr_data.get("DATA"), dict) and (mr_data["DATA"].get("archetype") or mr_data["DATA"].get("evidence_directory")))
+                or raw_json.get("COVERAGE")
+            )
+
+        if role and role != "tester":
+            return False, f"Role '{role}' is not tester"
+
+        if status != "NOT_TESTABLE":
+            return False, f"Status '{status}' is not NOT_TESTABLE"
+
+        # 2. Handoff check
+        if handoff != "REVIEWER":
+            return False, f"Tester handoff is '{handoff or 'NONE'}', expected 'REVIEWER'"
+
+        # 3. Exit code check
+        try:
+            ec_int = int(exit_code) if exit_code is not None else 0
+        except (ValueError, TypeError):
+            ec_int = 1
+        if ec_int != 0:
+            return False, f"Non-zero exit code ({ec_int}) indicates verification failure"
+
+        # 4. Empirical evidence check
+        if has_coverage:
+            return False, "Empirical verification telemetry detected; empirical runs cannot bypass to Reviewer"
+
+        # 5. Application code changes check
+        files_to_check: List[str] = []
+        has_source_info = False
+
+        if changed_files is not None:
+            files_to_check.extend(changed_files)
+            has_source_info = True
+        else:
+            if context and getattr(context, "baseline_error", None):
+                return False, f"Git baseline loading failed: {context.baseline_error}"
+
+            git = getattr(context, "git", None) if context else None
+            if git:
+                try:
+                    is_repo = git.is_git_repo()
+                except Exception as e:
+                    return False, f"Git inspection failed: {e}"
+
+                if is_repo:
+                    has_source_info = True
+
+                    # Verify git status runs cleanly
+                    if hasattr(git, "_run"):
+                        try:
+                            res_st = git._run(["status", "--porcelain"])
+                            if isinstance(res_st, subprocess.CompletedProcess) and res_st.returncode != 0:
+                                return False, f"Git inspection failed: git status exited with code {res_st.returncode}: {res_st.stderr.strip()}"
+                        except Exception as e:
+                            return False, f"Git inspection failed: {e}"
+
+                        try:
+                            res_df = git._run(["diff", "--name-only", "--", "."])
+                            if isinstance(res_df, subprocess.CompletedProcess) and res_df.returncode != 0:
+                                return False, f"Git inspection failed: git diff exited with code {res_df.returncode}: {res_df.stderr.strip()}"
+                        except Exception as e:
+                            return False, f"Git inspection failed: {e}"
+
+                    # Baseline changes and committed changes
+                    baseline = getattr(context, "baseline", None)
+                    if baseline is None and run_dir:
+                        bp = Path(run_dir) / "git_baseline.json"
+                        if bp.exists():
+                            try:
+                                from forge.core.git import GitBaseline
+                                baseline = GitBaseline.load(bp)
+                            except Exception as e:
+                                return False, f"Git baseline loading failed: {e}"
+
+                    if baseline is not None:
+                        try:
+                            if hasattr(git, "attribute_changes"):
+                                attr = git.attribute_changes(baseline)
+                                files_to_check.extend(attr.all_run_relevant_changes)
+                        except Exception as e:
+                            return False, f"Git inspection failed: {e}"
+
+                        head_commit = getattr(baseline, "head_commit", None)
+                        if head_commit and hasattr(git, "_run"):
+                            try:
+                                res_log = git._run(["log", "--name-only", "--format=", f"{head_commit}..HEAD"])
+                                if isinstance(res_log, subprocess.CompletedProcess):
+                                    if res_log.returncode == 0:
+                                        for line in res_log.stdout.splitlines():
+                                            f_line = line.strip()
+                                            if f_line:
+                                                files_to_check.append(f_line)
+                                    else:
+                                        return False, f"Git inspection failed: git log exited with code {res_log.returncode}: {res_log.stderr.strip()}"
+                            except Exception as e:
+                                return False, f"Git inspection failed: {e}"
+
+                    # Working tree tracked + untracked changes
+                    try:
+                        if hasattr(git, "changed_files"):
+                            files_to_check.extend(git.changed_files())
+                    except Exception as e:
+                        return False, f"Git inspection failed: {e}"
+
+                    # Untracked files via ls-files
+                    if hasattr(git, "_run"):
+                        try:
+                            res_ls = git._run(["ls-files", "--others", "--exclude-standard"])
+                            if isinstance(res_ls, subprocess.CompletedProcess):
+                                if res_ls.returncode == 0:
+                                    for line in res_ls.stdout.splitlines():
+                                        f_line = line.strip()
+                                        if f_line:
+                                            files_to_check.append(f_line)
+                                else:
+                                    return False, f"Git inspection failed: git ls-files exited with code {res_ls.returncode}: {res_ls.stderr.strip()}"
+                        except Exception as e:
+                            return False, f"Git inspection failed: {e}"
+
+            # Check Executor deliverables in run_dir
+            r_dir = run_dir or (getattr(getattr(context, "run", None), "run_dir", None) if context else None)
+            if r_dir:
+                r_path = Path(r_dir)
+                exec_md = r_path / "03_executor.md"
+                if exec_md.exists():
+                    has_source_info = True
+                    try:
+                        text = exec_md.read_text(encoding="utf-8")
+                        m_fc = re.search(r"##+\s*(?:Files\s+Changed|Changed\s+Files|Modified\s+Files)\s*\n((?:[ \t]*[-*0-9.]+[ \t]+[^\n]+\n?)+)", text, re.IGNORECASE)
+                        if m_fc:
+                            for line in m_fc.group(1).splitlines():
+                                cleaned = line.strip().lstrip("-*0123456789. ").strip().split(":")[0].strip().strip("`*'\"")
+                                if "[" in cleaned and "]" in cleaned:
+                                    m_link = re.search(r"\[([^\]]+)\]", cleaned)
+                                    if m_link:
+                                        cleaned = m_link.group(1).strip()
+                                if cleaned and not cleaned.startswith("http") and ("/" in cleaned or "." in cleaned or "\\" in cleaned):
+                                    files_to_check.append(cleaned)
+                    except Exception:
+                        pass
+
+                exec_json = r_path / "03_executor.json"
+                if exec_json.exists():
+                    has_source_info = True
+                    try:
+                        data_j = json.loads(exec_json.read_text(encoding="utf-8"))
+                        if isinstance(data_j, dict):
+                            fc_list = data_j.get("files_changed") or data_j.get("changed_files") or data_j.get("files")
+                            if isinstance(fc_list, list):
+                                for item in fc_list:
+                                    if isinstance(item, str):
+                                        files_to_check.append(item)
+                                    elif isinstance(item, dict) and "path" in item:
+                                        files_to_check.append(item["path"])
+                            diff_text = data_j.get("diff")
+                            if isinstance(diff_text, str) and diff_text:
+                                for line in diff_text.splitlines():
+                                    if line.startswith("+++ b/"):
+                                        files_to_check.append(line[6:].strip())
+                    except Exception:
+                        pass
+
+            # Check in-memory stages on context
+            if context:
+                stages = getattr(context, "stages", None) or getattr(context, "executed_stages", None)
+                if isinstance(stages, list):
+                    for stg in stages:
+                        role_name = getattr(stg, "role_name", "") or getattr(getattr(stg, "role", None), "name", "")
+                        if str(role_name).lower() == "executor":
+                            has_source_info = True
+                            raw_md = getattr(stg, "raw_markdown", "") or ""
+                            if raw_md:
+                                m_fc = re.search(r"##+\s*(?:Files\s+Changed|Changed\s+Files|Modified\s+Files)\s*\n((?:[ \t]*[-*0-9.]+[ \t]+[^\n]+\n?)+)", raw_md, re.IGNORECASE)
+                                if m_fc:
+                                    for line in m_fc.group(1).splitlines():
+                                        cleaned = line.strip().lstrip("-*0123456789. ").strip().split(":")[0].strip().strip("`*'\"")
+                                        if cleaned and not cleaned.startswith("http") and ("/" in cleaned or "." in cleaned or "\\" in cleaned):
+                                            files_to_check.append(cleaned)
+
+            if not has_source_info:
+                return False, "Insufficient change information: cannot verify task is documentation-only without Git state or task deliverables"
+
+        code_extensions = {
+            ".py", ".pyi", ".pyw",
+            ".js", ".mjs", ".cjs", ".jsx",
+            ".ts", ".mts", ".cts", ".tsx",
+            ".vue", ".svelte",
+            ".html", ".htm", ".css", ".scss", ".sass", ".less",
+            ".go", ".rs", ".rb", ".java", ".kt", ".kts", ".scala",
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx",
+            ".cs", ".php", ".swift", ".dart", ".zig", ".nim",
+            ".sh", ".bash", ".zsh", ".fish", ".bat", ".cmd", ".ps1",
+            ".sql", ".wasm",
+        }
+
+        for raw_item in files_to_check:
+            candidates = [p.strip() for p in raw_item.split(" -> ")] if " -> " in raw_item else [raw_item]
+            for cf in candidates:
+                posix = cf.replace("\\", "/").strip().strip('"').strip("'")
+                if posix.startswith("./"):
+                    posix = posix[2:]
+                if posix.startswith(".forge/") or "/.forge/" in posix:
+                    continue
+                p = Path(posix)
+                if p.suffix.lower() in code_extensions:
+                    return False, f"Application code changes detected ({cf}); empirical verification required"
+
+        return True, None
 
     @classmethod
     def resolve_definition(

@@ -8,6 +8,7 @@ Provides black-box empirical verification:
 - Explicit Coverage & Actionable QA Reporting
 """
 
+from forge.testing.ai_planner import AiJourneyPlanner, PlanningResult
 from forge.testing.archetypes import ArchetypeDetector
 from forge.testing.browser import (
     BrowserDriver,
@@ -18,6 +19,7 @@ from forge.testing.browser import (
 from forge.testing.budget import BudgetTracker, TestingBudget
 from forge.testing.engine import TesterEngine
 from forge.testing.evidence import EvidenceCollector
+from forge.testing.fixtures import TestFixture, TestingFixtureManager
 from forge.testing.models import (
     CoverageReport,
     Defect,
@@ -33,6 +35,7 @@ from forge.testing.report import TesterReportGenerator
 from forge.testing.supervisor import RuntimeSupervisor
 
 __all__ = [
+    "AiJourneyPlanner",
     "ArchetypeDetector",
     "BrowserDriver",
     "BrowserDriverFactory",
@@ -47,9 +50,12 @@ __all__ = [
     "JourneyResult",
     "JourneyStep",
     "MockBrowserDriver",
+    "PlanningResult",
     "PlaywrightBrowserDriver",
     "ProjectArchetype",
     "RuntimeSupervisor",
+    "TestFixture",
+    "TestingFixtureManager",
     "TesterEngine",
     "TesterReportGenerator",
     "TestingBudget",

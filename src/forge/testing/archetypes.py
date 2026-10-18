@@ -62,38 +62,69 @@ class ArchetypeDetector:
             except Exception as e:
                 logger.debug("Failed reading package.json for archetype detection: %s", e)
 
-        # 3. Check HTML static files
+        # 3. Check Python markers (pyproject.toml, requirements.txt)
+        py_content = ""
+        pyproject = project_root / "pyproject.toml"
+        req_file = project_root / "requirements.txt"
+        if pyproject.exists():
+            try:
+                py_content += " " + pyproject.read_text(encoding="utf-8").lower()
+            except Exception as e:
+                logger.debug("Failed reading pyproject.toml: %s", e)
+        if req_file.exists():
+            try:
+                py_content += " " + req_file.read_text(encoding="utf-8").lower()
+            except Exception as e:
+                logger.debug("Failed reading requirements.txt: %s", e)
+
+        if py_content:
+            has_streamlit = "streamlit" in py_content
+            has_api = any(m in py_content for m in ("fastapi", "uvicorn", "flask", "django", "starlette"))
+            has_explicit_cli = (project_root / "cli.py").exists() or "project.scripts" in py_content or "console_scripts" in py_content
+
+            # Ambiguity check: conflicting web/api backend frameworks without entrypoint disambiguation
+            if has_streamlit and has_api:
+                has_streamlit_file = (project_root / "streamlit_app.py").exists()
+                has_api_file = (project_root / "api.py").exists()
+                if has_streamlit_file and not has_api_file:
+                    return ProjectArchetype.WEB_SPA
+                elif has_api_file and not has_streamlit_file:
+                    return ProjectArchetype.API
+                else:
+                    logger.warning("Ambiguous archetype: conflicting frameworks detected in %s", project_root)
+                    return ProjectArchetype.UNKNOWN
+
+            if has_streamlit:
+                return ProjectArchetype.WEB_SPA
+            if has_api:
+                if (project_root / "templates").exists() or (project_root / "static").exists():
+                    return ProjectArchetype.WEB_SPA
+                return ProjectArchetype.API
+            if has_explicit_cli or any(m in py_content for m in ("click", "typer")):
+                return ProjectArchetype.CLI
+            if any(m in py_content for m in ("build-backend", "flit", "setuptools", "poetry")):
+                return ProjectArchetype.LIBRARY
+
+        # 4. Check candidate entry files
+        if (project_root / "cli.py").exists():
+            return ProjectArchetype.CLI
+
+        for candidate in ("app.py", "streamlit_app.py", "main.py"):
+            fpath = project_root / candidate
+            if fpath.exists():
+                try:
+                    head = fpath.read_text(encoding="utf-8", errors="ignore")[:2000]
+                    if "import streamlit" in head or "from streamlit" in head:
+                        return ProjectArchetype.WEB_SPA
+                except Exception as e:
+                    logger.debug("Failed checking %s for streamlit import: %s", candidate, e)
+
+        # 5. Check HTML static files (Conventional Web) only if no backend framework was found
         if (project_root / "index.html").exists() or (project_root / "public" / "index.html").exists():
             return ProjectArchetype.WEB_SPA
 
-        # 4. Check Python markers
-        pyproject = project_root / "pyproject.toml"
-        if pyproject.exists():
-            try:
-                content = pyproject.read_text(encoding="utf-8").lower()
-                if "fastapi" in content or "uvicorn" in content or "flask" in content or "django" in content or "starlette" in content:
-                    # If html templates or static dir exist, could be WEB_SPA / SSR, otherwise API
-                    if (project_root / "templates").exists() or (project_root / "static").exists():
-                        return ProjectArchetype.WEB_SPA
-                    return ProjectArchetype.API
-                if "click" in content or "typer" in content or "project.scripts" in content or "console_scripts" in content:
-                    return ProjectArchetype.CLI
-                if "build-backend" in content or "flit" in content or "setuptools" in content or "poetry" in content:
-                    return ProjectArchetype.LIBRARY
-            except Exception as e:
-                logger.debug("Failed reading pyproject.toml: %s", e)
-
-        # 5. Check requirements.txt
-        req_file = project_root / "requirements.txt"
-        if req_file.exists():
-            content = req_file.read_text(encoding="utf-8").lower()
-            if "fastapi" in content or "uvicorn" in content or "flask" in content or "django" in content:
-                return ProjectArchetype.API
-            if "click" in content or "typer" in content:
-                return ProjectArchetype.CLI
-
-        # 6. Check common CLI entry points
-        if (project_root / "src" / "forge" / "cli.py").exists() or (project_root / "cli.py").exists() or (project_root / "main.py").exists():
+        # 6. Fallback entrypoint check
+        if (project_root / "src" / "forge" / "cli.py").exists() or (project_root / "main.py").exists():
             return ProjectArchetype.CLI
 
         return ProjectArchetype.UNKNOWN

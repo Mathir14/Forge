@@ -106,8 +106,8 @@ To cut a new release:
 ### Step 1: Bump Version & Validate Locally
 
 Update the version in:
-- `pyproject.toml` (e.g. `version = "0.1.0b14"`)
-- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b14"`)
+- `pyproject.toml` (e.g. `version = "0.1.0b15"`)
+- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b15"`)
 
 Run local tests to confirm:
 ```bash
@@ -117,11 +117,11 @@ pytest
 ### Step 2: Commit and Tag
 
 ```bash
-git commit -am "chore: release v0.1.0b14"
+git commit -am "chore: release v0.1.0b15"
 git push origin master
 
-git tag -a v0.1.0b14 -m "Release v0.1.0b14"
-git push origin v0.1.0b14
+git tag -a v0.1.0b15 -m "Release v0.1.0b15"
+git push origin v0.1.0b15
 ```
 
 ### Step 3: Monitor Staged Release in GitHub Actions
@@ -151,7 +151,19 @@ git push origin v0.1.0b14
 
 ---
 
-## 6. Release Notes: v0.1.0b14
+## 6. Release Notes: v0.1.0b15
+
+`v0.1.0b15` delivers cross-project Tester v2 archetype generalization, runtime supervisor isolation, adversarial verdict arbitration, complete cache fingerprinting, and deterministic browser fallback:
+
+- **Cross-Project Tester v2 Generalization**: Dedicated interaction drivers and heuristics for conventional HTML/JS web applications, CLI tools with discoverable non-`main.py` entrypoints, HTTP REST APIs with schema and status validation, and baseline Streamlit applications.
+- **Runtime Environment Isolation & Process Supervision**: `RuntimeSupervisor` enforces clean virtual environment execution (`PYTHONNOUSERSITE=1`), explicit dependency boundaries, dynamic port allocation without reservation races, and reliable process group termination preventing orphaned background listeners.
+- **Adversarial Reliability & Intent-Aware Verdict Arbitration**: Arbitrates between intended authentication checks (`401`/`403`) and unexpected security failures, enforces fail-closed policies on unexpected `4xx`/`5xx` responses, and prevents unverified application code changes from masquerading as passes.
+- **Cache Fingerprint Completeness & Tamper-Evident Invalidation**: Added `Role.template_hash` and `compute_stage_config_fingerprint` to ensure prompt template edits, protocol changes, and material execution parameters (`adapter`, `model`, `effort`, `extra_flags`) reliably invalidate stage caches across pipeline resumes.
+- **Deterministic Browser Fallback & Thread Lifecycle Safety**: Wrapped `PlaywrightBrowserDriver.start()` in robust cleanup guards to prevent unclosed event loops from polluting threads on startup failure, and expanded `MockBrowserDriver` with quote-agnostic HTML attribute matching.
+
+---
+
+## 7. Release Notes: v0.1.0b14
 
 `v0.1.0b14` delivers cross-adapter tool-event rendering reliability, stage-boundary tool-tracking isolation, adapter session recovery hardening, and platform-safe duration testing:
 

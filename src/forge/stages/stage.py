@@ -558,7 +558,12 @@ class Stage:
                 if effective_timeout is not None:
                     budget = TestingBudget(max_runtime_seconds=float(effective_timeout))
 
-                engine = TesterEngine(context=context, run_manager=self.run_manager, budget=budget)
+                engine = TesterEngine(
+                    context=context,
+                    run_manager=self.run_manager,
+                    budget=budget,
+                    adapter=self.adapter,
+                )
                 try:
                     return engine.run()
                 except Exception as exc:
@@ -575,15 +580,7 @@ class Stage:
                             pass
                     raise
 
-        # 1. Prepare
-        instruction = InstructionBuilder.build(context, self.role)
-        rendered_prompt = PromptCompiler.compile(
-            instruction,
-            self.role.template_content,
-            max_prompt_bytes=self.adapter.max_prompt_bytes,
-        )
-
-        # 2. Resolve timeouts
+        # 0.2 Resolve timeouts and stage configuration
         timeout = self.timeout
         if timeout is None and context.config:
             stage_cfg = context.config.get_stage_config(
@@ -601,6 +598,67 @@ class Stage:
             idle_timeout = getattr(stage_cfg, "idle_timeout", None)
             if idle_timeout is None and hasattr(context.config, "defaults"):
                 idle_timeout = getattr(context.config.defaults, "idle_timeout", None)
+
+        # 0.3 Closing Critic verification gate check
+        if self.role.is_closing_critic:
+            from forge.stages.definition import StageOrder
+            from forge.prompts.rendered_prompt import RenderedPrompt
+            if context.run and getattr(context.run, "run_dir", None) and context.run.run_dir.exists():
+                for v_def in StageOrder.verification_stages():
+                    v_json = self.run_manager.load_stage_json(context.run, v_def)
+                    if not v_json:
+                        block_reason = f"Closing Critic blocked: Required verification deliverable '{v_def.artifact_prefix}.json' is missing."
+                        report = MachineReport(
+                            role="CRITIC",
+                            status="BLOCKED",
+                            exit_code=1,
+                            reason=block_reason,
+                            is_valid=True,
+                        )
+                        resp = AdapterResponse(stdout=f"```yaml\nROLE: CRITIC\nSTATUS: BLOCKED\nEXIT_CODE: 1\nREASON: \"{block_reason}\"\nHANDOFF: NONE\n```", stderr=block_reason, exit_code=1, duration_seconds=0.0, raw_output="BLOCKED")
+                        return StageResult(
+                            role=self.role,
+                            prompt=RenderedPrompt.from_text(""),
+                            response=resp,
+                            machine_report=report,
+                            raw_markdown=f"# Closing Critic Audit\n\n**STATUS: BLOCKED**\n\n{block_reason}",
+                            duration_seconds=0.0,
+                            success=False,
+                        )
+                    v_status = str(v_json.get("status") or "").upper().strip()
+                    v_ec = v_json.get("exit_code", 0)
+                    is_failed = v_status in ("FAIL", "FAILED", "BLOCKED", "REJECTED", "CHANGES_REQUIRED") or (v_ec is not None and v_ec != 0)
+                    if v_status == "NOT_TESTABLE" and v_def.name == "tester":
+                        can_bypass, _ = StageOrder.is_doc_only_not_testable_bypass(v_json, context=context, run_dir=context.run.run_dir)
+                        if not can_bypass:
+                            is_failed = True
+                    if is_failed:
+                        block_reason = f"Closing Critic blocked: Required verification deliverable '{v_def.artifact_prefix}.json' has non-success status '{v_status}'."
+                        report = MachineReport(
+                            role="CRITIC",
+                            status="BLOCKED",
+                            exit_code=1,
+                            reason=block_reason,
+                            is_valid=True,
+                        )
+                        resp = AdapterResponse(stdout=f"```yaml\nROLE: CRITIC\nSTATUS: BLOCKED\nEXIT_CODE: 1\nREASON: \"{block_reason}\"\nHANDOFF: NONE\n```", stderr=block_reason, exit_code=1, duration_seconds=0.0, raw_output="BLOCKED")
+                        return StageResult(
+                            role=self.role,
+                            prompt=RenderedPrompt.from_text(""),
+                            response=resp,
+                            machine_report=report,
+                            raw_markdown=f"# Closing Critic Audit\n\n**STATUS: BLOCKED**\n\n{block_reason}",
+                            duration_seconds=0.0,
+                            success=False,
+                        )
+
+        # 1. Prepare
+        instruction = InstructionBuilder.build(context, self.role)
+        rendered_prompt = PromptCompiler.compile(
+            instruction,
+            self.role.template_content,
+            max_prompt_bytes=self.adapter.max_prompt_bytes,
+        )
 
         # 3. Event-driven execution
         start_time = time.time()
@@ -687,10 +745,13 @@ class Stage:
                 raw_yaml=raw_yaml,
             )
 
+            from forge.stages.definition import StageOrder
             success = (
                 response.exit_code == 0
+                and report.exit_code == 0
                 and report.is_valid
-                and report.status not in ("REJECTED", "FAILED", "BLOCKED", "CHANGES_REQUIRED")
+                and StageOrder.is_success_status(report.status, self.role.name)
+                and report.status not in ("REJECTED", "FAILED", "BLOCKED", "CHANGES_REQUIRED", "PARTIAL", "FAIL")
             )
         else:
             # ERROR terminates the stage immediately while preserving ExecutionResult
@@ -736,6 +797,41 @@ class Stage:
                 encoding="utf-8",
             )
 
+        cfg_fp = None
+        if hasattr(context, "config") and context.config:
+            from forge.storage.run_manager import compute_stage_config_fingerprint
+            stage_cfg = context.config.get_stage_config(self.role.name, phase=getattr(self.role, "phase", "pre_run"))
+            adapter_name = getattr(self.adapter, "name", None)
+            if not isinstance(adapter_name, str):
+                adapter_name = getattr(stage_cfg, "adapter", "opencode")
+            if not isinstance(adapter_name, str):
+                adapter_name = "opencode"
+
+            model_val = getattr(self.adapter, "model", None)
+            if not isinstance(model_val, str):
+                model_val = getattr(stage_cfg, "model", None)
+            if not isinstance(model_val, str):
+                model_val = None
+
+            effort_val = getattr(self.adapter, "effort", None)
+            if not isinstance(effort_val, str):
+                effort_val = getattr(stage_cfg, "effort", None)
+            if not isinstance(effort_val, str):
+                effort_val = None
+
+            flags_val = getattr(self.adapter, "extra_flags", None)
+            if not isinstance(flags_val, (dict, list)):
+                flags_val = getattr(stage_cfg, "extra_flags", None)
+            if not isinstance(flags_val, (dict, list)):
+                flags_val = None
+
+            cfg_fp = compute_stage_config_fingerprint(
+                adapter=adapter_name,
+                model=model_val,
+                effort=effort_val,
+                extra_flags=flags_val,
+            )
+
         self.run_manager.save_stage_artifacts(
             run=context.run,
             sequence_number=self.role.sequence_number,
@@ -744,6 +840,8 @@ class Stage:
             json_data=result.to_dict(),
             prompt_hash=rendered_prompt.prompt_hash,
             adapter_name=self.adapter.name,
+            template_hash=getattr(self.role, "template_hash", None),
+            config_fingerprint=cfg_fp,
         )
 
         # Stage PKB knowledge proposals if emitted

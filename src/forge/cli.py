@@ -176,11 +176,106 @@ STAGE_SUCCESS_STATUSES: Dict[str, Set[str]] = {
 }
 
 
-def is_stage_completed(run: Any, stage_def: StageDefinition, run_mgr: RunManager) -> tuple[bool, Optional[str]]:
+def is_stage_completed(run: Any, stage_def: StageDefinition, run_mgr: RunManager, context: Optional[Any] = None) -> tuple[bool, Optional[str]]:
     """Check if a stage in a resumed run has already completed successfully."""
     prior_json = run_mgr.load_stage_json(run, stage_def)
     if not prior_json:
         return False, None
+
+    prior_status = prior_json.get("status") or prior_json.get("STATUS")
+
+    if not hasattr(run, "run_dir") or not run.run_dir or not run.run_dir.exists():
+        return False, prior_status
+
+    candidate_json_file = run.run_dir / f"{stage_def.sequence_number:02d}_{stage_def.name}.json"
+    if not candidate_json_file.exists():
+        return False, prior_status
+
+    from forge.storage.run_manager import compute_file_sha256, compute_stage_input_fingerprint
+
+    # 1. Downstream Artifact Tamper & Corruption Check
+    # Verify candidate JSON and Markdown deliverables match recorded artifact hashes in run metadata
+    artifact_hashes = getattr(run, "metadata", {}).get("artifact_hashes", {})
+    if isinstance(artifact_hashes, dict) and stage_def.name in artifact_hashes:
+        stage_hashes = artifact_hashes[stage_def.name]
+        if isinstance(stage_hashes, dict):
+            expected_json_hash = stage_hashes.get("json")
+            if expected_json_hash:
+                current_json_hash = compute_file_sha256(candidate_json_file)
+                if current_json_hash != expected_json_hash:
+                    return False, None
+
+            candidate_md_file = run.run_dir / f"{stage_def.sequence_number:02d}_{stage_def.name}.md"
+            expected_md_hash = stage_hashes.get("md")
+            if candidate_md_file.exists() and expected_md_hash:
+                current_md_hash = compute_file_sha256(candidate_md_file)
+                if current_md_hash != expected_md_hash:
+                    return False, None
+
+    # 2. Upstream Deliverables Integrity, Provenance & Content Freshness
+    # Verify that all upstream deliverables on which this stage was built still exist,
+    # have not changed their content hashes, and possess valid task/run provenance.
+    recorded_upstreams = prior_json.get("upstream_hashes") or getattr(run, "metadata", {}).get("upstream_hashes", {}).get(stage_def.name)
+    if isinstance(recorded_upstreams, dict):
+        for up_fname, expected_up_hash in recorded_upstreams.items():
+            up_path = run.run_dir / up_fname
+            if not up_path.exists():
+                return False, prior_status
+            current_up_hash = compute_file_sha256(up_path)
+            if current_up_hash != expected_up_hash:
+                return False, prior_status
+
+            if up_fname.endswith(".json"):
+                try:
+                    u_data = json.loads(up_path.read_text(encoding="utf-8"))
+                    if not isinstance(u_data, dict):
+                        return False, prior_status
+                except Exception:
+                    return False, prior_status
+
+                # Verify upstream run identity
+                u_run_id = u_data.get("run_id")
+                if u_run_id and str(u_run_id) != str(run.run_id):
+                    return False, prior_status
+
+                # Verify upstream task fingerprint
+                u_tfp = u_data.get("task_fingerprint")
+                if u_tfp and u_tfp != getattr(run, "task_fingerprint", None):
+                    return False, prior_status
+
+                # Verify upstream status is a valid success status
+                u_status = u_data.get("status") or u_data.get("STATUS")
+                u_role = u_data.get("role") or up_fname.split("_", 1)[1].split(".")[0]
+                u_valid_statuses = StageOrder.get_success_statuses(u_role)
+                if u_valid_statuses and u_status not in u_valid_statuses:
+                    return False, prior_status
+
+        # Verify input fingerprint
+        art_input_fp = prior_json.get("input_fingerprint")
+        if art_input_fp:
+            expected_input_fp = compute_stage_input_fingerprint(
+                task_fingerprint=getattr(run, "task_fingerprint", "") or "",
+                sequence_number=stage_def.sequence_number,
+                role_name=stage_def.name,
+                upstream_hashes=recorded_upstreams,
+                template_hash=prior_json.get("template_hash"),
+                config_fingerprint=prior_json.get("config_fingerprint"),
+            )
+            if art_input_fp != expected_input_fp:
+                return False, prior_status
+
+    # 3. Upstream freshness invariant via modification times (defense-in-depth):
+    # A stage cannot be completed if any upstream dependency deliverable was modified
+    # AFTER this stage's deliverable was created.
+    candidate_mtime = candidate_json_file.stat().st_mtime
+    for u_def in StageOrder.standard_pipeline_stages(no_critic=False):
+        if u_def.sequence_number < stage_def.sequence_number:
+            u_json = run.run_dir / f"{u_def.sequence_number:02d}_{u_def.name}.json"
+            u_md = run.run_dir / f"{u_def.sequence_number:02d}_{u_def.name}.md"
+            if u_json.exists() and u_json.stat().st_mtime > candidate_mtime:
+                return False, prior_status
+            if u_md.exists() and u_md.stat().st_mtime > candidate_mtime:
+                return False, prior_status
 
     # Task identity and provenance invariants (N-001, N-009):
     # A stage artifact must prove intrinsic identity matching the current task,
@@ -233,6 +328,48 @@ def is_stage_completed(run: Any, stage_def: StageDefinition, run_mgr: RunManager
         ec = prior_json.get("exit_code")
         if ec is not None and ec != 0:
             return False, prior_status
+        if stage_def.name == "tester" and prior_status == "NOT_TESTABLE":
+            can_bypass, _ = StageOrder.is_doc_only_not_testable_bypass(
+                prior_json,
+                context=context,
+                run_dir=getattr(run, "run_dir", None),
+            )
+        if context is not None:
+            from forge.core.role import Role
+            from forge.storage.run_manager import compute_stage_config_fingerprint
+
+            # Verify current prompt template matches recorded template_hash
+            rec_template_hash = prior_json.get("template_hash") or getattr(run, "metadata", {}).get("template_hashes", {}).get(stage_def.name)
+            if rec_template_hash:
+                curr_role = Role.load(
+                    stage_def.name,
+                    project_root=getattr(context, "project_root", None),
+                    sequence_number=stage_def.sequence_number,
+                    phase=stage_def.phase,
+                )
+                if curr_role.template_hash != rec_template_hash:
+                    return False, prior_status
+
+            # Verify current stage config matches recorded config_fingerprint
+            rec_config_fp = prior_json.get("config_fingerprint") or getattr(run, "metadata", {}).get("config_fingerprints", {}).get(stage_def.name)
+            if rec_config_fp and hasattr(context, "config") and context.config:
+                stage_cfg = context.config.get_stage_config(stage_def.name, phase=stage_def.phase)
+                curr_config_fp = compute_stage_config_fingerprint(
+                    adapter=stage_cfg.adapter,
+                    model=stage_cfg.model,
+                    effort=stage_cfg.effort,
+                    extra_flags=stage_cfg.extra_flags,
+                )
+                if curr_config_fp != rec_config_fp:
+                    return False, prior_status
+
+            # Verify current configured adapter matches recorded adapter
+            rec_adapter = getattr(run, "adapters_used", {}).get(stage_def.name) or prior_json.get("adapter_name")
+            if rec_adapter and hasattr(context, "config") and context.config:
+                stage_cfg = context.config.get_stage_config(stage_def.name, phase=stage_def.phase)
+                if stage_cfg.adapter and stage_cfg.adapter.lower() != rec_adapter.lower():
+                    return False, prior_status
+
         return True, prior_status
     return False, prior_status
 
@@ -245,6 +382,10 @@ def execute_stage(
     banner_prefix: str = "",
 ) -> StageResult:
     """Execute a single stage defined by StageDefinition using the shared execution lifecycle."""
+    # Invalidate stage deliverables and all downstream deliverables
+    if hasattr(context, "run") and context.run:
+        run_mgr.invalidate_stage_and_downstream_artifacts(context.run, stage_def.sequence_number)
+
     config = context.config
     stage_cfg = config.get_stage_config(stage_def.name, phase=stage_def.phase)
     adapter = _get_adapter(config, stage_def.name, phase=stage_def.phase)
@@ -536,9 +677,19 @@ def _run_stage(
                 context=context,
             )
 
-            if not result.success or not result.machine_report.is_valid or result.status in ("REJECTED", "BLOCKED", "FAILED", "UNKNOWN", "CHANGES_REQUIRED"):
+            is_doc_bypass = False
+            if stage_name.lower() == "tester" and result.status == "NOT_TESTABLE":
+                can_bypass, bypass_err = StageOrder.is_doc_only_not_testable_bypass(result, context=context)
+                if can_bypass:
+                    click.secho("  ℹ️ Tester status NOT_TESTABLE accepted: documentation-only task with no application code changes.", fg="cyan")
+                    is_doc_bypass = True
+                else:
+                    click.secho(f"\n⚠️ Tester NOT_TESTABLE rejected: {bypass_err}.", fg="red")
+                    result.machine_report.reason = bypass_err
+
+            if (not result.success or not result.machine_report.is_valid or result.status in ("REJECTED", "BLOCKED", "FAILED", "FAIL", "UNKNOWN", "CHANGES_REQUIRED", "PARTIAL", "NOT_TESTABLE")) and not is_doc_bypass:
                 click.secho(f"\n⚠️ Stage '{stage_name}' finished with non-success status '{result.status}'.", fg="red")
-                run.status = result.status if result.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED") else "FAILED"
+                run.status = result.status if result.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED", "PARTIAL", "NOT_TESTABLE", "FAIL") else "FAILED"
                 reason = result.machine_report.reason or ("; ".join(result.machine_report.validation_errors) if result.machine_report.validation_errors else None) or f"Stage '{stage_name}' finished with status '{result.status}'"
                 _record_final_halt(run, run.status, reason)
                 run.save_metadata()
@@ -1153,8 +1304,9 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
             for stage_def in stages_to_run:
                 d_name = "Critic" if stage_def.name.lower() == "critic" else stage_def.name.capitalize()
                 # If resuming an existing run for the same task, skip stages that already completed successfully
-                if is_resumed_same_task:
-                    completed, prior_status = is_stage_completed(run, stage_def, run_mgr)
+                # but once any upstream stage is executed, all downstream stages must execute fresh
+                if is_resumed_same_task and stages_executed == 0:
+                    completed, prior_status = is_stage_completed(run, stage_def, run_mgr, context=context)
                     if completed:
                         click.echo(f"  ⏭ Skipping Stage: {stage_def.name.capitalize()} (already completed with status '{prior_status}')")
                         _record_stage_transition(run, d_name, prior_status or "APPROVED", "SKIPPED", role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
@@ -1187,9 +1339,19 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
 
                 click.echo(f"  ✓ {stage_def.name.capitalize()} completed | Status: {result.status} ({result.duration_seconds:.1f}s)")
 
-                if not result.success or not result.machine_report.is_valid or result.status in ("REJECTED", "BLOCKED", "FAILED", "UNKNOWN", "CHANGES_REQUIRED"):
+                is_doc_bypass = False
+                if stage_def.name == "tester" and result.status == "NOT_TESTABLE":
+                    can_bypass, bypass_err = StageOrder.is_doc_only_not_testable_bypass(result, context=context)
+                    if can_bypass:
+                        click.secho("  ℹ️ Tester status NOT_TESTABLE accepted: documentation-only task with no application code changes.", fg="cyan")
+                        is_doc_bypass = True
+                    else:
+                        click.secho(f"\n⚠️ Tester NOT_TESTABLE rejected: {bypass_err}.", fg="red")
+                        result.machine_report.reason = bypass_err
+
+                if (not result.success or not result.machine_report.is_valid or result.status in ("REJECTED", "BLOCKED", "FAILED", "FAIL", "UNKNOWN", "CHANGES_REQUIRED", "PARTIAL", "NOT_TESTABLE")) and not is_doc_bypass:
                     click.secho(f"\n⚠️ Pipeline halted at stage '{stage_def.name}' due to status '{result.status}' (Valid: {result.machine_report.is_valid}).", fg="red")
-                    run.status = result.status if result.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED") else "FAILED"
+                    run.status = result.status if result.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED", "PARTIAL", "NOT_TESTABLE", "FAIL") else "FAILED"
                     if not result.machine_report.is_valid:
                         val_err = "; ".join(result.machine_report.validation_errors) if result.machine_report.validation_errors else "Invalid machine report"
                         reason = f"{stage_def.display_name} validation error: {val_err}"
@@ -1481,8 +1643,8 @@ def auto_pipeline(
                 for stage_def in StageOrder.pre_loop_stages():
                     _check_abort()
                     stage_done = False
-                    if is_resumed_same_task:
-                        stage_done, stage_status = is_stage_completed(run, stage_def, run_mgr)
+                    if is_resumed_same_task and stages_executed == 0:
+                        stage_done, stage_status = is_stage_completed(run, stage_def, run_mgr, context=context)
                         if stage_done:
                             click.echo(f"  ⏭ Skipping {stage_def.display_name} (already completed with status '{stage_status}')")
                             _record_stage_transition(run, stage_def.display_name, stage_status or "APPROVED", "SKIPPED", role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
@@ -1494,9 +1656,19 @@ def auto_pipeline(
                     _record_stage_transition(run, stage_def.display_name, stage_res.status, "COMPLETED", duration=stage_res.duration_seconds, role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
                     _check_abort()
 
-                    if not stage_res.success or not stage_res.machine_report.is_valid or stage_res.status in ("REJECTED", "BLOCKED", "FAILED", "UNKNOWN", "CHANGES_REQUIRED"):
+                    is_doc_bypass = False
+                    if stage_def.name == "tester" and stage_res.status == "NOT_TESTABLE":
+                        can_bypass, bypass_err = StageOrder.is_doc_only_not_testable_bypass(stage_res, context=context)
+                        if can_bypass:
+                            click.secho("  ℹ️ Tester status NOT_TESTABLE accepted: documentation-only task with no application code changes.", fg="cyan")
+                            is_doc_bypass = True
+                        else:
+                            click.secho(f"\n⚠️ Tester NOT_TESTABLE rejected: {bypass_err}.", fg="red")
+                            stage_res.machine_report.reason = bypass_err
+
+                    if (not stage_res.success or not stage_res.machine_report.is_valid or stage_res.status in ("REJECTED", "BLOCKED", "FAILED", "FAIL", "UNKNOWN", "CHANGES_REQUIRED", "PARTIAL", "NOT_TESTABLE")) and not is_doc_bypass:
                         click.secho(f"\n⚠️ Autonomous loop halted: {stage_def.display_name} finished with status '{stage_res.status}'.", fg="red")
-                        run.status = stage_res.status if (stage_res.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED")) else "FAILED"
+                        run.status = stage_res.status if (stage_res.status in ("REJECTED", "BLOCKED", "CHANGES_REQUIRED", "PARTIAL", "NOT_TESTABLE", "FAIL")) else "FAILED"
                         if not stage_res.machine_report.is_valid:
                             val_err = "; ".join(stage_res.machine_report.validation_errors) if stage_res.machine_report.validation_errors else "Invalid machine report"
                             reason = f"{stage_def.display_name} validation error: {val_err}"
@@ -1520,20 +1692,23 @@ def auto_pipeline(
                 approved = False
                 latest_verifier_res: Optional[StageResult] = None
 
-                if is_resumed_same_task:
+                if is_resumed_same_task and stages_executed == 0:
                     all_verifiers_approved = True
-                    for v_def in verifier_defs:
-                        v_done, v_status = is_stage_completed(run, v_def, run_mgr)
-                        if not (v_done and v_status in v_def.success_statuses):
-                            all_verifiers_approved = False
-                            break
+                    p_done, p_status = is_stage_completed(run, producer_def, run_mgr, context=context)
+                    if not p_done:
+                        all_verifiers_approved = False
+                    else:
+                        for v_def in verifier_defs:
+                            v_done, v_status = is_stage_completed(run, v_def, run_mgr, context=context)
+                            if not (v_done and v_status in v_def.success_statuses):
+                                all_verifiers_approved = False
+                                break
                     if all_verifiers_approved:
                         verifiers_label = " & ".join(v.display_name for v in verifier_defs)
                         click.echo(f"  ⏭ Skipping {producer_def.display_name} & {verifiers_label} (already approved)")
-                        p_done, p_status = is_stage_completed(run, producer_def, run_mgr)
                         _record_stage_transition(run, producer_def.display_name, p_status or "COMPLETE", "SKIPPED", role_name=producer_def.name, seq=producer_def.sequence_number, context=context)
                         for v_def in verifier_defs:
-                            _, v_status = is_stage_completed(run, v_def, run_mgr)
+                            _, v_status = is_stage_completed(run, v_def, run_mgr, context=context)
                             _record_stage_transition(run, v_def.display_name, v_status or "APPROVED", "SKIPPED", role_name=v_def.name, seq=v_def.sequence_number, context=context)
                         approved = True
 
@@ -1541,6 +1716,8 @@ def auto_pipeline(
                     max_retries_val = max(1, max_retries)
                     for iteration in range(1, max_retries_val + 1):
                         iter_label = f" (Attempt {iteration}/{max_retries_val})" if max_retries_val > 1 else ""
+                        context.iteration = iteration
+                        context.current_attempt = iteration
 
                         _check_abort()
                         # 1. Execute Change Producer (e.g. Executor)
@@ -1641,18 +1818,38 @@ def auto_pipeline(
                             with open(attempt_v_json, "w", encoding="utf-8") as f:
                                 json.dump(verifier_res.to_dict(), f, indent=2)
 
-                            if verifier_res.status in verifier_def.success_statuses:
+                            is_verifier_passed = False
+                            if verifier_def.name == "tester" and verifier_res.status == "NOT_TESTABLE":
+                                can_bypass, bypass_err = StageOrder.is_doc_only_not_testable_bypass(verifier_res, context=context)
+                                if can_bypass:
+                                    click.secho("  ℹ️ Tester status NOT_TESTABLE accepted: documentation-only task with no application code changes.", fg="cyan")
+                                    is_verifier_passed = True
+                                else:
+                                    click.secho(f"\n⚠️ Tester NOT_TESTABLE rejected: {bypass_err}.", fg="red")
+                                    verifier_res.machine_report.reason = bypass_err
+                                    is_verifier_passed = False
+                            elif verifier_res.status in verifier_def.success_statuses and verifier_res.success:
+                                is_verifier_passed = True
+
+                            if is_verifier_passed:
                                 continue
                             else:
                                 all_verifiers_passed = False
-                                if verifier_res.status == "BLOCKED":
-                                    click.secho(f"\n⚠️ {verifier_def.display_name} blocked: {verifier_res.machine_report.reason or 'Requirements blocked'}.", fg="red")
-                                    run.status = "BLOCKED"
-                                    reason = verifier_res.machine_report.reason or "Requirements blocked"
+                                if (
+                                    verifier_res.status in ("BLOCKED", "PARTIAL", "NOT_TESTABLE")
+                                    or (verifier_def.name == "tester" and verifier_res.handoff == "NONE")
+                                ):
+                                    halt_status = verifier_res.status if verifier_res.status in ("BLOCKED", "PARTIAL", "NOT_TESTABLE") else "BLOCKED"
+                                    reason = verifier_res.machine_report.reason or f"{verifier_def.display_name} ended with status '{halt_status}' (handoff NONE)"
+                                    if halt_status == "BLOCKED":
+                                        click.secho(f"\n⚠️ {verifier_def.display_name} blocked: {reason}.", fg="red")
+                                    else:
+                                        click.secho(f"\n⚠️ {verifier_def.display_name} halted: {reason}.", fg="red")
+                                    run.status = halt_status
                                     _record_final_halt(run, run.status, reason)
                                     run.save_metadata()
                                     raise AutonomousHalt(
-                                        status="BLOCKED",
+                                        status=halt_status,
                                         exit_code=1,
                                         reason=reason,
                                         stage_name=verifier_def.display_name,
@@ -1735,8 +1932,8 @@ def auto_pipeline(
                     _check_abort()
                     stage_done = False
                     d_name = "Critic" if stage_def.name.lower() == "critic" else stage_def.display_name
-                    if is_resumed_same_task:
-                        stage_done, stage_status = is_stage_completed(run, stage_def, run_mgr)
+                    if is_resumed_same_task and stages_executed == 0:
+                        stage_done, stage_status = is_stage_completed(run, stage_def, run_mgr, context=context)
                         if stage_done:
                             click.echo(f"  ⏭ Skipping {stage_def.display_name} (already completed with status '{stage_status}')")
                             _record_stage_transition(run, d_name, stage_status or "APPROVED", "SKIPPED", role_name=stage_def.name, seq=stage_def.sequence_number, context=context)
