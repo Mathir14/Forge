@@ -161,6 +161,10 @@ time.sleep(30)
         assert supervisor.cleanup_failed is False
         assert not is_port_in_use(free_port)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-specific process tree /proc inspection test; Windows process tree termination is validated in test_windows_platform_support.py",
+    )
     def test_child_process_survives_parent_descendant_reaping(self, tmp_path: Path):
         """A child process survives termination of its parent; supervisor reaps all descendants."""
         app_file = tmp_path / "fork_app.py"
