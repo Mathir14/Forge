@@ -236,8 +236,8 @@ def test_evidence_collector_archives_prior_attempt(tmp_path: Path):
 def test_secret_redaction():
     """Verify API tokens and secrets are redacted."""
     raw = (
-        "Authorization: Bearer sk-1234567890abcdef1234567890\n"
-        "GEMINI_KEY=AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6\n"
+        "Authorization: Bearer sk-SYNTHETIC_OPENAI_TEST_KEY_NOT_REAL_12345\n"
+        "GEMINI_KEY=AIzaSy_SYNTHETIC_TEST_FIXTURE_KEY_NOT_REAL_12345\n"
         "password: 'supersecretpassword123'\n"
     )
     redacted = _redact_secrets(raw)
@@ -261,10 +261,10 @@ def test_tester_engine_debug_persistence(tmp_path: Path):
 
     engine = TesterEngine(context=context, budget=TestingBudget(max_runtime_seconds=10.0))
     engine._save_debug_artifacts(
-        stdout="Tester output with key AIzaSy123456789012345678901234567890123",
+        stdout="Tester output with key AIzaSy_SYNTHETIC_TEST_FIXTURE_KEY_NOT_REAL_12345",
         stderr="No errors",
         raw_output="Raw response",
-        planner_prompt="Planning prompt with sk-abcdef12345678901234567890",
+        planner_prompt="Planning prompt with sk-SYNTHETIC_OPENAI_TEST_KEY_NOT_REAL_12345",
         planner_response={"journeys": []},
         execution_log={"status": "PASS"},
     )
