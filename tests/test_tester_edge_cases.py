@@ -229,6 +229,8 @@ def test_coverage_report_edge_cases_and_untested_branches_rendered():
 
 def test_model_module_nan_branch_in_isolation():
     """Directly test get_best_model for multiple models and NaN fallback branch."""
+    if not Path("/home/mathir/Stress-Testing-Framework").exists():
+        pytest.skip("Stress-Testing-Framework repository not found at /home/mathir/Stress-Testing-Framework")
     pytest.importorskip("numpy", reason="numpy required for Stress-Testing-Framework model_module test")
     import sys
     sys.path.insert(0, "/home/mathir/Stress-Testing-Framework")

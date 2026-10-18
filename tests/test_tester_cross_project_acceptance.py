@@ -17,6 +17,8 @@ Validates all 5 controlled scenarios per target, plus target-specific acceptance
 - Missing authentication vs application defect isolation
 """
 
+from __future__ import annotations
+
 import json
 import os
 import signal
@@ -65,10 +67,39 @@ API_TARGET_DIR = Path("/tmp/forge_acceptance_targets/api_app")
 STREAMLIT_TARGET_DIR = Path("/home/mathir/Stress-Testing-Framework")
 
 
+def _has_web_acceptance_target() -> bool:
+    if not (WEB_TARGET_DIR.is_dir() and (WEB_TARGET_DIR / "index.html").exists()):
+        return False
+    try:
+        env = BrowserDriverFactory.check_environment()
+        return bool(env.get("chromium_installed"))
+    except Exception:
+        return False
+
+
+def _has_cli_acceptance_target() -> bool:
+    return bool(CLI_TARGET_DIR.is_dir() and (CLI_TARGET_DIR / "cli.py").exists())
+
+
+def _has_api_acceptance_target() -> bool:
+    if not (API_TARGET_DIR.is_dir() and (API_TARGET_DIR / "app.py").exists()):
+        return False
+    import shutil
+    return bool(shutil.which("uvicorn"))
+
+
+def _has_streamlit_baseline() -> bool:
+    return bool(STREAMLIT_TARGET_DIR.is_dir() and (STREAMLIT_TARGET_DIR / "app.py").exists())
+
+
 # ==============================================================================
 # 1. CONVENTIONAL WEB APPLICATION (HTML/JS) E2E ACCEPTANCE
 # ==============================================================================
 
+@pytest.mark.skipif(
+    not _has_web_acceptance_target(),
+    reason="Conventional web acceptance target or Playwright Chromium not available",
+)
 class TestConventionalWebE2E:
     """End-to-end acceptance tests for conventional HTML/JavaScript web application."""
 
@@ -363,6 +394,10 @@ class TestConventionalWebE2E:
 # 2. CLI APPLICATION E2E ACCEPTANCE
 # ==============================================================================
 
+@pytest.mark.skipif(
+    not _has_cli_acceptance_target(),
+    reason="CLI acceptance target not available at /tmp/forge_acceptance_targets/cli_app",
+)
 class TestCliE2E:
     """End-to-end acceptance tests for CLI application with entry point cli.py (not main.py)."""
 
@@ -616,6 +651,10 @@ class TestCliE2E:
 # 3. HTTP API APPLICATION E2E ACCEPTANCE
 # ==============================================================================
 
+@pytest.mark.skipif(
+    not _has_api_acceptance_target(),
+    reason="HTTP API acceptance target or uvicorn not available",
+)
 class TestHttpApiE2E:
     """End-to-end acceptance tests for HTTP API with FastAPI via uvicorn daemon."""
 
@@ -1012,6 +1051,10 @@ class TestHttpApiE2E:
 # 4. STREAMLIT REFERENCE BASELINE E2E ACCEPTANCE
 # ==============================================================================
 
+@pytest.mark.skipif(
+    not _has_streamlit_baseline(),
+    reason="Streamlit reference baseline not found at /home/mathir/Stress-Testing-Framework",
+)
 class TestStreamlitBaselineE2E:
     """Regression acceptance baseline against /home/mathir/Stress-Testing-Framework."""
 
