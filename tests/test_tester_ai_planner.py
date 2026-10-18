@@ -14,9 +14,12 @@ Validates:
 11. Browser or application startup failures cannot produce a false PASS.
 """
 
+from __future__ import annotations
+
 import json
 import time
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
