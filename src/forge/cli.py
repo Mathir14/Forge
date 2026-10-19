@@ -602,6 +602,15 @@ def _run_stage(
                     f"⚠️ Recovered stale lock for run '{run.run_id}' (previous process terminated abnormally).",
                     fg="yellow",
                 )
+                try:
+                    reconciled = run_mgr.recover_run_processes(run)
+                    if reconciled:
+                        click.secho(
+                            f"   Reconciled {len(reconciled)} lingering process record(s) from previous run.",
+                            fg="yellow",
+                        )
+                except Exception as ex:
+                    logger.debug("Failed to reconcile processes during stale lock recovery: %s", ex)
 
             # Check prerequisite stage exists and succeeded
             if prerequisite_stage:
@@ -1080,44 +1089,64 @@ def dashboard_cmd(run_id: Optional[str], render_once: bool):
 
 @main.command(name="recover")
 @click.option("--run", "run_id", type=str, required=True, help="Run ID to recover (e.g. run-012).")
-@click.option("--stage", "stage_name", type=str, required=True, help="Stage name to recover (e.g. executor).")
-@click.option("--session", "session_id", type=str, required=True, help="Daemon session ID to recover from.")
-def recover_cmd(run_id: str, stage_name: str, session_id: str):
-    """Recover and reconstruct a completed stage result from an external daemon session."""
+@click.option("--stage", "stage_name", type=str, required=False, default=None, help="Stage name to recover (e.g. executor).")
+@click.option("--session", "session_id", type=str, required=False, default=None, help="Daemon session ID to recover from.")
+def recover_cmd(run_id: str, stage_name: Optional[str], session_id: Optional[str]):
+    """Recover and reconstruct a completed stage result from an external daemon session or reconcile lingering processes."""
     root = Path.cwd()
     run_mgr = RunManager(root)
     run = run_mgr.resume(run_id)
     if not run:
         raise click.ClickException(f"Run '{run_id}' not found.")
 
-    stage_def = StageOrder.resolve_definition(stage_name.lower())
-    if not stage_def:
-        raise click.ClickException(f"Unknown stage name '{stage_name}'.")
+    try:
+        with RunLock(run.run_dir, run_id=run.run_id) as run_lock_inst:
+            # Reconcile any unresolved process lifecycle records for this run
+            unresolved_procs = run_mgr.recover_run_processes(run)
+            if unresolved_procs:
+                click.secho(f"Found and reconciled {len(unresolved_procs)} process record(s) for run '{run_id}':", fg="yellow")
+                for rec in unresolved_procs:
+                    click.echo(f"  • Stage '{rec.stage_name}': status={rec.status}, state={rec.state}, PID={rec.pid}")
 
-    click.echo(f"Attempting recovery of stage '{stage_name}' from session '{session_id}' in run '{run_id}'...")
-    res = run_mgr.recover_stage_from_session(
-        run=run,
-        stage_name=stage_def.name,
-        session_id=session_id,
-        sequence_number=stage_def.sequence_number,
-    )
-    if res and res.success:
-        click.secho(f"✅ Successfully recovered {stage_def.display_name}! Status: {res.status}", fg="green", bold=True)
-        _record_stage_transition(
-            run,
-            stage_def.display_name,
-            res.status,
-            "COMPLETED",
-            duration=res.duration_seconds,
-            role_name=stage_def.name,
-            seq=stage_def.sequence_number,
-        )
-        run.save_metadata()
-    else:
-        status_str = res.status if res else "FAILED"
-        err_str = res.machine_report.validation_errors if res and res.machine_report else "Could not recover session"
-        click.secho(f"❌ Recovery failed: status '{status_str}', errors: {err_str}", fg="red")
-        raise click.ClickException(f"Failed to recover stage '{stage_name}'.")
+            if not stage_name and not session_id:
+                if not unresolved_procs:
+                    click.echo(f"No unresolved processes or sessions found for run '{run_id}'.")
+                return
+
+            if bool(stage_name) != bool(session_id):
+                raise click.ClickException("Both --stage and --session must be specified to recover from a daemon session.")
+
+            stage_def = StageOrder.resolve_definition(stage_name.lower())
+            if not stage_def:
+                raise click.ClickException(f"Unknown stage name '{stage_name}'.")
+
+            click.echo(f"Attempting recovery of stage '{stage_name}' from session '{session_id}' in run '{run_id}'...")
+            res = run_mgr.recover_stage_from_session(
+                run=run,
+                stage_name=stage_def.name,
+                session_id=session_id,
+                sequence_number=stage_def.sequence_number,
+            )
+            if res and res.success:
+                click.secho(f"✅ Successfully recovered {stage_def.display_name}! Status: {res.status}", fg="green", bold=True)
+                _record_stage_transition(
+                    run,
+                    stage_def.display_name,
+                    res.status,
+                    "COMPLETED",
+                    duration=res.duration_seconds,
+                    role_name=stage_def.name,
+                    seq=stage_def.sequence_number,
+                )
+                run.save_metadata()
+            else:
+                status_str = res.status if res else "FAILED"
+                err_str = res.machine_report.validation_errors if res and res.machine_report else "Could not recover session"
+                click.secho(f"❌ Recovery failed: status '{status_str}', errors: {err_str}", fg="red")
+                raise click.ClickException(f"Failed to recover stage '{stage_name}'.")
+    except RunOwnershipError as e:
+        click.echo(e.format_diagnostic(), err=True)
+        sys.exit(1)
 
 
 @main.command(name="critic")
@@ -1240,6 +1269,15 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
                     f"⚠️ Recovered stale lock for run '{run.run_id}' (previous process terminated abnormally).",
                     fg="yellow",
                 )
+                try:
+                    reconciled = run_mgr.recover_run_processes(run)
+                    if reconciled:
+                        click.secho(
+                            f"   Reconciled {len(reconciled)} lingering process record(s) from previous run.",
+                            fg="yellow",
+                        )
+                except Exception as ex:
+                    logger.debug("Failed to reconcile processes during stale lock recovery: %s", ex)
 
             git_baseline: Optional[GitBaseline] = None
             if git.is_git_repo():
@@ -1554,6 +1592,15 @@ def auto_pipeline(
                     f"⚠️ Recovered stale lock for run '{run.run_id}' (previous process terminated abnormally).",
                     fg="yellow",
                 )
+                try:
+                    reconciled = run_mgr.recover_run_processes(run)
+                    if reconciled:
+                        click.secho(
+                            f"   Reconciled {len(reconciled)} lingering process record(s) from previous run.",
+                            fg="yellow",
+                        )
+                except Exception as ex:
+                    logger.debug("Failed to reconcile processes during stale lock recovery: %s", ex)
 
             # Initialize run-scoped git baseline
             git_baseline: Optional[GitBaseline] = None

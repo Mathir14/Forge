@@ -1,5 +1,6 @@
 import atexit
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -17,6 +18,7 @@ from forge.core.platform import (
     prepare_command,
     terminate_process_tree,
     safe_kill,
+    launch_contained_process,
 )
 
 
@@ -79,7 +81,94 @@ class StderrDrainer:
                 self._thread.join(timeout=timeout)
             except Exception:
                 pass
+        if self._stream is not None and (self._thread is None or not self._thread.is_alive()):
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+
+
+class BoundedLineReader:
+    """Asynchronously reads lines from an iterable or pipe stream in a background daemon thread,
+    enabling non-blocking and timeout-bounded reading via a thread-safe Queue.
+
+    Guarantees:
+    - Zero-delay streaming during normal active output.
+    - Bounded non-blocking drainage after in-stream terminal events.
+    - Universal cross-platform compatibility (POSIX and Windows).
+    - Prevents kernel pipe deadlock when child processes inherit stdout.
+    - Clean shutdown without thread or pipe leaks.
+    """
+
+    _EOF = object()
+
+    def __init__(self, stream: Optional[Any]):
+        self._stream = stream
+        self._queue: queue.Queue[Any] = queue.Queue()
+        self._closed = threading.Event()
+        self._eof_reached = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
         if self._stream is not None:
+            self._thread = threading.Thread(
+                target=self._drain_stream,
+                daemon=True,
+                name="BoundedLineReader",
+            )
+            self._thread.start()
+        else:
+            self._eof_reached.set()
+            self._queue.put(self._EOF)
+
+    def _drain_stream(self) -> None:
+        try:
+            for line in self._stream:
+                if self._closed.is_set():
+                    break
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                self._queue.put(line)
+        except Exception:
+            pass
+        finally:
+            self._eof_reached.set()
+            self._queue.put(self._EOF)
+
+    def read_line(self, timeout: Optional[float] = None) -> Optional[str]:
+        """Read next line from stream.
+
+        Args:
+            timeout: Maximum seconds to wait. None waits indefinitely.
+
+        Returns:
+            str: Next line from stream.
+            None: When stream reaches EOF.
+
+        Raises:
+            queue.Empty: If timeout expires without receiving a line or EOF.
+        """
+        if self._closed.is_set() and self._queue.empty():
+            return None
+
+        item = self._queue.get(timeout=timeout)
+        if item is self._EOF:
+            self._queue.put(self._EOF)
+            return None
+        return item
+
+    def is_eof(self) -> bool:
+        """Return True if EOF has been observed on the underlying stream."""
+        return self._eof_reached.is_set()
+
+    def close(self, timeout: float = 0.2) -> None:
+        """Signal reader to stop consuming and optionally wait for thread termination."""
+        self._closed.set()
+        if self._thread is not None and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=timeout)
+            except Exception:
+                pass
+        if self._stream is not None and (self._thread is None or not self._thread.is_alive()):
             try:
                 self._stream.close()
             except Exception:
@@ -184,6 +273,12 @@ class BaseAdapter(ABC):
     def _unregister_proc(cls, proc: Optional[subprocess.Popen], instance: Optional["BaseAdapter"] = None) -> None:
         """Remove a terminated child subprocess from tracking."""
         if proc is not None:
+            job = getattr(proc, "_job_object", None)
+            if job is not None and hasattr(job, "close"):
+                try:
+                    job.close()
+                except Exception:
+                    pass
             cls._all_active_procs.discard(proc)
             if instance is not None and hasattr(instance, "_active_procs"):
                 instance._active_procs.discard(proc)
@@ -489,24 +584,45 @@ class BaseAdapter(ABC):
         )
 
     @classmethod
-    def _safe_cleanup_subprocess(cls, proc: Optional[subprocess.Popen]) -> None:
-        """Safely clean up subprocess: only kill process group if proc is still alive.
-
-        Under ADR-017, normal execution observes an already-terminated subprocess.
-        Only interrupted execution (timeout, cancellation, fatal error) actively
-        terminates the process group.
-        """
+    def _safe_cleanup_subprocess(
+        cls,
+        proc: Optional[subprocess.Popen],
+        tracker: Optional[Any] = None,
+    ) -> bool:
+        """Safely and idempotently clean up subprocess and all descendant processes."""
         if proc is None:
-            return
+            return True
+        if getattr(proc, "_cleanup_done", None) is True:
+            return True
+
+        job = getattr(proc, "_job_object", None)
+        method = "windows_job_object" if job is not None else "terminate_process_tree"
+        if tracker is not None and hasattr(tracker, "record_cleanup_start"):
+            try:
+                tracker.record_cleanup_start(method=method)
+            except Exception:
+                pass
+
+        success = True
+        err = None
         try:
-            if proc.poll() is None:
-                cls._kill_process_group(proc)
-                try:
-                    proc.wait(timeout=1.0)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            cls._kill_process_group(proc)
+            try:
+                proc.wait(timeout=0.2)
+            except Exception:
+                pass
+            setattr(proc, "_cleanup_done", True)
+        except Exception as e:
+            success = False
+            err = str(e)
+
+        if tracker is not None and hasattr(tracker, "record_cleanup_result"):
+            try:
+                tracker.record_cleanup_result(success=success, method=method, error=err)
+            except Exception:
+                pass
+
+        return success
 
     @staticmethod
     def _safe_kill(proc: subprocess.Popen) -> None:
@@ -516,7 +632,10 @@ class BaseAdapter(ABC):
     @classmethod
     def _kill_process_group(cls, proc: subprocess.Popen) -> None:
         """Terminate or kill the entire process group of proc to prevent orphaned children."""
-        terminate_process_tree(proc, safe_kill_fn=cls._safe_kill)
+        target_pgid = getattr(proc, "_pgid", None)
+        if type(target_pgid) is not int:
+            target_pgid = None
+        terminate_process_tree(proc, pgid=target_pgid, safe_kill_fn=cls._safe_kill)
 
     @hybridmethod
     def _run_subprocess(
@@ -526,6 +645,7 @@ class BaseAdapter(ABC):
         cwd: Optional[Path] = None,
         timeout: Optional[int] = None,
         instance: Optional["BaseAdapter"] = None,
+        tracker: Optional[Any] = None,
     ) -> Tuple[str, str, int]:
         """Run subprocess with process group isolation and guaranteed cleanup of child processes."""
         if isinstance(self_or_cls, BaseAdapter):
@@ -561,17 +681,24 @@ class BaseAdapter(ABC):
         }
         popen_kwargs.update(get_process_group_flags())
 
-        proc = subprocess.Popen(prepared_cmd, **popen_kwargs)
+        proc = launch_contained_process(
+            prepared_cmd,
+            popen_kwargs=popen_kwargs,
+            tracker=tracker,
+            popen_fn=subprocess.Popen,
+        )
+
         cls._register_proc(proc, instance=inst)
         try:
             stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
+            if tracker is not None and hasattr(tracker, "record_exit"):
+                try:
+                    tracker.record_exit(proc.returncode)
+                except Exception:
+                    pass
             return stdout or "", stderr or "", proc.returncode
         except subprocess.TimeoutExpired as e:
-            cls._kill_process_group(proc)
-            try:
-                proc.wait(timeout=1.0)
-            except Exception:
-                pass
+            cls._safe_cleanup_subprocess(proc, tracker=tracker)
             raise subprocess.TimeoutExpired(
                 cmd=cmd,
                 timeout=timeout,
@@ -579,9 +706,10 @@ class BaseAdapter(ABC):
                 stderr=getattr(e, "stderr", None),
             )
         except BaseException:
-            cls._kill_process_group(proc)
+            cls._safe_cleanup_subprocess(proc, tracker=tracker)
             raise
         finally:
+            cls._safe_cleanup_subprocess(proc, tracker=tracker)
             cls._unregister_proc(proc, instance=inst)
 
 

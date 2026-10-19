@@ -25,6 +25,7 @@ from forge.core.platform import (
     get_process_group_flags,
     is_pid_alive,
     find_descendant_pids,
+    launch_contained_process,
 )
 
 logger = logging.getLogger(__name__)
@@ -322,7 +323,7 @@ class RuntimeSupervisor:
         }
         popen_kwargs.update(get_process_group_flags())
 
-        self.process = subprocess.Popen(cmd_args, **popen_kwargs)
+        self.process = launch_contained_process(cmd_args, popen_kwargs=popen_kwargs, popen_fn=subprocess.Popen)
         if self.process and self.process.pid:
             self.tracked_pids.add(self.process.pid)
 

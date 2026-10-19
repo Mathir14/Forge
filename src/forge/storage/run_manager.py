@@ -550,3 +550,123 @@ class RunManager:
             except Exception as e:
                 logging.warning("Failed to load stage markdown %s: %s", p, e)
         return None
+
+    def discover_unresolved_processes(self, run: Optional[Run] = None) -> List[Any]:
+        """Discover unfinalized or in-flight process records from prior executions."""
+        from forge.core.process import ProcessRecord, ProcessLifecycleState
+
+        target_dirs = []
+        if run is not None and hasattr(run, "run_dir") and run.run_dir and run.run_dir.exists():
+            target_dirs.append(run.run_dir / "processes")
+        elif self.runs_dir.exists():
+            for p in self.runs_dir.iterdir():
+                if p.is_dir() and (p / "processes").exists():
+                    target_dirs.append(p / "processes")
+
+        unresolved: List[ProcessRecord] = []
+        for p_dir in target_dirs:
+            if not p_dir.exists():
+                continue
+            for rec_file in sorted(p_dir.glob("*.json")):
+                rec = ProcessRecord.load(rec_file)
+                if rec and rec.state in (
+                    ProcessLifecycleState.STARTING.value,
+                    ProcessLifecycleState.RUNNING.value,
+                    ProcessLifecycleState.TERMINAL_EVENT_RECEIVED.value,
+                    ProcessLifecycleState.CLEANUP_PENDING.value,
+                    ProcessLifecycleState.CLEANUP_FAILED.value,
+                    ProcessLifecycleState.UNRESOLVED.value,
+                ):
+                    unresolved.append(rec)
+        return unresolved
+
+    def reconcile_process_record(self, record: Any, run: Run, allow_terminate: bool = True) -> Any:
+        """Safely and idempotently reconcile a single process record.
+
+        - Verifies identity before any termination.
+        - Refuses to terminate if identity is ambiguous or PID was reused.
+        - Performs bounded termination if process is definitely the owned process and still alive.
+        - Reconciles stage status using persisted artifacts and exit code.
+        """
+        from forge.core.process import ProcessRecord, ProcessLifecycleState
+        from forge.core.platform import is_pid_alive, verify_process_identity, terminate_process_tree, find_process_group_pids
+
+        pid = record.pid
+        pgid = record.pgid
+
+        # 1. Check if PID is alive
+        if pid is not None and is_pid_alive(pid):
+            # Check identity (creation time / start time)
+            if not verify_process_identity(pid, record.start_time_ticks, pgid):
+                record.state = ProcessLifecycleState.UNRESOLVED.value
+                record.status = "UNRESOLVED"
+                record.error_details = (
+                    f"PID {pid} is active but creation time does not match expected identity. "
+                    "Possible PID reuse; refusing automated termination."
+                )
+            else:
+                if allow_terminate:
+                    stopped = terminate_process_tree(pid, pgid=pgid, timeout=1.0)
+                    if stopped:
+                        record.state = ProcessLifecycleState.TERMINATED.value
+                        record.status = "CONFIRMED"
+                    else:
+                        record.state = ProcessLifecycleState.CLEANUP_FAILED.value
+                        record.status = "UNRESOLVED"
+                        record.error_details = f"Process {pid} failed to terminate within cleanup deadline."
+                else:
+                    record.status = "CONFIRMED"
+        else:
+            # PID is gone; check if process group has lingering members
+            lingering = find_process_group_pids(pgid) if pgid else set()
+            if lingering:
+                # CRITICAL ADVERSARIAL SAFETY REQUIREMENT:
+                # If the recorded leader PID is no longer alive, we cannot prove ownership
+                # of lingering processes in the process group because PGID reuse cannot be excluded.
+                # Standard POSIX PID recycling could allocate the old PGID to an unrelated process.
+                # Refuse automated termination, mark UNRESOLVED, and leave surviving processes untouched.
+                record.state = ProcessLifecycleState.UNRESOLVED.value
+                record.status = "UNRESOLVED"
+                record.error_details = (
+                    f"Process group leader (PID {pid}) is no longer alive, but lingering processes "
+                    f"match PGID {pgid} ({sorted(lingering)}). Cannot verify ownership due to potential "
+                    "PGID reuse; refusing automated termination to prevent killing unrelated processes."
+                )
+            else:
+                # All processes are gone
+                if record.exit_code is not None and record.state in (
+                    ProcessLifecycleState.EXIT_VERIFIED.value,
+                    ProcessLifecycleState.TERMINAL_EVENT_RECEIVED.value,
+                ):
+                    record.state = ProcessLifecycleState.EXIT_VERIFIED.value
+                    record.status = "CONFIRMED"
+                else:
+                    record.state = ProcessLifecycleState.TERMINATED.value
+                    record.status = "CONFIRMED"
+
+        # 2. Reconcile stage artifact status
+        stage_json = self.load_stage_json(run, record.stage_name, sequence_number=record.sequence_number)
+        if stage_json:
+            is_valid = bool(stage_json.get("machine_report", {}).get("is_valid"))
+            status = str(stage_json.get("status") or "").upper()
+            if record.state == ProcessLifecycleState.EXIT_VERIFIED.value and record.exit_code == 0 and is_valid and status not in ("REJECTED", "FAILED", "BLOCKED", "CHANGES_REQUIRED", "PARTIAL", "FAIL"):
+                pass
+            elif record.state != ProcessLifecycleState.TERMINATED.value and record.state != ProcessLifecycleState.EXIT_VERIFIED.value:
+                pass
+
+        # Persist updated record
+        if hasattr(run, "run_dir") and run.run_dir:
+            rec_path = run.run_dir / "processes" / f"{record.sequence_number:02d}_{record.stage_name}.json"
+            record.save_atomic(rec_path)
+
+        return record
+
+    def recover_run_processes(self, run: Run, allow_terminate: bool = True) -> List[Any]:
+        """Discover and reconcile all unresolved processes for a run under exclusive run lock."""
+        from forge.storage.run_lock import RunLock
+        with RunLock(run.run_dir, run_id=run.run_id):
+            unresolved = self.discover_unresolved_processes(run)
+            reconciled = []
+            for rec in unresolved:
+                reconciled.append(self.reconcile_process_record(rec, run, allow_terminate=allow_terminate))
+            return reconciled

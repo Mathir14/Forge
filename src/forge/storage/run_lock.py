@@ -662,6 +662,41 @@ class WorkingTreeLease:
                                 existing_sid,
                             )
 
+            # Also verify no orphaned or competing background agent processes hold the working tree
+            runs_dir = self.forge_dir / "runs"
+            if runs_dir.exists():
+                try:
+                    from forge.core.process import ProcessRecord, ProcessLifecycleState
+                    from forge.core.platform import verify_process_identity, find_process_group_pids
+                    for proc_file in runs_dir.glob("*/processes/*.json"):
+                        rec = ProcessRecord.load(proc_file)
+                        if rec and rec.state in (
+                            ProcessLifecycleState.RUNNING.value,
+                            ProcessLifecycleState.STARTING.value,
+                            ProcessLifecycleState.TERMINAL_EVENT_RECEIVED.value,
+                            ProcessLifecycleState.CLEANUP_PENDING.value,
+                        ):
+                            alive = False
+                            if rec.pid and is_pid_alive(rec.pid):
+                                if verify_process_identity(rec.pid, rec.start_time_ticks, rec.pgid):
+                                    alive = True
+                            elif rec.pgid:
+                                lingering = find_process_group_pids(rec.pgid)
+                                if lingering:
+                                    alive = True
+
+                            if alive:
+                                raise WorkingTreeConflictError(
+                                    f"Working tree '{self.project_root}' is actively held by agent process "
+                                    f"(PID {rec.pid}, PGID {rec.pgid}, Stage '{rec.stage_name}', Run '{rec.run_id}'). "
+                                    "Cannot start competing execution.",
+                                    working_tree=self.project_root,
+                                )
+                except WorkingTreeConflictError:
+                    raise
+                except Exception as e:
+                    logger.debug("Error checking active agent processes during lease acquire: %s", e)
+
             metadata = {
                 "schema_version": self.SCHEMA_VERSION,
                 "pid": os.getpid(),
@@ -761,6 +796,31 @@ class WorkingTreeLease:
                     return False
         if pid == os.getpid():
             return False
+
+        # Also check for any living agent processes tracked by Forge
+        runs_dir = Path(project_root) / ".forge" / "runs"
+        if runs_dir.exists():
+            try:
+                from forge.core.process import ProcessRecord, ProcessLifecycleState
+                from forge.core.platform import verify_process_identity, find_process_group_pids
+                for proc_file in runs_dir.glob("*/processes/*.json"):
+                    rec = ProcessRecord.load(proc_file)
+                    if rec and rec.state in (
+                        ProcessLifecycleState.RUNNING.value,
+                        ProcessLifecycleState.STARTING.value,
+                        ProcessLifecycleState.TERMINAL_EVENT_RECEIVED.value,
+                        ProcessLifecycleState.CLEANUP_PENDING.value,
+                    ):
+                        if rec.pid and is_pid_alive(rec.pid):
+                            if verify_process_identity(rec.pid, rec.start_time_ticks, rec.pgid):
+                                return False
+                        elif rec.pgid:
+                            lingering = find_process_group_pids(rec.pgid)
+                            if lingering:
+                                return False
+            except Exception:
+                pass
+
         return True
 
     def __enter__(self) -> "WorkingTreeLease":

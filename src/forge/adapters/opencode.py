@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
@@ -10,10 +11,10 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Iterator, Iterable, Callable, Tuple, Union
 
-from forge.adapters.base import BaseAdapter, AdapterResponse, StderrDrainer
+from forge.adapters.base import BaseAdapter, AdapterResponse, StderrDrainer, BoundedLineReader
 from forge.core.capabilities import Capability
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
-from forge.core.platform import get_process_group_flags, prepare_command
+from forge.core.platform import get_process_group_flags, prepare_command, get_process_identity, launch_contained_process
 
 logger = logging.getLogger(__name__)
 
@@ -819,6 +820,7 @@ class OpenCodeAdapter(BaseAdapter):
         start_time: float,
         get_returncode: Optional[Callable[[], Optional[int]]] = None,
         get_stderr: Optional[Callable[[], str]] = None,
+        tracker: Optional[Any] = None,
     ) -> Iterator[AgentEvent]:
         """Decode OpenCode NDJSON stdout lines into canonical AgentEvents.
 
@@ -841,102 +843,241 @@ class OpenCodeAdapter(BaseAdapter):
         terminal_event_emitted = False
         session_id: Optional[str] = None
         has_stopped_step = False
+        terminal_event_received = False
 
-        for raw_line in stream:
-            accumulated_raw += raw_line
-            line = raw_line.strip()
-            if not line:
-                continue
+        reader = BoundedLineReader(stream)
+        draining = False
+        drain_deadline: Optional[float] = None
+        drain_timeout: float = 1.0
 
-            try:
-                payload = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                logger.warning("Malformed JSON payload from OpenCode stream: %s", line)
-                continue
+        try:
+            while True:
+                if draining:
+                    now = time.monotonic()
+                    if drain_deadline is not None and now >= drain_deadline:
+                        break
+                    timeout = min(0.1, max(0.01, drain_deadline - now)) if drain_deadline is not None else 0.1
+                else:
+                    timeout = 0.5
 
-            if not isinstance(payload, dict):
-                logger.warning("Unexpected non-dictionary payload from OpenCode stream: %s", line)
-                continue
+                try:
+                    raw_line = reader.read_line(timeout=timeout)
+                except queue.Empty:
+                    if draining:
+                        proc_code = get_returncode() if get_returncode else None
+                        if proc_code is not None:
+                            break
+                        if drain_deadline is not None and time.monotonic() >= drain_deadline:
+                            break
+                        continue
+                    else:
+                        proc_code = get_returncode() if get_returncode else None
+                        if proc_code is not None and proc_code != 0:
+                            break
+                        continue
 
-            event_type = payload.get("type") or payload.get("event")
-            raw_sid = (
-                payload.get("sessionID")
-                or payload.get("session_id")
-                or (payload.get("data", {}).get("sessionID") if isinstance(payload.get("data"), dict) else None)
-                or (payload.get("data", {}).get("session_id") if isinstance(payload.get("data"), dict) else None)
-            )
-            cleaned_sid = _clean_session_id(raw_sid)
-            if cleaned_sid:
-                session_id = cleaned_sid
-                self._session_id = session_id
+                if raw_line is None:
+                    break
 
-            raw_ts = payload.get("timestamp")
-            if isinstance(raw_ts, (int, float)):
-                ts = raw_ts / 1000.0 if raw_ts > 1e11 else float(raw_ts)
-            else:
-                ts = time.time()
-
-            if terminal_event_emitted:
-                logger.warning(
-                    "Duplicate terminal event received from OpenCode stream; ignoring",
-                    extra={
-                        "adapter": self.name,
-                        "event_type": str(event_type),
-                        "raw_payload": line,
-                    },
-                )
-                continue
-
-            # If a new step begins after a previous step finished with 'stop',
-            # it indicates the previous stop was an intermediate step (e.g. context compaction)
-            # and that execution is continuing in a subsequent step.
-            # Reset accumulated_stdout so intermediate artifacts do not contaminate the final deliverable.
-            if has_stopped_step and event_type in ("step_start", "init"):
-                accumulated_stdout = ""
-                has_stopped_step = False
-
-            if event_type == "text":
-                res = self._decode_text_chunk(payload, ts, session_id)
-                if res:
-                    chunk_event, chunk_text = res
-                    accumulated_stdout += chunk_text
-                    yield chunk_event
-                continue
-
-            elif event_type in ("tool_use", "tool_start", "tool_finish", "tool_call"):
-                yield self._decode_tool_event(str(event_type), payload, ts, session_id)
-                continue
-
-            elif event_type == "step_finish":
-                part = payload.get("part") if isinstance(payload.get("part"), dict) else {}
-                reason = part.get("reason") or payload.get("reason")
-                raw_tokens = part.get("tokens") or payload.get("tokens")
-                if isinstance(raw_tokens, dict):
-                    for k, v in raw_tokens.items():
-                        if isinstance(v, int):
-                            token_usage[k] = v
-
-                if reason in ("tool-calls", "tool_calls"):
+                accumulated_raw += raw_line
+                line = raw_line.strip()
+                if not line:
                     continue
-                elif reason in ("stop", "complete", "completed", "end"):
-                    # Record that an LLM step completed text generation.
-                    # Under ADR-017: Do NOT emit COMPLETE in-stream; wait for stdout EOF.
-                    if has_stopped_step:
+
+                try:
+                    payload = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning("Malformed JSON payload from OpenCode stream: %s", line)
+                    continue
+
+                if not isinstance(payload, dict):
+                    logger.warning("Unexpected non-dictionary payload from OpenCode stream: %s", line)
+                    continue
+
+                event_type = payload.get("type") or payload.get("event")
+                raw_sid = (
+                    payload.get("sessionID")
+                    or payload.get("session_id")
+                    or (payload.get("data", {}).get("sessionID") if isinstance(payload.get("data"), dict) else None)
+                    or (payload.get("data", {}).get("session_id") if isinstance(payload.get("data"), dict) else None)
+                )
+                cleaned_sid = _clean_session_id(raw_sid)
+                if cleaned_sid:
+                    session_id = cleaned_sid
+                    self._session_id = session_id
+
+                raw_ts = payload.get("timestamp")
+                if isinstance(raw_ts, (int, float)):
+                    ts = raw_ts / 1000.0 if raw_ts > 1e11 else float(raw_ts)
+                else:
+                    ts = time.time()
+
+                if terminal_event_emitted:
+                    logger.warning(
+                        "Duplicate terminal event received from OpenCode stream; ignoring",
+                        extra={
+                            "adapter": self.name,
+                            "event_type": str(event_type),
+                            "raw_payload": line,
+                        },
+                    )
+                    continue
+
+                # If a new step begins after a previous step finished with 'stop',
+                # it indicates the previous stop was an intermediate step (e.g. context compaction)
+                # and that execution is continuing in a subsequent step.
+                # Reset accumulated_stdout so intermediate artifacts do not contaminate the final deliverable.
+                if has_stopped_step and event_type in ("step_start", "init") and not terminal_event_received:
+                    accumulated_stdout = ""
+                    has_stopped_step = False
+                    draining = False
+                    drain_deadline = None
+
+                if event_type == "text":
+                    res = self._decode_text_chunk(payload, ts, session_id)
+                    if res:
+                        chunk_event, chunk_text = res
+                        accumulated_stdout += chunk_text
+                        yield chunk_event
+                    continue
+
+                elif event_type in ("tool_use", "tool_start", "tool_finish", "tool_call"):
+                    if has_stopped_step and not terminal_event_received:
+                        has_stopped_step = False
+                        draining = False
+                        drain_deadline = None
+                    yield self._decode_tool_event(str(event_type), payload, ts, session_id)
+                    continue
+
+                elif event_type == "step_finish":
+                    part = payload.get("part") if isinstance(payload.get("part"), dict) else {}
+                    reason = part.get("reason") or payload.get("reason")
+                    raw_tokens = part.get("tokens") or payload.get("tokens")
+                    if isinstance(raw_tokens, dict):
+                        for k, v in raw_tokens.items():
+                            if isinstance(v, int):
+                                token_usage[k] = v
+
+                    if reason in ("tool-calls", "tool_calls"):
+                        if not terminal_event_received:
+                            draining = False
+                            drain_deadline = None
+                            has_stopped_step = False
+                        continue
+                    elif reason in ("stop", "complete", "completed", "end"):
+                        # Record that an LLM step completed text generation.
+                        # Under ADR-017: Do NOT emit COMPLETE in-stream; wait for stdout EOF.
+                        if has_stopped_step:
+                            logger.warning(
+                                "Duplicate terminal event received from OpenCode stream; ignoring",
+                                extra={"adapter": self.name, "raw_event": payload},
+                            )
+                            continue
+                        has_stopped_step = True
+                        draining = True
+                        if drain_deadline is None:
+                            drain_deadline = time.monotonic() + drain_timeout
+                        if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                            try:
+                                tracker.record_terminal_event("COMPLETE")
+                            except Exception:
+                                pass
+                        continue
+                    elif reason in ("error", "failed", "aborted", "cancelled"):
+                        terminal_event_received = True
+                        terminal_event_emitted = True
+                        draining = True
+                        if drain_deadline is None:
+                            drain_deadline = time.monotonic() + drain_timeout
+                        if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                            try:
+                                tracker.record_terminal_event("ERROR")
+                            except Exception:
+                                pass
+                        duration = time.time() - start_time
+                        stderr_out = get_stderr() if get_stderr else ""
+                        err_msg = part.get("error") or payload.get("error") or f"Step finished with error: {reason}"
+                        err_meta: Dict[str, Any] = {"error": str(err_msg)}
+                        if session_id:
+                            err_meta["session_id"] = session_id
+                        yield self._build_error_event(
+                            ts=ts,
+                            duration=duration,
+                            error_msg=str(err_msg),
+                            stdout=accumulated_stdout,
+                            stderr=stderr_out,
+                            raw_output=accumulated_raw,
+                            token_usage=token_usage,
+                            metadata=err_meta,
+                        )
+                    else:
                         logger.warning(
-                            "Duplicate terminal event received from OpenCode stream; ignoring",
+                            "Unrecognized step_finish reason ignored: %s",
+                            reason,
                             extra={"adapter": self.name, "raw_event": payload},
                         )
-                        continue
-                    has_stopped_step = True
                     continue
-                elif reason in ("error", "failed", "aborted", "cancelled"):
+
+                elif event_type in ("complete", "result"):
+                    # Under ADR-017: in-stream completion events record state but do NOT
+                    # emit COMPLETE or abort stream iteration. Completion is emitted post-mortem at EOF.
+                    if has_stopped_step or terminal_event_emitted:
+                        logger.warning(
+                            "Duplicate terminal event received from OpenCode stream; ignoring",
+                            extra={
+                                "adapter": self.name,
+                                "event_type": str(event_type),
+                                "raw_payload": line,
+                            },
+                        )
+                        continue
+                    terminal_event_received = True
+                    has_stopped_step = True
+                    draining = True
+                    if drain_deadline is None:
+                        drain_deadline = time.monotonic() + drain_timeout
+                    if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                        try:
+                            tracker.record_terminal_event("COMPLETE")
+                        except Exception:
+                            pass
+                    continue
+
+                elif event_type in ("error", "fatal"):
+                    if has_stopped_step or terminal_event_emitted:
+                        logger.warning(
+                            "Duplicate terminal event received from OpenCode stream; ignoring",
+                            extra={
+                                "adapter": self.name,
+                                "event_type": str(event_type),
+                                "raw_payload": line,
+                            },
+                        )
+                        continue
+                    terminal_event_received = True
                     terminal_event_emitted = True
+                    draining = True
+                    if drain_deadline is None:
+                        drain_deadline = time.monotonic() + drain_timeout
+                    if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                        try:
+                            tracker.record_terminal_event("ERROR")
+                        except Exception:
+                            pass
+                        drain_deadline = time.monotonic() + drain_timeout
                     duration = time.time() - start_time
                     stderr_out = get_stderr() if get_stderr else ""
-                    err_msg = part.get("error") or payload.get("error") or f"Step finished with error: {reason}"
+                    err_data = payload.get("error") or payload.get("message") or "OpenCode error event"
+                    err_msg = err_data.get("message") if isinstance(err_data, dict) else str(err_data)
                     err_meta: Dict[str, Any] = {"error": str(err_msg)}
                     if session_id:
                         err_meta["session_id"] = session_id
+                    if isinstance(err_data, dict):
+                        err_type = err_data.get("type")
+                        if err_type:
+                            err_meta["error_type"] = str(err_type)
+                        if "status" in err_data:
+                            err_meta["error_status"] = err_data.get("status")
                     yield self._build_error_event(
                         ts=ts,
                         duration=duration,
@@ -947,153 +1088,180 @@ class OpenCodeAdapter(BaseAdapter):
                         token_usage=token_usage,
                         metadata=err_meta,
                     )
+                    continue
+
+                elif event_type == "heartbeat":
+                    yield AgentEvent(
+                        event_type=AgentEventType.HEARTBEAT,
+                        timestamp=ts,
+                        data=payload,
+                    )
+                    continue
+
+                elif event_type in ("step_start", "init"):
+                    logger.debug("OpenCode lifecycle event received: %s", event_type)
+                    continue
+
                 else:
                     logger.warning(
-                        "Unrecognized step_finish reason ignored: %s",
-                        reason,
+                        "Unrecognized provider event ignored: %s",
+                        event_type,
                         extra={"adapter": self.name, "raw_event": payload},
                     )
-                continue
-
-            elif event_type in ("complete", "result"):
-                # Under ADR-017: in-stream completion events record state but do NOT
-                # emit COMPLETE or abort stream iteration. Completion is emitted post-mortem at EOF.
-                if has_stopped_step or terminal_event_emitted:
-                    logger.warning(
-                        "Duplicate terminal event received from OpenCode stream; ignoring",
-                        extra={
-                            "adapter": self.name,
-                            "event_type": str(event_type),
-                            "raw_payload": line,
-                        },
-                    )
                     continue
-                has_stopped_step = True
-                continue
-
-            elif event_type in ("error", "fatal"):
-                if has_stopped_step or terminal_event_emitted:
-                    logger.warning(
-                        "Duplicate terminal event received from OpenCode stream; ignoring",
-                        extra={
-                            "adapter": self.name,
-                            "event_type": str(event_type),
-                            "raw_payload": line,
-                        },
-                    )
-                    continue
-                terminal_event_emitted = True
-                duration = time.time() - start_time
-                stderr_out = get_stderr() if get_stderr else ""
-                err_data = payload.get("error") or payload.get("message") or "OpenCode error event"
-                err_msg = err_data.get("message") if isinstance(err_data, dict) else str(err_data)
-                err_meta: Dict[str, Any] = {"error": str(err_msg)}
-                if session_id:
-                    err_meta["session_id"] = session_id
-                if isinstance(err_data, dict):
-                    err_type = err_data.get("type")
-                    if err_type:
-                        err_meta["error_type"] = str(err_type)
-                    if "status" in err_data:
-                        err_meta["error_status"] = err_data.get("status")
-                yield self._build_error_event(
-                    ts=ts,
-                    duration=duration,
-                    error_msg=str(err_msg),
-                    stdout=accumulated_stdout,
-                    stderr=stderr_out,
-                    raw_output=accumulated_raw,
-                    token_usage=token_usage,
-                    metadata=err_meta,
-                )
-                continue
-
-            elif event_type == "heartbeat":
-                yield AgentEvent(
-                    event_type=AgentEventType.HEARTBEAT,
-                    timestamp=ts,
-                    data=payload,
-                )
-                continue
-
-            elif event_type in ("step_start", "init"):
-                logger.debug("OpenCode lifecycle event received: %s", event_type)
-                continue
-
-            else:
-                logger.warning(
-                    "Unrecognized provider event ignored: %s",
-                    event_type,
-                    extra={"adapter": self.name, "raw_event": payload},
-                )
-                continue
+        finally:
+            reader.close()
 
         # Post-mortem completion evaluation (ADR-017)
         if not terminal_event_emitted:
             duration = time.time() - start_time
-            proc_code = get_returncode() if get_returncode else None
+            has_process = get_returncode is not None
+            proc_code = None
+            if has_process:
+                try:
+                    proc_code = get_returncode(wait_timeout=1.0)
+                except TypeError:
+                    proc_code = get_returncode()
             stderr_out = get_stderr() if get_stderr else ""
 
-            if proc_code is not None and proc_code != 0:
-                terminal_event_emitted = True
-                base_msg = stderr_out or f"OpenCode process exited with non-zero exit code: {proc_code}"
-                err_msg = base_msg
-                diag_msg = f"Unexpected EOF before terminal event: {base_msg}"
-                err_meta: Dict[str, Any] = {
-                    "diagnostic": diag_msg,
-                    "reason": "Unexpected EOF before terminal event.",
-                }
-                if session_id:
-                    err_meta["session_id"] = session_id
-                yield self._build_error_event(
-                    ts=time.time(),
-                    duration=duration,
-                    error_msg=err_msg,
-                    stdout=accumulated_stdout,
-                    stderr=stderr_out or err_msg,
-                    raw_output=accumulated_raw,
-                    token_usage=token_usage,
-                    metadata=err_meta,
-                    exit_code=proc_code,
-                )
-            elif has_stopped_step and (proc_code is None or proc_code == 0):
-                terminal_event_emitted = True
-                yield self._build_complete_event(
-                    ts=time.time(),
-                    duration=duration,
-                    stdout=accumulated_stdout,
-                    stderr=stderr_out,
-                    raw_output=accumulated_raw,
-                    token_usage=token_usage,
-                    metadata={"session_id": session_id} if session_id else {},
-                    exit_code=0,
-                )
+            if has_process:
+                if proc_code is not None and proc_code != 0:
+                    terminal_event_emitted = True
+                    base_msg = stderr_out or f"OpenCode process exited with non-zero exit code: {proc_code}"
+                    err_msg = base_msg
+                    diag_msg = f"Unexpected EOF before terminal event: {base_msg}"
+                    err_meta: Dict[str, Any] = {
+                        "diagnostic": diag_msg,
+                        "reason": "Unexpected EOF before terminal event.",
+                    }
+                    if session_id:
+                        err_meta["session_id"] = session_id
+                    if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                        try:
+                            tracker.record_terminal_event("ERROR")
+                            tracker.record_exit(proc_code)
+                        except Exception:
+                            pass
+                    yield self._build_error_event(
+                        ts=time.time(),
+                        duration=duration,
+                        error_msg=err_msg,
+                        stdout=accumulated_stdout,
+                        stderr=stderr_out or err_msg,
+                        raw_output=accumulated_raw,
+                        token_usage=token_usage,
+                        metadata=err_meta,
+                        exit_code=proc_code,
+                    )
+                elif proc_code is None:
+                    terminal_event_emitted = True
+                    err_msg = stderr_out or "OpenCode process failed to exit after terminal event (process still active)."
+                    err_meta: Dict[str, Any] = {
+                        "diagnostic": "Process remained active after stream completion.",
+                    }
+                    if session_id:
+                        err_meta["session_id"] = session_id
+                    if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                        try:
+                            tracker.record_terminal_event("ERROR")
+                        except Exception:
+                            pass
+                    yield self._build_error_event(
+                        ts=time.time(),
+                        duration=duration,
+                        error_msg=err_msg,
+                        stdout=accumulated_stdout,
+                        stderr=stderr_out or err_msg,
+                        raw_output=accumulated_raw,
+                        token_usage=token_usage,
+                        metadata=err_meta,
+                        exit_code=1,
+                    )
+                elif has_stopped_step:
+                    terminal_event_emitted = True
+                    if tracker is not None and hasattr(tracker, "record_exit"):
+                        try:
+                            tracker.record_exit(0)
+                        except Exception:
+                            pass
+                    yield self._build_complete_event(
+                        ts=time.time(),
+                        duration=duration,
+                        stdout=accumulated_stdout,
+                        stderr=stderr_out,
+                        raw_output=accumulated_raw,
+                        token_usage=token_usage,
+                        metadata={"session_id": session_id} if session_id else {},
+                        exit_code=0,
+                    )
+                else:
+                    exit_code = 1
+                    diag_msg = "Unexpected EOF before terminal event."
+                    terminal_event_emitted = True
+                    err_meta: Dict[str, Any] = {
+                        "diagnostic": "Provider stream terminated prematurely without emitting COMPLETE or ERROR."
+                    }
+                    if session_id:
+                        err_meta["session_id"] = session_id
+                    if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                        try:
+                            tracker.record_terminal_event("ERROR")
+                            tracker.record_exit(exit_code)
+                        except Exception:
+                            pass
+                    yield self._build_error_event(
+                        ts=time.time(),
+                        duration=duration,
+                        error_msg=diag_msg,
+                        stdout=accumulated_stdout,
+                        stderr=stderr_out or diag_msg,
+                        raw_output=accumulated_raw,
+                        token_usage=token_usage,
+                        metadata=err_meta,
+                        exit_code=exit_code,
+                    )
             else:
-                exit_code = proc_code if (proc_code is not None and proc_code != 0) else 1
-                diag_msg = "Unexpected EOF before terminal event."
-                terminal_event_emitted = True
-                err_meta: Dict[str, Any] = {
-                    "diagnostic": "Provider stream terminated prematurely without emitting COMPLETE or ERROR."
-                }
-                if session_id:
-                    err_meta["session_id"] = session_id
-                yield self._build_error_event(
-                    ts=time.time(),
-                    duration=duration,
-                    error_msg=diag_msg,
-                    stdout=accumulated_stdout,
-                    stderr=stderr_out or diag_msg,
-                    raw_output=accumulated_raw,
-                    token_usage=token_usage,
-                    metadata=err_meta,
-                    exit_code=exit_code,
-                )
+                # Pure stream decoding without monitored subprocess
+                if has_stopped_step:
+                    terminal_event_emitted = True
+                    yield self._build_complete_event(
+                        ts=time.time(),
+                        duration=duration,
+                        stdout=accumulated_stdout,
+                        stderr=stderr_out,
+                        raw_output=accumulated_raw,
+                        token_usage=token_usage,
+                        metadata={"session_id": session_id} if session_id else {},
+                        exit_code=0,
+                    )
+                else:
+                    exit_code = 1
+                    diag_msg = "Unexpected EOF before terminal event."
+                    terminal_event_emitted = True
+                    err_meta: Dict[str, Any] = {
+                        "diagnostic": "Provider stream terminated prematurely without emitting COMPLETE or ERROR."
+                    }
+                    if session_id:
+                        err_meta["session_id"] = session_id
+                    yield self._build_error_event(
+                        ts=time.time(),
+                        duration=duration,
+                        error_msg=diag_msg,
+                        stdout=accumulated_stdout,
+                        stderr=stderr_out or diag_msg,
+                        raw_output=accumulated_raw,
+                        token_usage=token_usage,
+                        metadata=err_meta,
+                        exit_code=exit_code,
+                    )
 
     def iter_events(
         self,
         prompt: str,
         cwd: Optional[Path] = None,
         timeout: Optional[int] = None,
+        tracker: Optional[Any] = None,
+        **kwargs: Any,
     ) -> Iterator[AgentEvent]:
         """Progressive event generator consuming OpenCode's native JSON event stream.
 
@@ -1157,11 +1325,22 @@ class OpenCodeAdapter(BaseAdapter):
         }
         popen_kwargs.update(get_process_group_flags())
 
+        if tracker is not None and hasattr(tracker, "record_starting"):
+            try:
+                tracker.record_starting()
+            except Exception:
+                pass
+
         proc: Optional[subprocess.Popen] = None
         stderr_drainer: Optional[StderrDrainer] = None
         try:
             prepared_cmd = prepare_command(cmd)
-            proc = subprocess.Popen(prepared_cmd, **popen_kwargs)
+            proc = launch_contained_process(
+                prepared_cmd,
+                popen_kwargs=popen_kwargs,
+                tracker=tracker,
+                popen_fn=subprocess.Popen,
+            )
             self._register_proc(proc, instance=self)
             stderr_drainer = StderrDrainer(proc.stderr)
             if proc.stdin:
@@ -1171,12 +1350,17 @@ class OpenCodeAdapter(BaseAdapter):
                 except (BrokenPipeError, OSError):
                     pass
 
-            def _get_returncode() -> Optional[int]:
+            def _get_returncode(wait_timeout: Optional[float] = None) -> Optional[int]:
                 if proc is not None:
-                    try:
-                        return proc.wait(timeout=1.0)
-                    except Exception:
-                        return proc.poll()
+                    code = proc.poll()
+                    if code is not None:
+                        return code
+                    if wait_timeout is not None and wait_timeout > 0:
+                        try:
+                            return proc.wait(timeout=wait_timeout)
+                        except Exception:
+                            return proc.poll()
+                    return None
                 return None
 
             def _get_stderr() -> str:
@@ -1188,6 +1372,7 @@ class OpenCodeAdapter(BaseAdapter):
                     start_time=start_time,
                     get_returncode=_get_returncode,
                     get_stderr=_get_stderr,
+                    tracker=tracker,
                 )
 
         except KeyboardInterrupt:
@@ -1234,12 +1419,12 @@ class OpenCodeAdapter(BaseAdapter):
             )
         finally:
             if proc is not None:
-                self._safe_cleanup_subprocess(proc)
+                self._safe_cleanup_subprocess(proc, tracker=tracker)
             if stderr_drainer is not None:
                 stderr_drainer.close()
             if proc is not None:
                 try:
-                    proc.wait(timeout=1.0)
+                    proc.wait(timeout=0.5)
                 except Exception:
                     pass
                 self._unregister_proc(proc, instance=self)

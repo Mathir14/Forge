@@ -19,6 +19,7 @@ from forge.protocol.validator import MachineReportValidator
 from forge.protocol.report import MachineReport
 from forge.stages.requirements import StageRequirementsRegistry
 from forge.stages.result import StageResult
+from forge.core.process import ProcessTracker, ProcessLifecycleState
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,8 @@ class Stage:
         prompt: str,
         cwd: Optional[Path],
         timeout: Optional[int],
+        tracker: Optional[Any] = None,
+        **kwargs: Any,
     ) -> Iterator[AgentEvent]:
         """Obtain event generator from configured adapter, supporting legacy and test mock fallbacks."""
         from unittest.mock import Mock
@@ -199,7 +202,10 @@ class Stage:
                 return
 
         if hasattr(self.adapter, "iter_events"):
-            yield from self.adapter.iter_events(prompt=prompt, cwd=cwd, timeout=timeout)
+            try:
+                yield from self.adapter.iter_events(prompt=prompt, cwd=cwd, timeout=timeout, tracker=tracker)
+            except TypeError:
+                yield from self.adapter.iter_events(prompt=prompt, cwd=cwd, timeout=timeout)
         elif hasattr(self.adapter, "execute"):
             yield from BaseAdapter.iter_events(self.adapter, prompt=prompt, cwd=cwd, timeout=timeout)
         else:
@@ -214,6 +220,7 @@ class Stage:
         cwd: Optional[Path],
         timeout: Optional[int],
         idle_timeout: Optional[Union[int, float]],
+        tracker: Optional[Any] = None,
     ) -> Tuple[AgentEvent, AdapterResponse]:
         """Progressively consume adapter events enforcing idle and absolute timeouts.
 
@@ -236,7 +243,10 @@ class Stage:
 
         def _worker() -> None:
             try:
-                events_iter = self._get_event_stream(prompt=prompt, cwd=cwd, timeout=timeout)
+                try:
+                    events_iter = self._get_event_stream(prompt=prompt, cwd=cwd, timeout=timeout, tracker=tracker)
+                except TypeError:
+                    events_iter = self._get_event_stream(prompt=prompt, cwd=cwd, timeout=timeout)
                 for ev in events_iter:
                     if stop_requested.is_set():
                         break
@@ -660,6 +670,18 @@ class Stage:
             max_prompt_bytes=self.adapter.max_prompt_bytes,
         )
 
+        # Initialize ProcessTracker if run_dir is available
+        tracker: Optional[ProcessTracker] = None
+        if hasattr(context, "run") and getattr(context.run, "run_dir", None):
+            adapter_name = getattr(self.adapter, "name", type(self.adapter).__name__)
+            tracker = ProcessTracker(
+                run_id=str(getattr(context.run, "run_id", "unknown")),
+                stage_name=self.role.name,
+                sequence_number=self.role.sequence_number or 1,
+                adapter_name=adapter_name,
+                run_dir=context.run.run_dir,
+            )
+
         # 3. Event-driven execution
         start_time = time.time()
         terminal_event, response = self._execute_stream_events(
@@ -667,6 +689,7 @@ class Stage:
             cwd=context.project_root,
             timeout=timeout,
             idle_timeout=idle_timeout,
+            tracker=tracker,
         )
 
         # 3.1 Session recovery for recoverable adapter transport disconnects
@@ -693,6 +716,9 @@ class Stage:
                 )
                 if recovered is not None:
                     terminal_event, response = recovered
+                    if tracker is not None:
+                        tracker.record_terminal_event("COMPLETE")
+                        tracker.record_exit(0)
                     if self.event_listener is not None:
                         try:
                             if "stage_name" not in terminal_event.data:
@@ -746,8 +772,28 @@ class Stage:
             )
 
             from forge.stages.definition import StageOrder
+            from forge.core.process import ProcessLifecycleState
+
+            process_exit_verified = True
+            if tracker is not None and tracker.record.pid is not None:
+                if tracker.record.state != ProcessLifecycleState.EXIT_VERIFIED.value:
+                    process_exit_verified = False
+                    err_msg = f"Process lifecycle verification failed: process state is '{tracker.record.state}'"
+                    if tracker.record.error_details:
+                        err_msg += f" ({tracker.record.error_details})"
+                    report.validation_errors.append(err_msg)
+                    report.is_valid = False
+                    report.status = "FAILED"
+                elif tracker.record.exit_code != 0:
+                    process_exit_verified = False
+                    err_msg = f"Process lifecycle verification failed: process exited with code {tracker.record.exit_code}"
+                    report.validation_errors.append(err_msg)
+                    report.is_valid = False
+                    report.status = "FAILED"
+
             success = (
-                response.exit_code == 0
+                process_exit_verified
+                and response.exit_code == 0
                 and report.exit_code == 0
                 and report.is_valid
                 and StageOrder.is_success_status(report.status, self.role.name)
@@ -832,7 +878,7 @@ class Stage:
                 extra_flags=flags_val,
             )
 
-        self.run_manager.save_stage_artifacts(
+        saved_md, saved_json = self.run_manager.save_stage_artifacts(
             run=context.run,
             sequence_number=self.role.sequence_number,
             role_name=self.role.name,
@@ -843,6 +889,9 @@ class Stage:
             template_hash=getattr(self.role, "template_hash", None),
             config_fingerprint=cfg_fp,
         )
+
+        if tracker is not None:
+            tracker.record_stage_completed(success=success, result_path=saved_json)
 
         # Stage PKB knowledge proposals if emitted
         if report and getattr(report, "proposals", None) and hasattr(context, "run") and hasattr(context.run, "run_dir") and context.run.run_dir:
