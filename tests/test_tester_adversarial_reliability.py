@@ -238,7 +238,15 @@ with socketserver.TCPServer(('127.0.0.1', {conflict_port}), handler) as httpd:
             assert sup1.is_running() is True
         finally:
             sup1.stop()
-            assert not is_port_in_use(conflict_port)
+            # Wait briefly for OS socket cleanup on Windows
+            deadline = time.monotonic() + 2.0
+            released = False
+            while time.monotonic() < deadline:
+                if not is_port_in_use(conflict_port):
+                    released = True
+                    break
+                time.sleep(0.05)
+            assert released, f"Port {conflict_port} still in use after stop"
 
     def test_concurrent_forge_runs_dynamic_ports(self, tmp_path: Path):
         """Multiple Forge runs attempt to start targets with dynamic ports (port=0) concurrently."""
@@ -270,8 +278,15 @@ with socketserver.TCPServer(('127.0.0.1', port), http.server.SimpleHTTPRequestHa
         finally:
             sup1.stop()
             sup2.stop()
-            assert not is_port_in_use(sup1.port)
-            assert not is_port_in_use(sup2.port)
+            for p in (sup1.port, sup2.port):
+                deadline = time.monotonic() + 2.0
+                released = False
+                while time.monotonic() < deadline:
+                    if not is_port_in_use(p):
+                        released = True
+                        break
+                    time.sleep(0.05)
+                assert released, f"Port {p} still in use after stop"
 
     def test_port_occupied_after_failure_or_cancellation(self, tmp_path: Path):
         """A port remains occupied by an external process after failure; supervisor reports occupancy without claiming success."""

@@ -34,6 +34,7 @@ from forge.core.platform import (
     launch_contained_process,
     terminate_process_tree,
     get_process_group_flags,
+    is_pid_alive,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JobObjectBasicAccountingInformation,
     JobObjectExtendedLimitInformation,
@@ -44,6 +45,16 @@ from forge.core.platform import (
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
 )
 from forge.core.process import ProcessRecord, ProcessTracker, ProcessLifecycleState
+
+
+class DummyAdapter(BaseAdapter):
+    """Concrete adapter for unit/integration testing of BaseAdapter subprocess routines."""
+
+    def execute(self, prompt, **kwargs):
+        pass
+
+    def is_available(self) -> bool:
+        return True
 
 
 # ============================================================================
@@ -713,7 +724,7 @@ def test_native_windows_descendant_retaining_pipe_does_not_hang(tmp_path):
     )
 
     start_time = time.monotonic()
-    adapter = BaseAdapter()
+    adapter = DummyAdapter()
     stdout, stderr, code = adapter._run_subprocess(
         [sys.executable, str(holder_script)],
         cwd=tmp_path,
@@ -729,7 +740,7 @@ def test_native_windows_descendant_retaining_pipe_does_not_hang(tmp_path):
 @pytest.mark.skipif(not IS_WINDOWS, reason="Requires native Windows OS with kernel32.dll")
 def test_native_windows_adapter_timeout_and_cancellation_cleanup(tmp_path):
     """Native Windows test: Adapter timeout cleans up entire Job Object without leaking."""
-    adapter = BaseAdapter()
+    adapter = DummyAdapter()
     sleep_script = tmp_path / "sleeper.py"
     sleep_script.write_text(
         "import subprocess, sys, time\n"

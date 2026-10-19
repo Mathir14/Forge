@@ -48,6 +48,7 @@ from forge.core.context import Context
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
 from forge.core.git import GitService
 from forge.core.platform import (
+    IS_POSIX,
     get_process_identity,
     verify_process_identity,
     is_pid_alive,
@@ -706,6 +707,7 @@ def test_platform_verify_process_identity_safe_fallback():
 # 5. Targeted Process Lifecycle & Recovery Safety Regressions
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(not IS_POSIX, reason="Process groups (PGID) and os.getpgid are POSIX-only")
 def test_recovery_dead_leader_lingering_pgid_refuses_signal_and_marks_unresolved(tmp_path: Path):
     """Regression 5.1: Dead process-group leader with lingering members marks UNRESOLVED and sends NO signal."""
     _context, run_mgr, run = _make_context(tmp_path)
