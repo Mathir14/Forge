@@ -106,8 +106,8 @@ To cut a new release:
 ### Step 1: Bump Version & Validate Locally
 
 Update the version in:
-- `pyproject.toml` (e.g. `version = "0.1.0b15"`)
-- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b15"`)
+- `pyproject.toml` (e.g. `version = "0.1.0b16"`)
+- `src/forge/__init__.py` (e.g. `__version__ = "0.1.0b16"`)
 
 Run local tests to confirm:
 ```bash
@@ -117,11 +117,11 @@ pytest
 ### Step 2: Commit and Tag
 
 ```bash
-git commit -am "chore: release v0.1.0b15"
+git commit -am "chore: release v0.1.0b16"
 git push origin master
 
-git tag -a v0.1.0b15 -m "Release v0.1.0b15"
-git push origin v0.1.0b15
+git tag -a v0.1.0b16 -m "Release v0.1.0b16"
+git push origin v0.1.0b16
 ```
 
 ### Step 3: Monitor Staged Release in GitHub Actions
@@ -149,9 +149,19 @@ git push origin v0.1.0b15
 | **Release Candidate** | `0.2.0rc1` | `v0.2.0rc1` | TestPyPI / PyPI |
 | **Final / Stable** | `0.2.0` | `v0.2.0` | PyPI |
 
+## 6. Release Notes: v0.1.0b16
+
+`v0.1.0b16` delivers comprehensive process lifecycle tracking, orphan prevention, safe recovery, and native Windows Job Object containment:
+
+- **Native Windows Process Containment (Job Objects)**: Replaced best-effort `taskkill` with native Win32 Job Objects configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Agent processes are launched suspended (`CREATE_SUSPENDED`), assigned to the Job Object, and verified via `IsProcessInJob` before the primary thread is resumed. Refuses uncontained launch if Job Object assignment fails.
+- **Cross-Platform Descendant Cleanup & Orphan Prevention**: Kernel-enforced termination of all descendant processes when Forge terminates or when timeouts/cancellations occur. Prevents descendant processes from outliving Forge or holding inherited stdout/stderr pipes open.
+- **Bounded Stream Reading & EOF Independence**: Eliminated stdout pipe EOF deadlocks in `BaseAdapter`, `AntigravityAdapter`, and `OpenCodeAdapter` via `BoundedLineReader` and post-terminal bounded draining (`POST_TERMINAL_DRAIN_TIMEOUT_SECONDS = 0.2`). Adapters no longer block on unclosed inherited descriptors from child processes.
+- **Auditable Process Lifecycle State Tracking**: Introduced `ProcessTracker` and atomic persistence of `ProcessRecord` (`STARTING`, `RUNNING`, `EXIT_VERIFIED`, `TERMINATED`, `CLEANUP_FAILED`, `UNRESOLVED`) under `.forge/runs/<run_id>/processes/<seq>_<stage>.json`. Tracks start time ticks / creation times to protect against PID reuse.
+- **Truth-Grounded Stage Completion & Reconciliation**: `Stage.run()` strictly verifies that zero exit codes originate from natural process completion (`EXIT_VERIFIED`) rather than forced termination. Stage recovery reconciles orphaned stages with mutual exclusion via `RunLock`.
+
 ---
 
-## 6. Release Notes: v0.1.0b15
+## 7. Release Notes: v0.1.0b15
 
 `v0.1.0b15` delivers cross-project Tester v2 archetype generalization, runtime supervisor isolation, adversarial verdict arbitration, complete cache fingerprinting, and deterministic browser fallback:
 

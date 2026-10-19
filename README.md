@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/forge-orchestrator.svg)](https://pypi.org/project/forge-orchestrator/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/forge-orchestrator.svg)](https://pypi.org/project/forge-orchestrator/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/Mathir14/Forge/blob/master/LICENSE)
-[![Release: v0.1.0b15](https://img.shields.io/badge/Release-v0.1.0b15-green.svg)](https://github.com/Mathir14/Forge/releases/tag/v0.1.0b15)
+[![Release: v0.1.0b16](https://img.shields.io/badge/Release-v0.1.0b16-green.svg)](https://github.com/Mathir14/Forge/releases/tag/v0.1.0b16)
 
 Forge is an open-source, CLI-first multi-agent orchestration framework for autonomous, auditable software engineering. Designed for developers and engineering teams who want to incorporate AI coding agents into real production codebases safely, Forge eliminates the risks of unconstrained single-model generation—such as silent defects, architectural drift, hallucinated test passes, and unverified claims—by organizing specialized local CLI agents into a disciplined engineering pipeline with strict separation of concerns, empirical runtime testing, adversarial diff-first review, and complete human-in-the-loop oversight.
 
