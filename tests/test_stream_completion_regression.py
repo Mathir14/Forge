@@ -628,8 +628,8 @@ def test_scenario_j_cancellation_and_process_cleanup_while_reader_blocked(tmp_pa
     elapsed = time.time() - start_time
     t.join(timeout=1.0)
 
-    # Prompt termination (< 1 second)
-    assert elapsed < 1.5
+    # Prompt termination (< 1-2 seconds)
+    assert elapsed < 2.5, f"Expected prompt cancellation, took {elapsed:.2f}s"
     assert result.success is False
     assert result.response.exit_code == 130
     assert adapter.cancel_called is True

@@ -689,26 +689,79 @@ class BaseAdapter(ABC):
         )
 
         cls._register_proc(proc, instance=inst)
+        stdout_reader = BoundedLineReader(proc.stdout)
+        stderr_drainer = StderrDrainer(proc.stderr)
+        stdout_chunks: List[str] = []
+
         try:
-            stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
-            if tracker is not None and hasattr(tracker, "record_exit"):
+            if input_data is not None and proc.stdin:
                 try:
-                    tracker.record_exit(proc.returncode)
+                    proc.stdin.write(input_data)
+                    proc.stdin.close()
                 except Exception:
                     pass
-            return stdout or "", stderr or "", proc.returncode
-        except subprocess.TimeoutExpired as e:
+
+            deadline = (time.monotonic() + timeout) if timeout is not None else None
+
+            while True:
+                if deadline is not None and time.monotonic() > deadline:
+                    raise subprocess.TimeoutExpired(
+                        cmd=cmd,
+                        timeout=timeout,
+                        output="".join(stdout_chunks),
+                        stderr=stderr_drainer.get_stderr(),
+                    )
+
+                ret = proc.poll()
+                if ret is not None:
+                    drain_deadline = time.monotonic() + 0.2
+                    while time.monotonic() < drain_deadline:
+                        try:
+                            line = stdout_reader.read_line(timeout=0.05)
+                            if line is None:
+                                break
+                            stdout_chunks.append(line)
+                        except queue.Empty:
+                            break
+                    break
+
+                try:
+                    line = stdout_reader.read_line(timeout=0.05)
+                    if line is not None:
+                        stdout_chunks.append(line)
+                    elif stdout_reader.is_eof():
+                        try:
+                            proc.wait(timeout=0.2)
+                        except Exception:
+                            pass
+                        break
+                except queue.Empty:
+                    continue
+
+            returncode = proc.poll()
+            if returncode is None:
+                try:
+                    returncode = proc.wait(timeout=0.2)
+                except Exception:
+                    returncode = proc.poll() or 0
+
+            if tracker is not None and hasattr(tracker, "record_exit"):
+                try:
+                    tracker.record_exit(returncode)
+                except Exception:
+                    pass
+
+            return "".join(stdout_chunks), stderr_drainer.get_stderr(), returncode
+
+        except subprocess.TimeoutExpired:
             cls._safe_cleanup_subprocess(proc, tracker=tracker)
-            raise subprocess.TimeoutExpired(
-                cmd=cmd,
-                timeout=timeout,
-                output=getattr(e, "stdout", None) or getattr(e, "output", None),
-                stderr=getattr(e, "stderr", None),
-            )
+            raise
         except BaseException:
             cls._safe_cleanup_subprocess(proc, tracker=tracker)
             raise
         finally:
+            stdout_reader.close()
+            stderr_drainer.close()
             cls._safe_cleanup_subprocess(proc, tracker=tracker)
             cls._unregister_proc(proc, instance=inst)
 
