@@ -30,6 +30,8 @@ class AntigravityAdapter(BaseAdapter):
     }
     DEFAULT_MODEL = "gemini-3.7-flash-high"
     DEFAULT_EFFORT = "high"
+    DEFAULT_POST_TERMINAL_GRACE_PERIOD: float = 2.0
+    DEFAULT_DRAIN_TIMEOUT: float = 1.0
     MAX_PROMPT_BYTES: int = 130000  # Provider CLI argument limit bounded by POSIX OS MAX_ARG_STRLEN (131,072 bytes)
     WINDOWS_CMD_MAX_PROMPT_BYTES: int = 7500  # Windows cmd.exe 8,191 char limit minus flags
     WINDOWS_EXE_MAX_PROMPT_BYTES: int = 30000  # Windows CreateProcessW 32,767 char limit minus flags
@@ -50,6 +52,8 @@ class AntigravityAdapter(BaseAdapter):
         effort: Optional[str] = "high",
         auto_approve: bool = False,
         extra_flags: Optional[Dict[str, Any]] = None,
+        post_terminal_grace_period: float = DEFAULT_POST_TERMINAL_GRACE_PERIOD,
+        drain_timeout: float = DEFAULT_DRAIN_TIMEOUT,
     ):
         super().__init__(
             name="antigravity",
@@ -58,6 +62,8 @@ class AntigravityAdapter(BaseAdapter):
             auto_approve=auto_approve,
             extra_flags=extra_flags,
         )
+        self.post_terminal_grace_period = post_terminal_grace_period
+        self.drain_timeout = drain_timeout
 
     def _get_binary(self) -> Optional[str]:
         return shutil.which("agy") or shutil.which("antigravity")
@@ -381,9 +387,11 @@ class AntigravityAdapter(BaseAdapter):
         self,
         stream: Iterable[str],
         start_time: float,
-        get_returncode: Optional[Callable[[], Optional[int]]] = None,
+        get_returncode: Optional[Callable[..., Optional[int]]] = None,
         get_stderr: Optional[Callable[[], str]] = None,
         tracker: Optional[Any] = None,
+        grace_period: Optional[float] = None,
+        drain_timeout: Optional[float] = None,
     ) -> Iterator[AgentEvent]:
         """Decode Antigravity NDJSON stdout lines into canonical AgentEvents.
 
@@ -412,13 +420,28 @@ class AntigravityAdapter(BaseAdapter):
         reader = BoundedLineReader(stream)
         draining = False
         drain_deadline: Optional[float] = None
-        drain_timeout: float = 1.0
+        exit_deadline: Optional[float] = None
+        effective_drain_timeout: float = (
+            float(drain_timeout)
+            if drain_timeout is not None
+            else getattr(self, "drain_timeout", self.DEFAULT_DRAIN_TIMEOUT)
+        )
+        effective_grace_period: float = (
+            float(grace_period)
+            if grace_period is not None
+            else getattr(self, "post_terminal_grace_period", self.DEFAULT_POST_TERMINAL_GRACE_PERIOD)
+        )
 
         try:
             while True:
                 if draining:
                     now = time.monotonic()
+                    if exit_deadline is not None and now >= exit_deadline:
+                        break
                     if drain_deadline is not None and now >= drain_deadline:
+                        proc_code = get_returncode() if get_returncode else None
+                        if proc_code is not None:
+                            break
                         break
                     timeout = min(0.1, max(0.01, drain_deadline - now)) if drain_deadline is not None else 0.1
                 else:
@@ -431,7 +454,10 @@ class AntigravityAdapter(BaseAdapter):
                         proc_code = get_returncode() if get_returncode else None
                         if proc_code is not None:
                             break
-                        if drain_deadline is not None and time.monotonic() >= drain_deadline:
+                        now = time.monotonic()
+                        if exit_deadline is not None and now >= exit_deadline:
+                            break
+                        if drain_deadline is not None and now >= drain_deadline:
                             break
                         continue
                     else:
@@ -510,6 +536,7 @@ class AntigravityAdapter(BaseAdapter):
                         has_stopped_step = False
                         draining = False
                         drain_deadline = None
+                        exit_deadline = None
                     res = self._decode_text_chunk(payload, ts, session_id)
                     if res:
                         chunk_event, chunk_text = res
@@ -537,6 +564,7 @@ class AntigravityAdapter(BaseAdapter):
                                 has_stopped_step = False
                                 draining = False
                                 drain_deadline = None
+                                exit_deadline = None
                         yield tool_evt
                     continue
 
@@ -554,8 +582,11 @@ class AntigravityAdapter(BaseAdapter):
                     terminal_event_emitted = True
                     has_stopped_step = True
                     draining = True
+                    now = time.monotonic()
                     if drain_deadline is None:
-                        drain_deadline = time.monotonic() + drain_timeout
+                        drain_deadline = now + effective_drain_timeout
+                    if exit_deadline is None:
+                        exit_deadline = now + effective_grace_period
 
                     res_dict = payload.get("result") if isinstance(payload.get("result"), dict) else {}
                     raw_tokens = payload.get("usage") or payload.get("token_usage") or res_dict.get("usage") or res_dict.get("token_usage")
@@ -613,6 +644,7 @@ class AntigravityAdapter(BaseAdapter):
                         if not terminal_event_emitted:
                             draining = False
                             drain_deadline = None
+                            exit_deadline = None
                             has_stopped_step = False
                         continue
                     elif reason in ("error", "failed", "aborted", "cancelled"):
@@ -621,8 +653,11 @@ class AntigravityAdapter(BaseAdapter):
                         err_msg = part.get("error") or payload.get("error") or f"Step finished with error: {reason}"
                         terminal_error_msg = str(err_msg)
                         draining = True
+                        now = time.monotonic()
                         if drain_deadline is None:
-                            drain_deadline = time.monotonic() + drain_timeout
+                            drain_deadline = now + effective_drain_timeout
+                        if exit_deadline is None:
+                            exit_deadline = now + effective_grace_period
                         if tracker is not None and hasattr(tracker, "record_terminal_event"):
                             try:
                                 tracker.record_terminal_event("ERROR")
@@ -638,8 +673,11 @@ class AntigravityAdapter(BaseAdapter):
                             continue
                         has_stopped_step = True
                         draining = True
+                        now = time.monotonic()
                         if drain_deadline is None:
-                            drain_deadline = time.monotonic() + drain_timeout
+                            drain_deadline = now + effective_drain_timeout
+                        if exit_deadline is None:
+                            exit_deadline = now + effective_grace_period
                         if tracker is not None and hasattr(tracker, "record_terminal_event"):
                             try:
                                 tracker.record_terminal_event("COMPLETE")
@@ -655,8 +693,11 @@ class AntigravityAdapter(BaseAdapter):
                     err_msg = err_data.get("message") if isinstance(err_data, dict) else str(err_data)
                     terminal_error_msg = str(err_msg)
                     draining = True
+                    now = time.monotonic()
                     if drain_deadline is None:
-                        drain_deadline = time.monotonic() + drain_timeout
+                        drain_deadline = now + effective_drain_timeout
+                    if exit_deadline is None:
+                        exit_deadline = now + effective_grace_period
                     if tracker is not None and hasattr(tracker, "record_terminal_event"):
                         try:
                             tracker.record_terminal_event("ERROR")
@@ -671,6 +712,7 @@ class AntigravityAdapter(BaseAdapter):
                         has_stopped_step = False
                         draining = False
                         drain_deadline = None
+                        exit_deadline = None
                     logger.debug("Antigravity lifecycle event received: %s", event_type)
                     continue
                 elif event_type == "step_update":
@@ -688,23 +730,32 @@ class AntigravityAdapter(BaseAdapter):
             reader.close()
 
         # Post-mortem completion evaluation (ADR-017)
-        duration = time.time() - start_time
         has_process = get_returncode is not None
         proc_code = None
         if has_process:
+            if exit_deadline is not None:
+                rem_grace = max(0.0, exit_deadline - time.monotonic())
+            else:
+                rem_grace = effective_grace_period
             try:
-                proc_code = get_returncode(wait_timeout=1.0)
+                proc_code = get_returncode(wait_timeout=rem_grace)
             except TypeError:
                 proc_code = get_returncode()
+
+        duration = time.time() - start_time
         stderr_out = get_stderr() if get_stderr else ""
 
         if has_process:
             if proc_code is not None and proc_code != 0:
                 terminal_event_emitted = True
                 err_msg = stderr_out or terminal_error_msg or f"Antigravity process exited with non-zero exit code: {proc_code}"
-                if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                if tracker is not None and hasattr(tracker, "record_terminal_event") and getattr(tracker.record, "terminal_event_type", None) is None:
                     try:
                         tracker.record_terminal_event("ERROR")
+                    except Exception:
+                        pass
+                if tracker is not None and hasattr(tracker, "record_exit"):
+                    try:
                         tracker.record_exit(proc_code)
                     except Exception:
                         pass
@@ -722,11 +773,6 @@ class AntigravityAdapter(BaseAdapter):
             elif proc_code is None:
                 terminal_event_emitted = True
                 err_msg = stderr_out or "Antigravity process failed to exit after terminal event (process still active)."
-                if tracker is not None and hasattr(tracker, "record_terminal_event"):
-                    try:
-                        tracker.record_terminal_event("ERROR")
-                    except Exception:
-                        pass
                 yield self._build_error_event(
                     ts=time.time(),
                     duration=duration,
@@ -970,6 +1016,8 @@ class AntigravityAdapter(BaseAdapter):
                     get_returncode=_get_returncode,
                     get_stderr=_get_stderr,
                     tracker=tracker,
+                    grace_period=self.post_terminal_grace_period,
+                    drain_timeout=self.drain_timeout,
                 )
 
         except KeyboardInterrupt:

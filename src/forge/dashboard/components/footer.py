@@ -14,7 +14,7 @@ def render_footer(state: DashboardState) -> Panel:
     grid.add_column(ratio=1, justify="right")
 
     hints = Text()
-    hints.append("[1-5] ", style="bold cyan")
+    hints.append("[1-4] ", style="bold cyan")
     hints.append("Tabs  ", style="dim")
 
     hints.append("[Tab] ", style="bold cyan")

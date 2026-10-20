@@ -11,8 +11,8 @@ class DashboardState:
     run: RunModel
     selected_stage_index: int = 0
     focused_pane: str = "timeline"  # "timeline" or "content"
-    active_tab: int = 2  # 1: Console, 2: Artifact, 3: Tester, 4: PKB, 5: Compare
-    active_content_tab: str = "human"  # "human" or "machine" (for Artifact tab)
+    active_tab: int = 2  # 1: Console, 2: Artifact, 3: PKB, 4: Compare
+    active_content_tab: str = "human"  # "human", "machine", or "tests" (for Artifact tab)
     scroll_offset: int = 0
     should_exit: bool = False
     max_scroll_offset: int = 1000
@@ -81,28 +81,41 @@ class DashboardState:
         self.focused_pane = "content" if self.focused_pane == "timeline" else "timeline"
 
     def set_tab(self, tab_num: int) -> None:
-        if 1 <= tab_num <= 5:
+        if 1 <= tab_num <= 4:
             self.active_tab = tab_num
             self.scroll_offset = 0
             self.max_scroll_offset = 1000
 
     def next_tab(self) -> None:
-        self.active_tab = (self.active_tab % 5) + 1
+        self.active_tab = (self.active_tab % 4) + 1
         self.scroll_offset = 0
         self.max_scroll_offset = 1000
 
     def prev_tab(self) -> None:
-        self.active_tab = 5 if self.active_tab == 1 else self.active_tab - 1
+        self.active_tab = 4 if self.active_tab == 1 else self.active_tab - 1
         self.scroll_offset = 0
         self.max_scroll_offset = 1000
 
     def toggle_content_tab(self) -> None:
-        self.active_content_tab = "machine" if self.active_content_tab == "human" else "human"
+        stage = self.current_stage
+        has_tests = False
+        if stage:
+            has_tests = (
+                stage.role_name.lower() == "tester"
+                or "test" in stage.stage_name.lower()
+                or bool(stage.metadata.get("test_results"))
+            )
+        if has_tests:
+            cycle = ["human", "machine", "tests"]
+            curr_idx = cycle.index(self.active_content_tab) if self.active_content_tab in cycle else 0
+            self.active_content_tab = cycle[(curr_idx + 1) % len(cycle)]
+        else:
+            self.active_content_tab = "machine" if self.active_content_tab == "human" else "human"
         self.scroll_offset = 0
         self.max_scroll_offset = 1000
 
     def set_content_tab(self, tab: str) -> None:
-        if tab in ("human", "machine"):
+        if tab in ("human", "machine", "tests"):
             self.active_content_tab = tab
             self.scroll_offset = 0
             self.max_scroll_offset = 1000

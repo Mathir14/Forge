@@ -983,6 +983,7 @@ def terminate_process_tree(
     force: bool = True,
     safe_kill_fn: Optional[Any] = None,
     pgid: Optional[int] = None,
+    expected_start_time_ticks: Optional[int] = None,
 ) -> bool:
     """Terminate or kill a process and all its child/descendant processes cleanly.
 
@@ -1028,6 +1029,9 @@ def terminate_process_tree(
                 _kill(popen_obj)
             return True
 
+        if expected_start_time_ticks is None and popen_obj is not None:
+            expected_start_time_ticks = getattr(popen_obj, "_start_time_ticks", None)
+
         if os.name == "posix":
             target_pgid = pgid
             if type(target_pgid) is not int:
@@ -1058,10 +1062,37 @@ def terminate_process_tree(
                     _kill(popen_obj)
                 return True
 
+            # CRITICAL: Verify process identity and ownership before signaling.
+            # Never signal an ambiguous PID or process group.
+            if expected_start_time_ticks is not None and is_pid_alive(pid):
+                if not verify_process_identity(pid, expected_start_time_ticks, target_pgid):
+                    logger.warning(
+                        "Refusing to signal PID %s: process identity does not match expected start_time_ticks %s.",
+                        pid,
+                        expected_start_time_ticks,
+                    )
+                    return False
+
+            is_mock = is_mock_process(popen_obj)
             # Discover all descendant PIDs and process group members before signaling
             descendants = find_descendant_pids(pid)
             group_pids = find_process_group_pids(target_pgid)
             all_pids = ({pid} if is_pid_alive(pid) else set()) | descendants | group_pids
+
+            # If all processes in tree and group have already exited, do not signal; return cleanly
+            if not is_mock and not all_pids:
+                return True
+
+            # If the process group leader is already dead and caller did not provide popen_obj ownership,
+            # we cannot prove ownership of lingering processes in the group due to potential PGID reuse.
+            if not is_pid_alive(pid) and popen_obj is None and expected_start_time_ticks is not None:
+                logger.warning(
+                    "Process group leader (PID %s) is no longer alive; lingering processes match PGID %s. "
+                    "Refusing automated termination of ambiguous process group.",
+                    pid,
+                    target_pgid,
+                )
+                return False
 
             # Send graceful SIGTERM to process group
             try:
@@ -1118,6 +1149,10 @@ def terminate_process_tree(
                 if popen_obj is not None:
                     _kill(popen_obj)
                 return True
+
+            if expected_start_time_ticks is not None and is_pid_alive(pid):
+                if not verify_process_identity(pid, expected_start_time_ticks):
+                    return False
 
             job = getattr(popen_obj, "_job_object", None) if popen_obj is not None else None
             if job is not None and isinstance(job, WindowsJobObject):

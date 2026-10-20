@@ -30,6 +30,9 @@ def render_artifact_view(state: DashboardState, max_lines: int = 40) -> Panel:
 
     if state.active_content_tab == "human":
         body = _render_human_report(stage, state.scroll_offset, max_lines, state=state)
+    elif state.active_content_tab == "tests":
+        from forge.dashboard.components.tester_view import render_tester_content
+        body = render_tester_content(stage, max_lines=max_lines, state=state)
     else:
         body = _render_machine_report(stage, state.scroll_offset, max_lines, state=state)
 

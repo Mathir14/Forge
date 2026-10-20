@@ -12,37 +12,17 @@ from forge.dashboard.components.navigation import render_tab_navigation
 from forge.dashboard.components.viewport import VirtualViewport
 
 
-def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
-    """Render the test execution matrix, behavioral evidence, and failure inspector."""
-    is_focused = (state.focused_pane == "content")
-    border_color = "cyan" if is_focused else "dim"
-    title_markup = render_tab_navigation(state)
-
-    # Find tester stage
-    tester_stage = state.run.get_stage("tester") or state.run.get_stage("04_tester")
-    if not tester_stage:
-        for s in state.run.stages:
-            if "test" in s.stage_name.lower():
-                tester_stage = s
-                break
-
-    if not tester_stage or tester_stage.status == "PENDING":
-        body = Text(
-            "\nNo tester evidence available for this run.\n"
+def render_tester_content(stage, max_lines: int = 40, state: Optional[DashboardState] = None) -> RenderableType:
+    """Render the test execution matrix, behavioral evidence, and failure inspector for a stage."""
+    if not stage or stage.status == "PENDING":
+        return Text(
+            "\nNo tester evidence available for this stage.\n"
             "The Tester stage has not executed yet or was skipped.\n",
             style="dim italic",
         )
-        return Panel(
-            body,
-            title=title_markup,
-            title_align="left",
-            border_style=border_color,
-            style="white",
-        )
-
 
     # Parse test matrix and journeys from tester metadata and markdown
-    summary, journeys, failure_details = _extract_tester_data(tester_stage)
+    summary, journeys, failure_details = _extract_tester_data(stage)
 
     # 1. Summary Cards Table
     summary_table = Table.grid(padding=(0, 2), expand=True)
@@ -51,7 +31,7 @@ def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
     summary_table.add_column(ratio=1)
     summary_table.add_column(ratio=1)
 
-    status = tester_stage.status.upper()
+    status = (stage.status or "").upper()
     status_style = "bold green" if status in ("APPROVED", "VERIFIED", "PASSED", "PASS", "SUCCESS") else "bold red"
 
     summary_table.add_row(
@@ -85,8 +65,8 @@ def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
             matrix_table.add_row(res_text, j["name"], f"{j.get('duration', 0):.2f}s")
     else:
         # Fall back to raw report excerpt
-        excerpt = (tester_stage.human_report or tester_stage.raw_content)[:1200]
-        matrix_table.add_row(Text("REPORT", style="bold yellow"), excerpt, f"{tester_stage.duration_seconds:.1f}s")
+        excerpt = (stage.human_report or stage.raw_content)[:1200]
+        matrix_table.add_row(Text("REPORT", style="bold yellow"), excerpt, f"{stage.duration_seconds:.1f}s")
 
     # Combine into view
     content_grid = Table.grid(expand=True)
@@ -99,15 +79,32 @@ def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
         content_grid.add_row(Text("\nFailure Inspector & Evidence:", style="bold red"))
         content_grid.add_row(Text(failure_details, style="dim red"))
 
-    viewport = VirtualViewport(
+    return VirtualViewport(
         content_grid,
+        scroll_offset=state.scroll_offset if state else 0,
         state=state,
         max_lines=max_lines,
         indicator_label="Rows",
     )
 
+
+def render_tester_view(state: DashboardState, max_lines: int = 35) -> Panel:
+    """Render the test execution matrix, behavioral evidence, and failure inspector."""
+    is_focused = (state.focused_pane == "content")
+    border_color = "cyan" if is_focused else "dim"
+    title_markup = render_tab_navigation(state)
+
+    # Find tester stage
+    tester_stage = state.run.get_stage("tester") or state.run.get_stage("04_tester")
+    if not tester_stage:
+        for s in state.run.stages:
+            if "test" in s.stage_name.lower():
+                tester_stage = s
+                break
+
+    body = render_tester_content(tester_stage, max_lines=max_lines, state=state)
     return Panel(
-        viewport,
+        body,
         title=title_markup,
         title_align="left",
         border_style=border_color,

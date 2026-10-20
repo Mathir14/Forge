@@ -286,14 +286,14 @@ def test_critique_complete_and_protocol_successes_render_as_successful_in_timeli
 # ===========================================================================
 
 
-def test_tab_navigation_remains_visible_across_all_five_tabs():
-    """Verify centralized tab navigation retains all 5 tab indicators across all active tabs."""
+def test_tab_navigation_remains_visible_across_all_four_tabs():
+    """Verify centralized tab navigation retains all 4 tab indicators across all active tabs."""
     run = RunModel(run_id="run-tabs", task="Tabs", status="RUNNING", created_at="", run_dir=Path("/tmp/run"), stages=[])
     state = DashboardState(run=run)
 
-    expected_tab_names = ["1: Console", "2: Artifact", "3: Tester", "4: PKB", "5: Compare"]
+    expected_tab_names = ["1: Console", "2: Artifact", "3: PKB", "4: Compare"]
 
-    for tab_num in range(1, 6):
+    for tab_num in range(1, 5):
         state.set_tab(tab_num)
         nav = render_tab_navigation(state)
         for expected in expected_tab_names:
@@ -306,7 +306,7 @@ def test_tab_navigation_remains_visible_across_all_five_tabs():
 
 
 def test_empty_states_retain_full_navigation_bar(tmp_path: Path):
-    """Verify Tester, PKB, and Compare empty states retain full 5-tab navigation bar."""
+    """Verify Tester, PKB, and Compare empty states retain full 4-tab navigation bar."""
     run = RunModel(
         run_id="run-empty-test",
         task="Empty states test",
@@ -317,34 +317,31 @@ def test_empty_states_retain_full_navigation_bar(tmp_path: Path):
     )
     state = DashboardState(run=run)
 
-    expected_tabs = ["[1: Console]", "[2: Artifact]", "[4: PKB]"]
-
-    # 1. Tester empty state
-    state.set_tab(3)
+    # 1. Tester empty state (via render_tester_view backward compatibility)
+    state.set_tab(2)
     tester_panel = render_tester_view(state)
     assert tester_panel.title is not None
     title_str = str(tester_panel.title)
-    for tab in expected_tabs:
+    for tab in ["[1: Console]", "[3: PKB]", "[4: Compare]"]:
         assert tab in title_str, f"Tester empty state missing tab '{tab}'"
-    assert "3: Tester" in title_str
 
     # 2. PKB empty state
-    state.set_tab(4)
+    state.set_tab(3)
     pkb_panel = render_pkb_view(state, project_root=tmp_path)
     assert pkb_panel.title is not None
     title_str = str(pkb_panel.title)
-    for tab in ["[1: Console]", "[2: Artifact]", "[3: Tester]"]:
+    for tab in ["[1: Console]", "[2: Artifact]", "[4: Compare]"]:
         assert tab in title_str, f"PKB empty state missing tab '{tab}'"
-    assert "4: PKB" in title_str
+    assert "3: PKB" in title_str
 
     # 3. Compare empty state
-    state.set_tab(5)
+    state.set_tab(4)
     compare_panel = render_compare_view(state, project_root=tmp_path)
     assert compare_panel.title is not None
     title_str = str(compare_panel.title)
-    for tab in ["[1: Console]", "[2: Artifact]", "[3: Tester]", "[4: PKB]"]:
+    for tab in ["[1: Console]", "[2: Artifact]", "[3: PKB]"]:
         assert tab in title_str, f"Compare empty state missing tab '{tab}'"
-    assert "5: Compare" in title_str
+    assert "4: Compare" in title_str
 
 
 # ===========================================================================

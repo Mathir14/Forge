@@ -317,10 +317,8 @@ class DashboardApp:
         elif self.state.active_tab == 2:
             content_panel = render_artifact_view(self.state, max_lines=content_lines)
         elif self.state.active_tab == 3:
-            content_panel = render_tester_view(self.state, max_lines=content_lines)
-        elif self.state.active_tab == 4:
             content_panel = render_pkb_view(self.state, project_root=self.project_root, max_lines=content_lines)
-        elif self.state.active_tab == 5:
+        elif self.state.active_tab == 4:
             content_panel = render_compare_view(self.state, project_root=self.project_root, max_lines=content_lines)
         else:
             content_panel = render_artifact_view(self.state, max_lines=content_lines)
@@ -358,7 +356,7 @@ class DashboardApp:
             self.state.toggle_focus()
             return
 
-        # Top-level Tab switching (1: Console, 2: Artifact, 3: Tester, 4: PKB, 5: Compare)
+        # Top-level Tab switching (1: Console, 2: Artifact, 3: PKB, 4: Compare)
         if clean_key == "1":
             if self.live_queue is None and self.state.active_tab == 2:
                 self.state.set_content_tab("human")
@@ -374,11 +372,8 @@ class DashboardApp:
         elif clean_key == "3":
             self.state.set_tab(3)
             return
-        elif clean_key == "4":
+        elif clean_key in ("4", "5"):
             self.state.set_tab(4)
-            return
-        elif clean_key == "5":
-            self.state.set_tab(5)
             return
 
         # Artifact Sub-tab switching
@@ -390,14 +385,22 @@ class DashboardApp:
             if self.state.active_tab == 2:
                 self.state.set_content_tab("machine")
             return
+        elif clean_key == "t":
+            for idx, s in enumerate(self.state.run.stages):
+                if s.role_name.lower() == "tester" or "test" in s.stage_name.lower() or bool(s.metadata.get("test_results")):
+                    self.state.selected_stage_index = idx
+                    break
+            self.state.set_tab(2)
+            self.state.set_content_tab("tests")
+            return
 
         # PKB Filter cycling ([ and ])
         if clean_key == "[":
-            if self.state.active_tab == 4:
+            if self.state.active_tab == 3:
                 self._cycle_pkb_filter(forward=False)
             return
         elif clean_key == "]":
-            if self.state.active_tab == 4:
+            if self.state.active_tab == 3:
                 self._cycle_pkb_filter(forward=True)
             return
 

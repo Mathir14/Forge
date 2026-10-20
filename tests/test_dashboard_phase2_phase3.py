@@ -776,8 +776,8 @@ def test_compare_view_side_by_side(temp_run_dir: Path):
 
 
 def test_tab_navigation_keys(temp_run_dir: Path):
-    """Verify numeric keys 1..5 switch between operational views in DashboardApp."""
-    # Test in live mode (where 1..5 switch tabs directly)
+    """Verify numeric keys 1..4 switch between operational views in DashboardApp (5 aliases to 4)."""
+    # Test in live mode (where 1..4 switch tabs directly)
     app = DashboardApp(temp_run_dir, live_queue=queue.Queue())
     assert app.state.active_tab == 1
 
@@ -785,10 +785,7 @@ def test_tab_navigation_keys(temp_run_dir: Path):
     assert app.state.active_tab == 2  # Artifact
 
     app.handle_key("3")
-    assert app.state.active_tab == 3  # Tester
-
-    app.handle_key("4")
-    assert app.state.active_tab == 4  # PKB
+    assert app.state.active_tab == 3  # PKB
 
     # Test PKB filter cycling with [ and ]
     app.handle_key("]")
@@ -798,11 +795,177 @@ def test_tab_navigation_keys(temp_run_dir: Path):
     app.handle_key("[")
     assert app.state.pkb_type_filter == "architecture"
 
+    app.handle_key("4")
+    assert app.state.active_tab == 4  # Compare
+
     app.handle_key("5")
-    assert app.state.active_tab == 5  # Compare
+    assert app.state.active_tab == 4  # Compare (5 aliases to 4)
 
     app.handle_key("1")
     assert app.state.active_tab == 1  # Console
+
+
+def test_tester_results_discoverable_under_artifacts_tab(temp_run_dir: Path):
+    """Verify test matrix, summary, and journeys are rendered under Artifacts tab when Tests subtab is selected."""
+    from forge.dashboard.components.artifact_view import render_artifact_view
+    from rich.console import Console
+
+    run = RunModel(
+        run_id="run-tests-artifact",
+        task="Test artifact unification",
+        status="APPROVED",
+        created_at="",
+        run_dir=temp_run_dir,
+        stages=[
+            StageModel(
+                stage_name="04_tester",
+                role_name="tester",
+                sequence_number=4,
+                status="PASSED",
+                human_report="## Test Report\nAll 5 journeys passed cleanly.",
+                raw_content="",
+                machine_report=None,
+                metadata={
+                    "test_results": {
+                        "total": 5,
+                        "passed": 5,
+                        "failed": 0,
+                        "tests": [
+                            {"name": "test_auth_flow", "status": "PASS", "duration": 0.12},
+                            {"name": "test_token_refresh", "status": "PASS", "duration": 0.08},
+                        ],
+                    }
+                },
+                exit_code=0,
+                duration_seconds=1.5,
+            )
+        ],
+    )
+    state = DashboardState(run=run, active_tab=2, active_content_tab="tests")
+    panel = render_artifact_view(state)
+    assert panel is not None
+
+    console = Console(record=True, width=100)
+    console.print(panel)
+    output = console.export_text()
+
+    assert "TOTAL: 5" in output
+    assert "PASSED: 5" in output
+    assert "test_auth_flow" in output
+    assert "test_token_refresh" in output
+
+
+def test_tester_results_failure_inspector_under_artifacts(temp_run_dir: Path):
+    """Verify failure inspector is rendered under Artifacts tab when test failures exist."""
+    from forge.dashboard.components.artifact_view import render_artifact_view
+    from rich.console import Console
+
+    run = RunModel(
+        run_id="run-failures-artifact",
+        task="Test failure inspector",
+        status="FAILED",
+        created_at="",
+        run_dir=temp_run_dir,
+        stages=[
+            StageModel(
+                stage_name="04_tester",
+                role_name="tester",
+                sequence_number=4,
+                status="FAILED",
+                human_report="### Test Failures\nFAILURES\nAssertionError: expected 200 got 500 in test_login",
+                raw_content="",
+                machine_report=None,
+                metadata={},
+                exit_code=1,
+                duration_seconds=2.0,
+            )
+        ],
+    )
+    state = DashboardState(run=run, active_tab=2, active_content_tab="tests")
+    panel = render_artifact_view(state)
+    console = Console(record=True, width=100)
+    console.print(panel)
+    output = console.export_text()
+
+    assert "STATUS: FAILED" in output
+    assert "Failure Inspector & Evidence:" in output
+    assert "AssertionError: expected 200 got 500" in output
+
+
+def test_tester_incomplete_or_pending_under_artifacts(temp_run_dir: Path):
+    """Verify pending tester stage renders graceful informational message under Artifacts."""
+    from forge.dashboard.components.artifact_view import render_artifact_view
+    from rich.console import Console
+
+    run = RunModel(
+        run_id="run-pending-tester",
+        task="Test pending tester",
+        status="RUNNING",
+        created_at="",
+        run_dir=temp_run_dir,
+        stages=[
+            StageModel(
+                stage_name="04_tester",
+                role_name="tester",
+                sequence_number=4,
+                status="PENDING",
+                human_report="",
+                raw_content="",
+                machine_report=None,
+                metadata={},
+                exit_code=None,
+                duration_seconds=0.0,
+            )
+        ],
+    )
+    state = DashboardState(run=run, active_tab=2, active_content_tab="tests")
+    panel = render_artifact_view(state)
+    console = Console(record=True, width=100)
+    console.print(panel)
+    output = console.export_text()
+
+    assert "No tester evidence available for this stage" in output
+
+
+def test_shortcut_t_jumps_to_tester_stage_and_subtab(temp_run_dir: Path):
+    """Verify pressing 't' jumps selection to tester stage and activates tests subtab under Artifacts."""
+    app = DashboardApp(temp_run_dir, live_queue=queue.Queue())
+    # Mock multiple stages in the run
+    stage_spec = StageModel(stage_name="01_spec", role_name="spec", sequence_number=1, status="PASSED", human_report="", raw_content="", machine_report=None, metadata={}, exit_code=0, duration_seconds=1.0)
+    stage_tester = StageModel(stage_name="04_tester", role_name="tester", sequence_number=4, status="PASSED", human_report="", raw_content="", machine_report=None, metadata={"test_results": {"total": 2, "passed": 2, "failed": 0}}, exit_code=0, duration_seconds=1.0)
+    app.state.run.stages = [stage_spec, stage_tester]
+    app.state.selected_stage_index = 0
+    app.state.active_tab = 1
+
+    app.handle_key("t")
+    assert app.state.selected_stage_index == 1
+    assert app.state.active_tab == 2
+    assert app.state.active_content_tab == "tests"
+
+
+def test_artifact_tab_indicator_shows_tests_subtab_only_when_test_evidence_present():
+    """Verify tab navigation displays 'T: Tests' only when current stage contains test evidence."""
+    from forge.dashboard.components.navigation import render_tab_navigation
+
+    stage_spec = StageModel(stage_name="01_spec", role_name="spec", sequence_number=1, status="PASSED", human_report="", raw_content="", machine_report=None, metadata={}, exit_code=0, duration_seconds=1.0)
+    stage_tester = StageModel(stage_name="04_tester", role_name="tester", sequence_number=4, status="PASSED", human_report="", raw_content="", machine_report=None, metadata={}, exit_code=0, duration_seconds=1.0)
+
+    run = RunModel(run_id="run-test", task="Test", status="RUNNING", created_at="", run_dir=Path("/tmp"), stages=[stage_spec, stage_tester])
+    state = DashboardState(run=run, active_tab=2)
+
+    # 1. Spec selected -> only H: Human and M: Machine
+    state.selected_stage_index = 0
+    nav_spec = render_tab_navigation(state)
+    assert "H: Human" in nav_spec
+    assert "M: Machine" in nav_spec
+    assert "T: Tests" not in nav_spec
+
+    # 2. Tester selected -> includes T: Tests
+    state.selected_stage_index = 1
+    nav_tester = render_tab_navigation(state)
+    assert "H: Human" in nav_tester
+    assert "M: Machine" in nav_tester
+    assert "T: Tests" in nav_tester
 
 
 # ==============================================================================

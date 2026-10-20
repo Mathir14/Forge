@@ -149,7 +149,19 @@ git push origin v0.1.0b16
 | **Release Candidate** | `0.2.0rc1` | `v0.2.0rc1` | TestPyPI / PyPI |
 | **Final / Stable** | `0.2.0` | `v0.2.0` | PyPI |
 
-## 6. Release Notes: v0.1.0b16
+## 6. Release Notes: v0.1.0b17
+
+`v0.1.0b17` delivers dashboard architecture consolidation and post-terminal process lifecycle hardening:
+
+- **Unified Dashboard Architecture (4-Tab Model)**: Consolidated top-level tabs to 4 core operational views (`[1: Console]`, `[2: Artifact]`, `[3: PKB]`, `[4: Compare]`). Removed the redundant top-level `Tester` tab, unifying test execution matrices, journey summaries, and failure evidence into the `[2: Artifact]` view as a dedicated subtab `(H: Human  M: Machine  T: Tests)` when viewing test-bearing stages. Added global hotkey `t` to jump directly to the Tester stage and activate the Tests view.
+- **Antigravity Post-Terminal Process Lifecycle Hardening**: Resolved run-003 failure where Antigravity emitted a terminal `COMPLETE` event while the CLI process was still actively tearing down. Replaced arbitrary short exit timeouts with configurable post-terminal grace periods (`post_terminal_grace_seconds`, default 2.0s) and bounded monotonic deadlines (`time.monotonic()`).
+- **Bounded Stream Draining & Monotonic Deadlines**: Enforced that stream draining after terminal events respects overall stage deadlines without hanging indefinitely on descendant pipes, while preserving the distinction between terminal event receipt and verified OS-level process termination.
+- **Strict Process Identity & Signal Safety**: Hardened `terminate_process_tree` and process cleanup routines to verify process identity (PID and creation/start time) immediately before signaling, preventing dangerous PID reuse or process-group misdirection.
+- **Cleanup Failure Tracking & Nonzero Exit Preservation**: Nonzero exit codes, malformed terminal events, or forced terminations are strictly treated as failures and recorded with explicit failure reasons in `ProcessTracker`.
+
+---
+
+## 7. Release Notes: v0.1.0b16
 
 `v0.1.0b16` delivers comprehensive process lifecycle tracking, orphan prevention, safe recovery, and native Windows Job Object containment:
 

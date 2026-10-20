@@ -19,6 +19,8 @@ from forge.core.platform import (
     terminate_process_tree,
     safe_kill,
     launch_contained_process,
+    verify_process_identity,
+    is_pid_alive,
 )
 
 
@@ -606,12 +608,40 @@ class BaseAdapter(ABC):
         success = True
         err = None
         try:
-            cls._kill_process_group(proc)
-            try:
-                proc.wait(timeout=0.2)
-            except Exception:
-                pass
-            setattr(proc, "_cleanup_done", True)
+            expected_ticks = getattr(proc, "_start_time_ticks", None)
+            if expected_ticks is None and tracker is not None and hasattr(tracker, "record"):
+                expected_ticks = getattr(tracker.record, "start_time_ticks", None)
+                if expected_ticks is not None:
+                    setattr(proc, "_start_time_ticks", expected_ticks)
+
+            target_pgid = getattr(proc, "_pgid", None)
+            if type(target_pgid) is not int:
+                target_pgid = None
+                if tracker is not None and hasattr(tracker, "record"):
+                    target_pgid = getattr(tracker.record, "pgid", None)
+                    if target_pgid is not None:
+                        setattr(proc, "_pgid", target_pgid)
+
+            pid = getattr(proc, "pid", None)
+            if type(pid) is int and is_pid_alive(pid) and expected_ticks is not None:
+                if not verify_process_identity(pid, expected_ticks, target_pgid):
+                    success = False
+                    err = (
+                        f"Process identity verification failed for PID {pid} (expected start ticks {expected_ticks}); "
+                        "ambiguous process identity, refusing cleanup."
+                    )
+
+            if success:
+                res = cls._kill_process_group(proc)
+                if res is False:
+                    success = False
+                    err = f"Failed to terminate process tree for PID {pid}"
+                try:
+                    proc.wait(timeout=0.2)
+                except Exception:
+                    pass
+                if success:
+                    setattr(proc, "_cleanup_done", True)
         except Exception as e:
             success = False
             err = str(e)
@@ -630,12 +660,18 @@ class BaseAdapter(ABC):
         safe_kill(proc)
 
     @classmethod
-    def _kill_process_group(cls, proc: subprocess.Popen) -> None:
+    def _kill_process_group(cls, proc: subprocess.Popen) -> bool:
         """Terminate or kill the entire process group of proc to prevent orphaned children."""
         target_pgid = getattr(proc, "_pgid", None)
         if type(target_pgid) is not int:
             target_pgid = None
-        terminate_process_tree(proc, pgid=target_pgid, safe_kill_fn=cls._safe_kill)
+        ticks = getattr(proc, "_start_time_ticks", None)
+        return terminate_process_tree(
+            proc,
+            pgid=target_pgid,
+            expected_start_time_ticks=ticks,
+            safe_kill_fn=cls._safe_kill,
+        )
 
     @hybridmethod
     def _run_subprocess(

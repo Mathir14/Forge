@@ -264,6 +264,8 @@ class OpenCodeAdapter(BaseAdapter):
     DEFAULT_EFFORT: Optional[str] = None
 
     OPENCODE_METADATA_TIMEOUT: float = 3.0
+    DEFAULT_POST_TERMINAL_GRACE_PERIOD: float = 2.0
+    DEFAULT_DRAIN_TIMEOUT: float = 1.0
     DEFAULT_RECOVERY_TIMEOUT: float = 300.0
     DEFAULT_RECOVERY_POLL_INTERVAL: float = 2.0
     INTERNAL_EXTRA_FLAGS: Set[str] = {"recovery_timeout", "recovery_poll_interval"}
@@ -282,6 +284,8 @@ class OpenCodeAdapter(BaseAdapter):
         effort: Optional[str] = None,
         auto_approve: bool = False,
         extra_flags: Optional[Dict[str, Any]] = None,
+        post_terminal_grace_period: float = DEFAULT_POST_TERMINAL_GRACE_PERIOD,
+        drain_timeout: float = DEFAULT_DRAIN_TIMEOUT,
     ):
         super().__init__(
             name="opencode",
@@ -290,6 +294,8 @@ class OpenCodeAdapter(BaseAdapter):
             auto_approve=auto_approve,
             extra_flags=extra_flags,
         )
+        self.post_terminal_grace_period = post_terminal_grace_period
+        self.drain_timeout = drain_timeout
         self._availability_error: Optional[str] = None
         self._session_id: Optional[str] = None
         self._current_cwd: Optional[Path] = None
@@ -818,9 +824,11 @@ class OpenCodeAdapter(BaseAdapter):
         self,
         stream: Iterable[str],
         start_time: float,
-        get_returncode: Optional[Callable[[], Optional[int]]] = None,
+        get_returncode: Optional[Callable[..., Optional[int]]] = None,
         get_stderr: Optional[Callable[[], str]] = None,
         tracker: Optional[Any] = None,
+        grace_period: Optional[float] = None,
+        drain_timeout: Optional[float] = None,
     ) -> Iterator[AgentEvent]:
         """Decode OpenCode NDJSON stdout lines into canonical AgentEvents.
 
@@ -848,13 +856,28 @@ class OpenCodeAdapter(BaseAdapter):
         reader = BoundedLineReader(stream)
         draining = False
         drain_deadline: Optional[float] = None
-        drain_timeout: float = 1.0
+        exit_deadline: Optional[float] = None
+        effective_drain_timeout: float = (
+            float(drain_timeout)
+            if drain_timeout is not None
+            else getattr(self, "drain_timeout", self.DEFAULT_DRAIN_TIMEOUT)
+        )
+        effective_grace_period: float = (
+            float(grace_period)
+            if grace_period is not None
+            else getattr(self, "post_terminal_grace_period", self.DEFAULT_POST_TERMINAL_GRACE_PERIOD)
+        )
 
         try:
             while True:
                 if draining:
                     now = time.monotonic()
+                    if exit_deadline is not None and now >= exit_deadline:
+                        break
                     if drain_deadline is not None and now >= drain_deadline:
+                        proc_code = get_returncode() if get_returncode else None
+                        if proc_code is not None:
+                            break
                         break
                     timeout = min(0.1, max(0.01, drain_deadline - now)) if drain_deadline is not None else 0.1
                 else:
@@ -867,7 +890,10 @@ class OpenCodeAdapter(BaseAdapter):
                         proc_code = get_returncode() if get_returncode else None
                         if proc_code is not None:
                             break
-                        if drain_deadline is not None and time.monotonic() >= drain_deadline:
+                        now = time.monotonic()
+                        if exit_deadline is not None and now >= exit_deadline:
+                            break
+                        if drain_deadline is not None and now >= drain_deadline:
                             break
                         continue
                     else:
@@ -962,6 +988,7 @@ class OpenCodeAdapter(BaseAdapter):
                         if not terminal_event_received:
                             draining = False
                             drain_deadline = None
+                            exit_deadline = None
                             has_stopped_step = False
                         continue
                     elif reason in ("stop", "complete", "completed", "end"):
@@ -975,8 +1002,11 @@ class OpenCodeAdapter(BaseAdapter):
                             continue
                         has_stopped_step = True
                         draining = True
+                        now = time.monotonic()
                         if drain_deadline is None:
-                            drain_deadline = time.monotonic() + drain_timeout
+                            drain_deadline = now + effective_drain_timeout
+                        if exit_deadline is None:
+                            exit_deadline = now + effective_grace_period
                         if tracker is not None and hasattr(tracker, "record_terminal_event"):
                             try:
                                 tracker.record_terminal_event("COMPLETE")
@@ -987,8 +1017,11 @@ class OpenCodeAdapter(BaseAdapter):
                         terminal_event_received = True
                         terminal_event_emitted = True
                         draining = True
+                        now = time.monotonic()
                         if drain_deadline is None:
-                            drain_deadline = time.monotonic() + drain_timeout
+                            drain_deadline = now + effective_drain_timeout
+                        if exit_deadline is None:
+                            exit_deadline = now + effective_grace_period
                         if tracker is not None and hasattr(tracker, "record_terminal_event"):
                             try:
                                 tracker.record_terminal_event("ERROR")
@@ -1034,8 +1067,11 @@ class OpenCodeAdapter(BaseAdapter):
                     terminal_event_received = True
                     has_stopped_step = True
                     draining = True
+                    now = time.monotonic()
                     if drain_deadline is None:
-                        drain_deadline = time.monotonic() + drain_timeout
+                        drain_deadline = now + effective_drain_timeout
+                    if exit_deadline is None:
+                        exit_deadline = now + effective_grace_period
                     if tracker is not None and hasattr(tracker, "record_terminal_event"):
                         try:
                             tracker.record_terminal_event("COMPLETE")
@@ -1057,14 +1093,16 @@ class OpenCodeAdapter(BaseAdapter):
                     terminal_event_received = True
                     terminal_event_emitted = True
                     draining = True
+                    now = time.monotonic()
                     if drain_deadline is None:
-                        drain_deadline = time.monotonic() + drain_timeout
+                        drain_deadline = now + effective_drain_timeout
+                    if exit_deadline is None:
+                        exit_deadline = now + effective_grace_period
                     if tracker is not None and hasattr(tracker, "record_terminal_event"):
                         try:
                             tracker.record_terminal_event("ERROR")
                         except Exception:
                             pass
-                        drain_deadline = time.monotonic() + drain_timeout
                     duration = time.time() - start_time
                     stderr_out = get_stderr() if get_stderr else ""
                     err_data = payload.get("error") or payload.get("message") or "OpenCode error event"
@@ -1114,14 +1152,18 @@ class OpenCodeAdapter(BaseAdapter):
 
         # Post-mortem completion evaluation (ADR-017)
         if not terminal_event_emitted:
-            duration = time.time() - start_time
             has_process = get_returncode is not None
             proc_code = None
             if has_process:
+                if exit_deadline is not None:
+                    rem_grace = max(0.0, exit_deadline - time.monotonic())
+                else:
+                    rem_grace = effective_grace_period
                 try:
-                    proc_code = get_returncode(wait_timeout=1.0)
+                    proc_code = get_returncode(wait_timeout=rem_grace)
                 except TypeError:
                     proc_code = get_returncode()
+            duration = time.time() - start_time
             stderr_out = get_stderr() if get_stderr else ""
 
             if has_process:
@@ -1136,9 +1178,13 @@ class OpenCodeAdapter(BaseAdapter):
                     }
                     if session_id:
                         err_meta["session_id"] = session_id
-                    if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                    if tracker is not None and hasattr(tracker, "record_terminal_event") and getattr(tracker.record, "terminal_event_type", None) is None:
                         try:
                             tracker.record_terminal_event("ERROR")
+                        except Exception:
+                            pass
+                    if tracker is not None and hasattr(tracker, "record_exit"):
+                        try:
                             tracker.record_exit(proc_code)
                         except Exception:
                             pass
@@ -1161,11 +1207,6 @@ class OpenCodeAdapter(BaseAdapter):
                     }
                     if session_id:
                         err_meta["session_id"] = session_id
-                    if tracker is not None and hasattr(tracker, "record_terminal_event"):
-                        try:
-                            tracker.record_terminal_event("ERROR")
-                        except Exception:
-                            pass
                     yield self._build_error_event(
                         ts=time.time(),
                         duration=duration,
@@ -1373,6 +1414,8 @@ class OpenCodeAdapter(BaseAdapter):
                     get_returncode=_get_returncode,
                     get_stderr=_get_stderr,
                     tracker=tracker,
+                    grace_period=self.post_terminal_grace_period,
+                    drain_timeout=self.drain_timeout,
                 )
 
         except KeyboardInterrupt:
