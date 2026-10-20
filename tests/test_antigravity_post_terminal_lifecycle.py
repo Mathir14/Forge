@@ -339,7 +339,8 @@ def test_cleanup_refuses_to_signal_on_mismatched_identity(tmp_path: Path):
             adapter_name="antigravity",
             run_dir=run.run_dir,
         )
-        tracker.record_launched(pid=dummy_pid, pgid=os.getpgid(dummy_pid))
+        dummy_pgid = os.getpgid(dummy_pid) if hasattr(os, "getpgid") else None
+        tracker.record_launched(pid=dummy_pid, pgid=dummy_pgid)
         # Intentionally tamper the tracker's start_time_ticks to simulate PID reuse
         tracker.record.start_time_ticks = bogus_ticks
         tracker.record.save_atomic(tracker.record_file)
@@ -402,23 +403,24 @@ def test_repeated_cleanup_is_idempotent_no_duplicate_signals(tmp_path: Path):
 
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"], start_new_session=True)
     try:
-        tracker.record_launched(pid=proc.pid, pgid=os.getpgid(proc.pid))
+        proc_pgid = os.getpgid(proc.pid) if hasattr(os, "getpgid") else None
+        tracker.record_launched(pid=proc.pid, pgid=proc_pgid)
 
-        with patch("forge.core.platform.os.killpg", wraps=os.killpg) as spy_killpg:
+        with patch.object(BaseAdapter, "_kill_process_group", wraps=BaseAdapter._kill_process_group) as spy_kill:
             # First cleanup call: terminates process
             BaseAdapter._safe_cleanup_subprocess(proc, tracker=tracker)
             rec1 = ProcessRecord.load(tracker.record_file)
             assert rec1.state == ProcessLifecycleState.TERMINATED.value
-            initial_call_count = spy_killpg.call_count
+            initial_call_count = spy_kill.call_count
             assert initial_call_count > 0
 
             # Second cleanup call: should be a no-op (process already dead / flagged)
             BaseAdapter._safe_cleanup_subprocess(proc, tracker=tracker)
-            assert spy_killpg.call_count == initial_call_count
+            assert spy_kill.call_count == initial_call_count
 
             # Third cleanup call: still no-op
             BaseAdapter._safe_cleanup_subprocess(proc, tracker=tracker)
-            assert spy_killpg.call_count == initial_call_count
+            assert spy_kill.call_count == initial_call_count
 
             rec2 = ProcessRecord.load(tracker.record_file)
             assert rec2.state == ProcessLifecycleState.TERMINATED.value
