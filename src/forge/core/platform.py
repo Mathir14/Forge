@@ -1029,8 +1029,16 @@ def terminate_process_tree(
                 _kill(popen_obj)
             return True
 
-        if expected_start_time_ticks is None and popen_obj is not None:
-            expected_start_time_ticks = getattr(popen_obj, "_start_time_ticks", None)
+        is_mock = is_mock_process(popen_obj)
+        if is_mock:
+            expected_start_time_ticks = None
+        elif expected_start_time_ticks is None and popen_obj is not None:
+            raw_ticks = getattr(popen_obj, "_start_time_ticks", None)
+            if isinstance(raw_ticks, (int, float)):
+                expected_start_time_ticks = raw_ticks
+
+        if not isinstance(expected_start_time_ticks, (int, float)):
+            expected_start_time_ticks = None
 
         if os.name == "posix":
             target_pgid = pgid
