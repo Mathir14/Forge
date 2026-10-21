@@ -60,6 +60,7 @@ def _get_adapter(
             effort=effort,
             auto_approve=auto_approve,
             extra_flags=extra_flags,
+            post_terminal_grace_seconds=stage_cfg.post_terminal_grace_seconds,
         )
     except Exception as e:
         click.secho(f"Error initializing adapter '{adapter_name}': {e}", fg="red")

@@ -977,6 +977,173 @@ def verify_process_identity(
     return True
 
 
+def request_graceful_shutdown(
+    proc: Union[subprocess.Popen, int],
+    pgid: Optional[int] = None,
+    expected_start_time_ticks: Optional[int] = None,
+) -> bool:
+    """Request graceful termination of a process tree (SIGTERM on POSIX, graceful taskkill on Windows).
+
+    Unlike terminate_process_tree(force=True), this function sends ONLY the initial graceful
+    termination request without escalating to SIGKILL or blocking on process exit.
+
+    Safety requirements:
+    - Never signal self (current PID) or caller process group (current PGID).
+    - Never signal PID <= 1 (or <= 4 on Windows).
+    - Strictly verify process identity against expected_start_time_ticks and pgid before signaling.
+      If verification fails, logs a warning and returns False without signaling.
+    - Idempotent: If process is already dead, returns True without sending signals.
+    - Returns True if graceful termination request was successfully dispatched (or process already dead),
+      False if identity check failed or signal delivery failed.
+    """
+    try:
+        if isinstance(proc, int):
+            pid = proc
+            popen_obj = None
+        else:
+            pid = getattr(proc, "pid", None)
+            popen_obj = proc
+
+        if type(pid) is not int:
+            return True
+
+        if pid <= 1:
+            return True
+
+        current_pid = os.getpid()
+        if pid == current_pid:
+            logger.warning("Refusing to send graceful shutdown to caller PID %s.", pid)
+            return False
+
+        is_mock = is_mock_process(popen_obj)
+        if is_mock:
+            if popen_obj is not None and hasattr(popen_obj, "terminate"):
+                try:
+                    popen_obj.terminate()
+                except Exception:
+                    pass
+            return True
+
+        # Check if already terminated
+        if popen_obj is not None and hasattr(popen_obj, "poll"):
+            if popen_obj.poll() is not None:
+                return True
+        if not is_pid_alive(pid):
+            return True
+
+        if expected_start_time_ticks is None and popen_obj is not None:
+            raw_ticks = getattr(popen_obj, "_start_time_ticks", None)
+            if isinstance(raw_ticks, (int, float)):
+                expected_start_time_ticks = raw_ticks
+
+        if not isinstance(expected_start_time_ticks, (int, float)):
+            expected_start_time_ticks = None
+
+        if os.name == "posix":
+            target_pgid = pgid
+            if type(target_pgid) is not int:
+                target_pgid = None
+                if popen_obj is not None:
+                    obj_pgid = getattr(popen_obj, "_pgid", None)
+                    if type(obj_pgid) is int:
+                        target_pgid = obj_pgid
+
+            if target_pgid is None:
+                try:
+                    target_pgid = os.getpgid(pid)
+                except (ProcessLookupError, PermissionError, OSError):
+                    target_pgid = None
+
+            if target_pgid is None:
+                target_pgid = pid
+
+            current_pgid = os.getpgrp() if hasattr(os, "getpgrp") else None
+            if (
+                type(target_pgid) is not int
+                or target_pgid <= 1
+                or (current_pgid is not None and target_pgid == current_pgid)
+                or target_pgid == current_pid
+            ):
+                logger.warning(
+                    "Refusing graceful shutdown to dangerous target_pgid %s (caller PGID %s, caller PID %s)",
+                    target_pgid,
+                    current_pgid,
+                    current_pid,
+                )
+                return False
+
+            # CRITICAL: Verify process identity before signaling
+            if expected_start_time_ticks is not None and is_pid_alive(pid):
+                if not verify_process_identity(pid, expected_start_time_ticks, target_pgid):
+                    logger.warning(
+                        "Refusing graceful shutdown to PID %s: process identity does not match expected start_time_ticks %s.",
+                        pid,
+                        expected_start_time_ticks,
+                    )
+                    return False
+
+            descendants = find_descendant_pids(pid)
+
+            # Send graceful SIGTERM to process group
+            sent = False
+            try:
+                os.killpg(target_pgid, signal.SIGTERM)
+                sent = True
+            except ProcessLookupError:
+                return True
+            except Exception as e:
+                logger.warning("Failed to send SIGTERM to process group %s: %s", target_pgid, e)
+
+            # Also signal detached descendants
+            for d_pid in descendants:
+                if d_pid != current_pid and is_pid_alive(d_pid):
+                    try:
+                        os.kill(d_pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+
+            return sent or (popen_obj is not None and popen_obj.poll() is not None)
+
+        elif os.name == "nt" or sys.platform == "win32":
+            if pid <= 4 or pid == current_pid:
+                return False
+
+            if expected_start_time_ticks is not None and is_pid_alive(pid):
+                if not verify_process_identity(pid, expected_start_time_ticks):
+                    logger.warning("Refusing graceful shutdown to PID %s: identity mismatch on Windows", pid)
+                    return False
+
+            sent = False
+            try:
+                subprocess.run(
+                    ["taskkill", "/T", "/PID", str(pid)],
+                    capture_output=True,
+                    timeout=2.0,
+                    check=False,
+                )
+                sent = True
+            except Exception as e:
+                logger.debug("Windows graceful taskkill failed: %s; falling back to terminate()", e)
+                if popen_obj is not None and hasattr(popen_obj, "terminate"):
+                    try:
+                        popen_obj.terminate()
+                        sent = True
+                    except Exception:
+                        pass
+            return sent
+        else:
+            if popen_obj is not None and hasattr(popen_obj, "terminate"):
+                try:
+                    popen_obj.terminate()
+                    return True
+                except Exception:
+                    pass
+            return False
+    except Exception as e:
+        logger.warning("Error during request_graceful_shutdown for proc %s: %s", proc, e)
+        return False
+
+
 def terminate_process_tree(
     proc: Union[subprocess.Popen, int],
     timeout: float = 1.0,

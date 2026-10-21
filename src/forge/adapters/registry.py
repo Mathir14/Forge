@@ -1,5 +1,6 @@
 """Adapter registry and tool discovery."""
 
+import inspect
 import shutil
 from typing import Dict, Type, Optional, List, Any, Set
 from forge.adapters.base import BaseAdapter
@@ -93,6 +94,7 @@ class AdapterRegistry:
         effort: Optional[str] = None,
         auto_approve: bool = False,
         extra_flags: Optional[Dict[str, Any]] = None,
+        post_terminal_grace_seconds: Optional[float] = None,
     ) -> BaseAdapter:
         clean_name = str(name).strip().lower()
         adapter_cls = cls.get_class(clean_name)
@@ -100,7 +102,23 @@ class AdapterRegistry:
             model = adapter_cls.DEFAULT_MODEL
         if effort is None and getattr(adapter_cls, "DEFAULT_EFFORT", None):
             effort = adapter_cls.DEFAULT_EFFORT
-        instance = adapter_cls(model=model, effort=effort, auto_approve=auto_approve, extra_flags=extra_flags)
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "effort": effort,
+            "auto_approve": auto_approve,
+            "extra_flags": extra_flags,
+        }
+        if post_terminal_grace_seconds is not None:
+            BaseAdapter._validate_grace_period(
+                post_terminal_grace_seconds, name="post_terminal_grace_seconds"
+            )
+            init_params = inspect.signature(adapter_cls.__init__).parameters
+            if "post_terminal_grace_seconds" in init_params:
+                kwargs["post_terminal_grace_seconds"] = post_terminal_grace_seconds
+            elif "post_terminal_grace_period" in init_params:
+                kwargs["post_terminal_grace_period"] = post_terminal_grace_seconds
+
+        instance = adapter_cls(**kwargs)
         if not getattr(instance, "name", None) or instance.name == instance.__class__.__name__.lower().replace("adapter", ""):
             instance.name = clean_name
         return instance

@@ -495,6 +495,36 @@ def test_opencode_unexpected_eof_with_nonzero_returncode():
     assert err_event.result.stderr == "OOM killed"
 
 
+def test_opencode_post_terminal_active_process_stderr_not_masking():
+    """Verify that if OpenCode process fails to exit after terminal event,
+    the primary error remains the lifecycle failure message, with stderr
+    appended as supplementary diagnostic context.
+    """
+    adapter = OpenCodeAdapter()
+    stream = [
+        json.dumps({"type": "text", "part": {"text": "Finished work"}}),
+        json.dumps({"type": "step_finish", "part": {"reason": "stop"}}),
+    ]
+
+    events = list(adapter._decode_stream_events(
+        stream,
+        start_time=time.time(),
+        get_returncode=lambda wait_timeout=None: None,
+        get_stderr=lambda: "warning: background daemon still active\n",
+        grace_period=0.1,
+    ))
+
+    assert len(events) == 2
+    assert events[0].event_type == AgentEventType.CHUNK
+    err_event = events[1]
+    assert err_event.event_type == AgentEventType.ERROR
+    assert err_event.text.startswith("OpenCode process failed to exit after terminal event (process still active).")
+    assert "Captured process stderr:\nwarning: background daemon still active" in err_event.text
+    assert err_event.result.stderr.startswith("OpenCode process failed to exit after terminal event (process still active).")
+    assert "Captured process stderr:\nwarning: background daemon still active" in err_event.result.stderr
+    assert err_event.result.metadata.get("captured_stderr") == "warning: background daemon still active\n"
+
+
 # ---------------------------------------------------------------------------
 # 8. Duplicate Terminal Events
 # ---------------------------------------------------------------------------

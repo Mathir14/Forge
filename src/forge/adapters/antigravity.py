@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Optional, Dict, Any, List, Set, Iterator, Iterable, Callable,
 from forge.adapters.base import BaseAdapter, AdapterResponse, StderrDrainer, BoundedLineReader
 from forge.core.capabilities import Capability
 from forge.core.events import AgentEvent, AgentEventType, ExecutionResult
-from forge.core.platform import get_process_group_flags, prepare_command, IS_WINDOWS, get_process_identity, launch_contained_process
+from forge.core.platform import get_process_group_flags, prepare_command, IS_WINDOWS, get_process_identity, launch_contained_process, is_pid_alive
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ class AntigravityAdapter(BaseAdapter):
     }
     DEFAULT_MODEL = "gemini-3.7-flash-high"
     DEFAULT_EFFORT = "high"
-    DEFAULT_POST_TERMINAL_GRACE_PERIOD: float = 2.0
+    DEFAULT_POST_TERMINAL_GRACE_PERIOD: float = 15.0
     DEFAULT_DRAIN_TIMEOUT: float = 1.0
     MAX_PROMPT_BYTES: int = 130000  # Provider CLI argument limit bounded by POSIX OS MAX_ARG_STRLEN (131,072 bytes)
     WINDOWS_CMD_MAX_PROMPT_BYTES: int = 7500  # Windows cmd.exe 8,191 char limit minus flags
@@ -54,6 +55,7 @@ class AntigravityAdapter(BaseAdapter):
         extra_flags: Optional[Dict[str, Any]] = None,
         post_terminal_grace_period: float = DEFAULT_POST_TERMINAL_GRACE_PERIOD,
         drain_timeout: float = DEFAULT_DRAIN_TIMEOUT,
+        post_terminal_grace_seconds: Optional[float] = None,
     ):
         super().__init__(
             name="antigravity",
@@ -62,7 +64,15 @@ class AntigravityAdapter(BaseAdapter):
             auto_approve=auto_approve,
             extra_flags=extra_flags,
         )
-        self.post_terminal_grace_period = post_terminal_grace_period
+        effective_grace = (
+            post_terminal_grace_seconds
+            if post_terminal_grace_seconds is not None
+            else post_terminal_grace_period
+        )
+        self.post_terminal_grace_period = self._validate_grace_period(
+            effective_grace, name="post_terminal_grace_period"
+        )
+        self.post_terminal_grace_seconds = self.post_terminal_grace_period
         self.drain_timeout = drain_timeout
 
     def _get_binary(self) -> Optional[str]:
@@ -392,6 +402,8 @@ class AntigravityAdapter(BaseAdapter):
         tracker: Optional[Any] = None,
         grace_period: Optional[float] = None,
         drain_timeout: Optional[float] = None,
+        request_shutdown_fn: Optional[Callable[[], bool]] = None,
+        force_cleanup_fn: Optional[Callable[[], bool]] = None,
     ) -> Iterator[AgentEvent]:
         """Decode Antigravity NDJSON stdout lines into canonical AgentEvents.
 
@@ -733,6 +745,28 @@ class AntigravityAdapter(BaseAdapter):
         has_process = get_returncode is not None
         proc_code = None
         if has_process:
+            try:
+                proc_code = get_returncode(wait_timeout=0.1)
+            except TypeError:
+                proc_code = get_returncode()
+
+        is_successful_terminal = (
+            terminal_status in ("success", "completed", "done")
+            or (has_stopped_step and terminal_status not in ("failed", "error") and terminal_error_msg is None)
+        )
+
+        graceful_shutdown_requested = False
+        graceful_shutdown_failed = False
+        if has_process and proc_code is None:
+            if is_successful_terminal and request_shutdown_fn is not None:
+                shutdown_ok = request_shutdown_fn()
+                if shutdown_ok:
+                    graceful_shutdown_requested = True
+                    logger.info("Requested graceful shutdown for active Antigravity process following terminal SUCCESS.")
+                else:
+                    graceful_shutdown_failed = True
+                    logger.warning("Graceful shutdown request failed (identity verification mismatch or signal error).")
+
             if exit_deadline is not None:
                 rem_grace = max(0.0, exit_deadline - time.monotonic())
             else:
@@ -742,11 +776,214 @@ class AntigravityAdapter(BaseAdapter):
             except TypeError:
                 proc_code = get_returncode()
 
+        forced_cleanup_performed = False
+        forced_cleanup_verified = False
+        forced_cleanup_error: Optional[str] = None
+
+        if has_process and proc_code is None:
+            if (
+                is_successful_terminal
+                and graceful_shutdown_requested
+                and not graceful_shutdown_failed
+            ):
+                if force_cleanup_fn is not None:
+                    logger.info(
+                        "Antigravity process still active after post-terminal grace deadline; "
+                        "escalating to verified force termination."
+                    )
+                    cleanup_ok = force_cleanup_fn()
+                    if cleanup_ok:
+                        forced_cleanup_performed = True
+                        try:
+                            proc_code = get_returncode(wait_timeout=0.5)
+                        except TypeError:
+                            proc_code = get_returncode()
+
+                        target_pid = (
+                            getattr(tracker.record, "pid", None)
+                            if (tracker is not None and hasattr(tracker, "record"))
+                            else None
+                        )
+                        pid_alive = is_pid_alive(target_pid) if type(target_pid) is int else False
+
+                        if not pid_alive:
+                            forced_cleanup_verified = True
+                            if proc_code is None:
+                                proc_code = -signal.SIGKILL if hasattr(signal, "SIGKILL") else -9
+                            logger.info(
+                                "Forced termination of lingering Antigravity process verified "
+                                "(PID %s confirmed exited, raw code %s).",
+                                target_pid,
+                                proc_code,
+                            )
+                        else:
+                            forced_cleanup_error = f"PID {target_pid} remained active after forced cleanup escalation."
+                            logger.error(forced_cleanup_error)
+                    else:
+                        forced_cleanup_error = "Forced cleanup escalation failed (cleanup function returned failure or identity mismatch)."
+                        logger.error(forced_cleanup_error)
+                else:
+                    forced_cleanup_error = "Antigravity process failed to exit after terminal event (no force cleanup handler available)."
+
         duration = time.time() - start_time
         stderr_out = get_stderr() if get_stderr else ""
 
+        valid_graceful_codes = {0, -signal.SIGTERM, 143, -15}
+
+        is_verified_graceful_exit = (
+            has_process
+            and graceful_shutdown_requested
+            and not graceful_shutdown_failed
+            and is_successful_terminal
+            and proc_code in valid_graceful_codes
+        )
+
+        is_verified_forced_exit = (
+            has_process
+            and graceful_shutdown_requested
+            and not graceful_shutdown_failed
+            and is_successful_terminal
+            and forced_cleanup_performed
+            and forced_cleanup_verified
+        )
+
         if has_process:
-            if proc_code is not None and proc_code != 0:
+            if is_verified_graceful_exit or is_verified_forced_exit or proc_code == 0:
+                if is_successful_terminal:
+                    terminal_event_emitted = True
+                    normalized_exit_code = 0
+                    if tracker is not None and hasattr(tracker, "record_exit"):
+                        try:
+                            tracker.record_exit(normalized_exit_code)
+                        except Exception:
+                            pass
+                    meta = {"session_id": session_id} if session_id else {}
+                    if is_verified_forced_exit:
+                        meta["graceful_shutdown"] = True
+                        meta["forced_cleanup"] = True
+                        meta["raw_exit_code"] = proc_code
+                        logger.info(
+                            "Antigravity process force-terminated cleanly following post-grace escalation "
+                            "(raw code %s normalized to 0).",
+                            proc_code,
+                        )
+                    elif is_verified_graceful_exit and proc_code != 0:
+                        meta["graceful_shutdown"] = True
+                        meta["raw_exit_code"] = proc_code
+                        logger.info(
+                            "Antigravity process exited cleanly following verified graceful shutdown (code %s normalized to 0).",
+                            proc_code,
+                        )
+                    yield self._build_complete_event(
+                        ts=time.time(),
+                        duration=duration,
+                        stdout=accumulated_stdout,
+                        stderr=stderr_out,
+                        raw_output=accumulated_raw,
+                        token_usage=token_usage,
+                        metadata=meta,
+                        exit_code=normalized_exit_code,
+                    )
+                elif terminal_status in ("failed", "error") or terminal_error_msg is not None:
+                    terminal_event_emitted = True
+                    err_msg = terminal_error_msg or f"Execution failed with status: {terminal_status}"
+                    if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                        try:
+                            tracker.record_terminal_event("ERROR")
+                            tracker.record_exit(proc_code if proc_code is not None else 1)
+                        except Exception:
+                            pass
+                    yield self._build_error_event(
+                        ts=time.time(),
+                        duration=duration,
+                        error_msg=err_msg,
+                        stdout=accumulated_stdout,
+                        stderr=stderr_out or err_msg,
+                        raw_output=accumulated_raw,
+                        token_usage=token_usage,
+                        metadata={"error": err_msg, "status": terminal_status},
+                        exit_code=1,
+                    )
+                else:
+                    terminal_event_emitted = True
+                    diag_msg = "Unexpected EOF before terminal event."
+                    if tracker is not None and hasattr(tracker, "record_terminal_event"):
+                        try:
+                            tracker.record_terminal_event("ERROR")
+                            tracker.record_exit(proc_code if proc_code is not None else 1)
+                        except Exception:
+                            pass
+                    yield self._build_error_event(
+                        ts=time.time(),
+                        duration=duration,
+                        error_msg=diag_msg,
+                        stdout=accumulated_stdout,
+                        stderr=stderr_out or diag_msg,
+                        raw_output=accumulated_raw,
+                        token_usage=token_usage,
+                        metadata={"diagnostic": "Provider stream terminated prematurely without emitting COMPLETE or ERROR."},
+                        exit_code=1,
+                    )
+            elif forced_cleanup_error is not None:
+                terminal_event_emitted = True
+                err_msg = (
+                    f"Antigravity process cleanup verification failed: {forced_cleanup_error}\n"
+                    f"Captured process stderr:\n{stderr_out.strip()}"
+                    if (stderr_out and stderr_out.strip())
+                    else f"Antigravity process cleanup verification failed: {forced_cleanup_error}"
+                )
+                yield self._build_error_event(
+                    ts=time.time(),
+                    duration=duration,
+                    error_msg=err_msg,
+                    stdout=accumulated_stdout,
+                    stderr=err_msg,
+                    raw_output=accumulated_raw,
+                    token_usage=token_usage,
+                    metadata={
+                        "diagnostic": "Forced termination escalation could not be verified.",
+                        "cleanup_error": forced_cleanup_error,
+                        "captured_stderr": stderr_out,
+                    },
+                    exit_code=1,
+                )
+            elif graceful_shutdown_failed:
+                terminal_event_emitted = True
+                err_msg = "Process identity verification failed; refusing graceful shutdown of ambiguous process."
+                yield self._build_error_event(
+                    ts=time.time(),
+                    duration=duration,
+                    error_msg=err_msg,
+                    stdout=accumulated_stdout,
+                    stderr=stderr_out or err_msg,
+                    raw_output=accumulated_raw,
+                    token_usage=token_usage,
+                    metadata={"diagnostic": "Process identity verification failed."},
+                    exit_code=1,
+                )
+            elif proc_code is None:
+                terminal_event_emitted = True
+                base_err = "Antigravity process failed to exit after terminal event (process still active)."
+                err_msg = (
+                    f"{base_err}\nCaptured process stderr:\n{stderr_out.strip()}"
+                    if (stderr_out and stderr_out.strip())
+                    else base_err
+                )
+                yield self._build_error_event(
+                    ts=time.time(),
+                    duration=duration,
+                    error_msg=err_msg,
+                    stdout=accumulated_stdout,
+                    stderr=err_msg,
+                    raw_output=accumulated_raw,
+                    token_usage=token_usage,
+                    metadata={
+                        "diagnostic": "Process remained active after stream completion.",
+                        "captured_stderr": stderr_out,
+                    },
+                    exit_code=1,
+                )
+            elif proc_code is not None and proc_code != 0:
                 terminal_event_emitted = True
                 err_msg = stderr_out or terminal_error_msg or f"Antigravity process exited with non-zero exit code: {proc_code}"
                 if tracker is not None and hasattr(tracker, "record_terminal_event") and getattr(tracker.record, "terminal_event_type", None) is None:
@@ -769,20 +1006,6 @@ class AntigravityAdapter(BaseAdapter):
                     token_usage=token_usage,
                     metadata={"diagnostic": f"Process exited with code {proc_code}"},
                     exit_code=proc_code,
-                )
-            elif proc_code is None:
-                terminal_event_emitted = True
-                err_msg = stderr_out or "Antigravity process failed to exit after terminal event (process still active)."
-                yield self._build_error_event(
-                    ts=time.time(),
-                    duration=duration,
-                    error_msg=err_msg,
-                    stdout=accumulated_stdout,
-                    stderr=stderr_out or err_msg,
-                    raw_output=accumulated_raw,
-                    token_usage=token_usage,
-                    metadata={"diagnostic": "Process remained active after stream completion."},
-                    exit_code=1,
                 )
             elif terminal_status in ("failed", "error") or terminal_error_msg is not None:
                 terminal_event_emitted = True
@@ -1009,6 +1232,16 @@ class AntigravityAdapter(BaseAdapter):
             def _get_stderr() -> str:
                 return stderr_drainer.get_stderr() if stderr_drainer is not None else ""
 
+            def _request_shutdown() -> bool:
+                if proc is not None:
+                    return self._request_graceful_shutdown(proc, tracker=tracker)
+                return True
+
+            def _force_cleanup() -> bool:
+                if proc is not None:
+                    return self._safe_cleanup_subprocess(proc, tracker=tracker)
+                return True
+
             if proc.stdout is not None:
                 yield from self._decode_stream_events(
                     stream=proc.stdout,
@@ -1018,6 +1251,8 @@ class AntigravityAdapter(BaseAdapter):
                     tracker=tracker,
                     grace_period=self.post_terminal_grace_period,
                     drain_timeout=self.drain_timeout,
+                    request_shutdown_fn=_request_shutdown,
+                    force_cleanup_fn=_force_cleanup,
                 )
 
         except KeyboardInterrupt:

@@ -181,39 +181,31 @@ def test_process_lifecycle_delayed_exit_bounded_drain(tmp_path: Path):
 
 
 def test_process_lifecycle_hang_survives_terminal_event(tmp_path: Path):
-    """Test 1.3: Process emits COMPLETE but hangs indefinitely.
+    """Test 1.3: Process emits unsuccessful terminal event and hangs indefinitely.
     Bounded cleanup terminates it and stage is NOT marked successful.
     """
     context, run_mgr, run = _make_context(tmp_path)
     role = _make_role("architect", seq=2)
 
-    valid_md = (
-        "# System Architecture\n\n"
-        "```yaml\n"
-        "ROLE: ARCHITECT\n"
-        "STATUS: APPROVED\n"
-        "HANDOFF: EXECUTOR\n"
-        "```\n"
-    )
-
     code = (
-        "import json, sys, time\n"
-        f"print(json.dumps({{'event': 'step_update', 'step_update': {{'text_delta': {repr(valid_md)}}}}}), flush=True)\n"
-        "print(json.dumps({'event': 'result', 'status': 'success'}), flush=True)\n"
+        "import json, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print(json.dumps({'event': 'step_update', 'step_update': {'text_delta': 'Failed architect output'}}), flush=True)\n"
+        "print(json.dumps({'event': 'result', 'status': 'failed', 'error': 'Architect failed'}), flush=True)\n"
         "while True:\n"
         "    time.sleep(0.5)\n"
     )
     script = _create_mock_script(tmp_path, code, "agent_hang.py")
 
-    adapter = AntigravityAdapter()
+    adapter = AntigravityAdapter(post_terminal_grace_seconds=0.3, drain_timeout=0.1)
     t0 = time.time()
     with patch.object(adapter, "_get_binary", return_value=str(script)):
         stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
         result = stage.run(context)
     elapsed = time.time() - t0
 
-    # Cleanup must be bounded (< 3.5 seconds)
-    assert elapsed < 3.5
+    # Cleanup must be bounded
+    assert elapsed < 3.0
     # Process had to be terminated by force; it did not exit cleanly with 0
     assert result.success is False
 
@@ -800,7 +792,7 @@ def test_concurrent_recovery_mutual_exclusion(tmp_path: Path):
 
 
 def test_forced_termination_fails_stage_run_even_if_machine_report_valid(tmp_path: Path):
-    """Regression 5.3: Forced termination sets TERMINATED and cannot satisfy Stage.run success."""
+    """Regression 5.3: Forced termination sets TERMINATED and cannot satisfy Stage.run success for unescalated adapters."""
     context, run_mgr, run = _make_context(tmp_path)
     role = _make_role("architect", seq=2)
 
@@ -813,16 +805,18 @@ def test_forced_termination_fails_stage_run_even_if_machine_report_valid(tmp_pat
         "```\n"
     )
     code = (
-        "import json, sys, time\n"
-        f"print(json.dumps({{'event': 'step_update', 'step_update': {{'text_delta': {repr(valid_md)}}}}}), flush=True)\n"
-        "print(json.dumps({'event': 'result', 'status': 'success'}), flush=True)\n"
+        "import json, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"print(json.dumps({{'type': 'text', 'part': {{'text': {repr(valid_md)}}}}}), flush=True)\n"
+        "print(json.dumps({'type': 'step_finish', 'part': {'reason': 'stop'}}), flush=True)\n"
         "while True:\n"
         "    time.sleep(0.5)\n"
     )
     script = _create_mock_script(tmp_path, code, "agent_hang_forced.py")
 
-    adapter = AntigravityAdapter()
-    with patch.object(adapter, "_get_binary", return_value=str(script)):
+    from forge.adapters.opencode import OpenCodeAdapter
+    adapter = OpenCodeAdapter(post_terminal_grace_seconds=0.3, drain_timeout=0.1)
+    with patch.object(adapter, "_resolve_binary", return_value=(str(script), None)):
         stage = Stage(role=role, adapter=adapter, run_manager=run_mgr)
         result = stage.run(context)
 
