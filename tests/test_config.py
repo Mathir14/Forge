@@ -1,7 +1,16 @@
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 import pytest
 from forge.core.config import Config
+
+
+@pytest.fixture(autouse=True)
+def _mock_adapter_binaries_available():
+    """Ensure adapter availability checks succeed across CI environments without installed binaries."""
+    with patch("forge.adapters.opencode.OpenCodeAdapter.is_available", return_value=True), \
+         patch("forge.adapters.antigravity.AntigravityAdapter.is_available", return_value=True):
+        yield
 
 
 def test_default_config():

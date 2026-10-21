@@ -746,7 +746,7 @@ class AntigravityAdapter(BaseAdapter):
         proc_code = None
         if has_process:
             try:
-                proc_code = get_returncode(wait_timeout=0)
+                proc_code = get_returncode(wait_timeout=0.1)
             except TypeError:
                 proc_code = get_returncode()
 
@@ -829,8 +829,6 @@ class AntigravityAdapter(BaseAdapter):
         stderr_out = get_stderr() if get_stderr else ""
 
         valid_graceful_codes = {0, -signal.SIGTERM, 143, -15}
-        if IS_WINDOWS:
-            valid_graceful_codes.add(1)
 
         is_verified_graceful_exit = (
             has_process

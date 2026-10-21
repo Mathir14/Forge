@@ -845,6 +845,7 @@ def test_natural_process_exit_succeeds_without_graceful_shutdown_signal(tmp_path
     assert rec.exit_code == 0
 
 
+@pytest.mark.skipif(not IS_POSIX, reason="POSIX SIGTERM handler execution across subprocesses is not supported on Windows")
 def test_blocked_process_after_terminal_success_shuts_down_gracefully_and_succeeds(tmp_path: Path):
     """Process blocked in idle wait after a successful terminal result:
     Graceful shutdown (SIGTERM) is requested and confirmed; valid completion succeeds.
@@ -949,6 +950,7 @@ def test_blocked_process_exiting_with_sigterm_code_is_normalized_to_success(tmp_
     assert rec.terminal_event_type == "COMPLETE"
 
 
+@pytest.mark.skipif(not IS_POSIX, reason="POSIX SIGTERM handler execution across subprocesses is not supported on Windows")
 def test_antigravity_idle_wait_escalates_to_verified_forced_kill_and_succeeds(tmp_path: Path):
     """Test 3: Antigravity-style idle wait.
     Create a controlled process that:
