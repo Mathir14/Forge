@@ -1,4 +1,5 @@
 import atexit
+import math
 import os
 import queue
 import re
@@ -17,10 +18,12 @@ from forge.core.platform import (
     get_process_group_flags,
     prepare_command,
     terminate_process_tree,
+    request_graceful_shutdown,
     safe_kill,
     launch_contained_process,
     verify_process_identity,
     is_pid_alive,
+    is_mock_process,
 )
 
 
@@ -260,6 +263,23 @@ class BaseAdapter(ABC):
         self.extra_flags = extra_flags or {}
         self._active_procs: Set[subprocess.Popen] = set()
         self._cancel_requested: bool = False
+
+    @staticmethod
+    def _validate_grace_period(val: Any, name: str = "post_terminal_grace_period") -> float:
+        """Validate and return float grace period, rejecting nonnumeric, nonfinite, zero, and negative values."""
+        if val is None:
+            raise ValueError(f"Invalid {name}: expected positive number, got None")
+        if isinstance(val, bool):
+            raise ValueError(f"Invalid {name}: expected positive number, got boolean {val!r}")
+        try:
+            f_val = float(val)
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid {name}: expected numeric value, got {type(val).__name__} ({val!r})")
+        if math.isnan(f_val) or math.isinf(f_val):
+            raise ValueError(f"Invalid {name}: value must be finite, got {val!r}")
+        if f_val <= 0:
+            raise ValueError(f"Invalid {name}: value must be strictly positive (> 0), got {val!r}")
+        return f_val
 
     @classmethod
     def _register_proc(cls, proc: subprocess.Popen, instance: Optional["BaseAdapter"] = None) -> None:
@@ -640,6 +660,14 @@ class BaseAdapter(ABC):
                     proc.wait(timeout=0.2)
                 except Exception:
                     pass
+                is_mock = is_mock_process(proc)
+                if success and not is_mock and type(pid) is int and is_pid_alive(pid):
+                    deadline = time.monotonic() + 0.5
+                    while time.monotonic() < deadline and is_pid_alive(pid):
+                        time.sleep(0.05)
+                    if is_pid_alive(pid):
+                        success = False
+                        err = f"Process PID {pid} remained alive after cleanup deadline."
                 if success:
                     setattr(proc, "_cleanup_done", True)
         except Exception as e:
@@ -671,6 +699,36 @@ class BaseAdapter(ABC):
             pgid=target_pgid,
             expected_start_time_ticks=ticks,
             safe_kill_fn=cls._safe_kill,
+        )
+
+    @classmethod
+    def _request_graceful_shutdown(
+        cls,
+        proc: Optional[subprocess.Popen],
+        tracker: Optional[Any] = None,
+    ) -> bool:
+        """Request graceful termination of proc and its process group."""
+        if proc is None:
+            return True
+
+        expected_ticks = getattr(proc, "_start_time_ticks", None)
+        if expected_ticks is None and tracker is not None and hasattr(tracker, "record"):
+            expected_ticks = getattr(tracker.record, "start_time_ticks", None)
+            if expected_ticks is not None:
+                setattr(proc, "_start_time_ticks", expected_ticks)
+
+        target_pgid = getattr(proc, "_pgid", None)
+        if type(target_pgid) is not int:
+            target_pgid = None
+            if tracker is not None and hasattr(tracker, "record"):
+                target_pgid = getattr(tracker.record, "pgid", None)
+                if target_pgid is not None:
+                    setattr(proc, "_pgid", target_pgid)
+
+        return request_graceful_shutdown(
+            proc,
+            pgid=target_pgid,
+            expected_start_time_ticks=expected_ticks,
         )
 
     @hybridmethod

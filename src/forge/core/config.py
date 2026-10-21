@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -52,6 +53,7 @@ class DefaultsConfig:
     auth_scopes: str = ""
     auth_token_ttl: int = 3600
     extra_flags: Dict[str, Any] = field(default_factory=dict)
+    post_terminal_grace_seconds: Optional[float] = None
     _explicit_fields: Set[str] = field(default_factory=set, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -62,6 +64,8 @@ class DefaultsConfig:
             "timeout": self.timeout,
             "auto_approve": self.auto_approve,
         }
+        if self.post_terminal_grace_seconds is not None:
+            res["post_terminal_grace_seconds"] = self.post_terminal_grace_seconds
         if self.extra_flags:
             res["extra_flags"] = dict(self.extra_flags)
         return res
@@ -75,6 +79,7 @@ class StageConfig:
     timeout: Optional[int] = None
     auto_approve: bool = False
     extra_flags: Dict[str, Any] = field(default_factory=dict)
+    post_terminal_grace_seconds: Optional[float] = None
     post_run_override: Optional["StageConfig"] = None
     _explicit_fields: Set[str] = field(default_factory=set, repr=False)
 
@@ -91,6 +96,8 @@ class StageConfig:
                 res["timeout"] = self.timeout
             if "auto_approve" in self._explicit_fields:
                 res["auto_approve"] = self.auto_approve
+            if "post_terminal_grace_seconds" in self._explicit_fields and self.post_terminal_grace_seconds is not None:
+                res["post_terminal_grace_seconds"] = self.post_terminal_grace_seconds
             if "extra_flags" in self._explicit_fields and self.extra_flags:
                 res["extra_flags"] = dict(self.extra_flags)
             if self.post_run_override:
@@ -104,6 +111,8 @@ class StageConfig:
             "timeout": self.timeout,
             "auto_approve": self.auto_approve,
         }
+        if self.post_terminal_grace_seconds is not None:
+            res["post_terminal_grace_seconds"] = self.post_terminal_grace_seconds
         if self.extra_flags:
             res["extra_flags"] = dict(self.extra_flags)
         if self.post_run_override:
@@ -251,6 +260,7 @@ class Config:
                 effort=self.defaults.effort,
                 timeout=self.defaults.timeout or self.execution.default_timeout,
                 auto_approve=self.defaults.auto_approve,
+                post_terminal_grace_seconds=self.defaults.post_terminal_grace_seconds,
                 extra_flags=dict(self.defaults.extra_flags),
             )
 
@@ -285,6 +295,11 @@ class Config:
         else:
             auto_approve = self.defaults.auto_approve
 
+        if "post_terminal_grace_seconds" in explicit or (not explicit and base_stage.post_terminal_grace_seconds is not None):
+            post_terminal_grace_seconds = base_stage.post_terminal_grace_seconds
+        else:
+            post_terminal_grace_seconds = self.defaults.post_terminal_grace_seconds
+
         extra_flags = dict(self.defaults.extra_flags)
         if base_stage.extra_flags:
             extra_flags.update(base_stage.extra_flags)
@@ -295,6 +310,7 @@ class Config:
             effort=effort,
             timeout=timeout,
             auto_approve=auto_approve,
+            post_terminal_grace_seconds=post_terminal_grace_seconds,
             extra_flags=extra_flags,
             post_run_override=base_stage.post_run_override,
             _explicit_fields=set(explicit),
@@ -330,6 +346,11 @@ class Config:
             else:
                 override_auto_approve = resolved.auto_approve
 
+            if "post_terminal_grace_seconds" in ovr_explicit or (not ovr_explicit and ovr.post_terminal_grace_seconds is not None):
+                override_grace = ovr.post_terminal_grace_seconds
+            else:
+                override_grace = resolved.post_terminal_grace_seconds
+
             override_flags = dict(resolved.extra_flags)
             if ovr.extra_flags:
                 override_flags.update(ovr.extra_flags)
@@ -340,6 +361,7 @@ class Config:
                 effort=override_effort,
                 timeout=override_timeout,
                 auto_approve=override_auto_approve,
+                post_terminal_grace_seconds=override_grace,
                 extra_flags=override_flags,
                 _explicit_fields=ovr_explicit,
             )
@@ -437,6 +459,8 @@ class Config:
                 stage_cfg.auth_scopes = cfg.defaults.auth_scopes
             if "auth_token_ttl" not in stage_cfg._explicit_fields:
                 stage_cfg.auth_token_ttl = cfg.defaults.auth_token_ttl
+            if "post_terminal_grace_seconds" not in stage_cfg._explicit_fields:
+                stage_cfg.post_terminal_grace_seconds = cfg.defaults.post_terminal_grace_seconds
 
             # Deep merge extra_flags: defaults.extra_flags updated with stage_cfg.extra_flags
             if cfg.defaults.extra_flags:
@@ -458,6 +482,8 @@ class Config:
                     ovr.timeout = stage_cfg.timeout
                 if "auto_approve" not in ovr_explicit:
                     ovr.auto_approve = stage_cfg.auto_approve
+                if "post_terminal_grace_seconds" not in ovr_explicit:
+                    ovr.post_terminal_grace_seconds = stage_cfg.post_terminal_grace_seconds
                 if "extra_flags" not in ovr_explicit and stage_cfg.extra_flags:
                     merged_ovr_flags = dict(stage_cfg.extra_flags)
                     merged_ovr_flags.update(ovr.extra_flags)
@@ -511,6 +537,15 @@ class Config:
             if "extra_flags" in d_data and isinstance(d_data["extra_flags"], dict):
                 cfg.defaults.extra_flags.update(d_data["extra_flags"])
                 cfg.defaults._explicit_fields.add("extra_flags")
+            if "post_terminal_grace_seconds" in d_data:
+                raw_grace = d_data["post_terminal_grace_seconds"]
+                err = cls._validate_grace_period(raw_grace, "defaults")
+                if err:
+                    logging.warning("Invalid defaults.post_terminal_grace_seconds: %s", err)
+                    cfg.defaults.post_terminal_grace_seconds = raw_grace
+                else:
+                    cfg.defaults.post_terminal_grace_seconds = float(raw_grace)
+                cfg.defaults._explicit_fields.add("post_terminal_grace_seconds")
 
         # 2. Execution block
         if "execution" in data and isinstance(data["execution"], dict):
@@ -575,6 +610,17 @@ class Config:
                 model = stage_data["model"] if "model" in stage_data else (existing.model if existing else None)
                 effort = stage_data["effort"] if "effort" in stage_data else (existing.effort if existing else None)
 
+                # Determine post_terminal_grace_seconds
+                grace_val = existing.post_terminal_grace_seconds if existing else None
+                if "post_terminal_grace_seconds" in stage_data:
+                    raw_grace = stage_data["post_terminal_grace_seconds"]
+                    err = cls._validate_grace_period(raw_grace, f"stage '{stage_name}'")
+                    if err:
+                        logging.warning("Invalid post_terminal_grace_seconds for stage %s: %s", stage_name, err)
+                        grace_val = raw_grace
+                    else:
+                        grace_val = float(raw_grace) if raw_grace is not None else None
+
                 new_stage = StageConfig(
                     adapter=adapter,
                     model=model,
@@ -582,6 +628,7 @@ class Config:
                     timeout=timeout_val,
                     auto_approve=auto_approve,
                     extra_flags=extra_flags,
+                    post_terminal_grace_seconds=grace_val,
                     _explicit_fields=explicit,
                 )
 
@@ -624,6 +671,16 @@ class Config:
                             except ValueError as e:
                                 logging.warning("Invalid auto_approve for post_run_override: %s", e)
 
+                        ovr_grace = prev_ovr.post_terminal_grace_seconds if prev_ovr else new_stage.post_terminal_grace_seconds
+                        if "post_terminal_grace_seconds" in override_data:
+                            raw_grace = override_data["post_terminal_grace_seconds"]
+                            err = cls._validate_grace_period(raw_grace, f"stage '{stage_name}' post_run_override")
+                            if err:
+                                logging.warning("Invalid post_terminal_grace_seconds for post_run_override: %s", err)
+                                ovr_grace = raw_grace
+                            else:
+                                ovr_grace = float(raw_grace) if raw_grace is not None else None
+
                         if "extra_flags" in override_data and isinstance(override_data["extra_flags"], dict):
                             if existing and existing.post_run_override and "extra_flags" in getattr(existing.post_run_override, "_explicit_fields", set()):
                                 ovr_flags = dict(existing.post_run_override.extra_flags)
@@ -642,6 +699,7 @@ class Config:
                             timeout=ovr_timeout,
                             auto_approve=ovr_auto_approve,
                             extra_flags=ovr_flags,
+                            post_terminal_grace_seconds=ovr_grace,
                             _explicit_fields=ovr_explicit,
                         )
                 elif existing and existing.post_run_override:
@@ -653,6 +711,7 @@ class Config:
                     ovr_effort = prev_ovr.effort if "effort" in ovr_explicit else new_stage.effort
                     ovr_timeout = prev_ovr.timeout if "timeout" in ovr_explicit else new_stage.timeout
                     ovr_auto_approve = prev_ovr.auto_approve if "auto_approve" in ovr_explicit else new_stage.auto_approve
+                    ovr_grace = prev_ovr.post_terminal_grace_seconds if "post_terminal_grace_seconds" in ovr_explicit else new_stage.post_terminal_grace_seconds
                     ovr_flags = dict(prev_ovr.extra_flags) if "extra_flags" in ovr_explicit else dict(new_stage.extra_flags)
 
                     new_stage.post_run_override = StageConfig(
@@ -662,10 +721,28 @@ class Config:
                         timeout=ovr_timeout,
                         auto_approve=ovr_auto_approve,
                         extra_flags=ovr_flags,
+                        post_terminal_grace_seconds=ovr_grace,
                         _explicit_fields=ovr_explicit,
                     )
 
                 cfg.stages[stage_name] = new_stage
+
+    @classmethod
+    def _validate_grace_period(cls, val: Any, location: str) -> Optional[str]:
+        """Validate post_terminal_grace_seconds: must be a finite, strictly positive number (> 0)."""
+        if val is None:
+            return f"Invalid post_terminal_grace_seconds in {location}: expected positive number, got None"
+        if isinstance(val, bool):
+            return f"Invalid post_terminal_grace_seconds in {location}: expected positive number, got boolean {val!r}"
+        try:
+            f_val = float(val)
+        except (ValueError, TypeError):
+            return f"Invalid post_terminal_grace_seconds in {location}: expected numeric value, got {type(val).__name__} ({val!r})"
+        if math.isnan(f_val) or math.isinf(f_val):
+            return f"Invalid post_terminal_grace_seconds in {location}: value must be finite, got {val!r}"
+        if f_val <= 0:
+            return f"Invalid post_terminal_grace_seconds in {location}: value must be strictly positive (> 0), got {val!r}"
+        return None
 
     @classmethod
     def validate_dict(cls, data: Any, known_adapters: Optional[Set[str]] = None) -> List[str]:
@@ -716,6 +793,11 @@ class Config:
                 if "extra_flags" in defaults and defaults["extra_flags"] is not None:
                     if not isinstance(defaults["extra_flags"], dict):
                         errors.append(f"Invalid extra_flags in defaults: expected mapping/dictionary, got {type(defaults['extra_flags']).__name__}")
+
+                if "post_terminal_grace_seconds" in defaults:
+                    err = cls._validate_grace_period(defaults["post_terminal_grace_seconds"], "defaults")
+                    if err:
+                        errors.append(err)
 
         # 2. Stages block validation
         if "stages" in data:
@@ -808,6 +890,11 @@ class Config:
         if "extra_flags" in data and data["extra_flags"] is not None:
             if not isinstance(data["extra_flags"], dict):
                 errors.append(f"Invalid extra_flags in {location}: expected mapping/dictionary, got {type(data['extra_flags']).__name__}")
+
+        if "post_terminal_grace_seconds" in data:
+            err = cls._validate_grace_period(data["post_terminal_grace_seconds"], location)
+            if err:
+                errors.append(err)
 
     @classmethod
     def _validate_stage_capabilities(

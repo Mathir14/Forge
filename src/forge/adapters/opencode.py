@@ -264,7 +264,7 @@ class OpenCodeAdapter(BaseAdapter):
     DEFAULT_EFFORT: Optional[str] = None
 
     OPENCODE_METADATA_TIMEOUT: float = 3.0
-    DEFAULT_POST_TERMINAL_GRACE_PERIOD: float = 2.0
+    DEFAULT_POST_TERMINAL_GRACE_PERIOD: float = 15.0
     DEFAULT_DRAIN_TIMEOUT: float = 1.0
     DEFAULT_RECOVERY_TIMEOUT: float = 300.0
     DEFAULT_RECOVERY_POLL_INTERVAL: float = 2.0
@@ -286,6 +286,7 @@ class OpenCodeAdapter(BaseAdapter):
         extra_flags: Optional[Dict[str, Any]] = None,
         post_terminal_grace_period: float = DEFAULT_POST_TERMINAL_GRACE_PERIOD,
         drain_timeout: float = DEFAULT_DRAIN_TIMEOUT,
+        post_terminal_grace_seconds: Optional[float] = None,
     ):
         super().__init__(
             name="opencode",
@@ -294,7 +295,15 @@ class OpenCodeAdapter(BaseAdapter):
             auto_approve=auto_approve,
             extra_flags=extra_flags,
         )
-        self.post_terminal_grace_period = post_terminal_grace_period
+        effective_grace = (
+            post_terminal_grace_seconds
+            if post_terminal_grace_seconds is not None
+            else post_terminal_grace_period
+        )
+        self.post_terminal_grace_period = self._validate_grace_period(
+            effective_grace, name="post_terminal_grace_period"
+        )
+        self.post_terminal_grace_seconds = self.post_terminal_grace_period
         self.drain_timeout = drain_timeout
         self._availability_error: Optional[str] = None
         self._session_id: Optional[str] = None
@@ -1201,9 +1210,15 @@ class OpenCodeAdapter(BaseAdapter):
                     )
                 elif proc_code is None:
                     terminal_event_emitted = True
-                    err_msg = stderr_out or "OpenCode process failed to exit after terminal event (process still active)."
+                    base_err = "OpenCode process failed to exit after terminal event (process still active)."
+                    err_msg = (
+                        f"{base_err}\nCaptured process stderr:\n{stderr_out.strip()}"
+                        if (stderr_out and stderr_out.strip())
+                        else base_err
+                    )
                     err_meta: Dict[str, Any] = {
                         "diagnostic": "Process remained active after stream completion.",
+                        "captured_stderr": stderr_out,
                     }
                     if session_id:
                         err_meta["session_id"] = session_id
@@ -1212,7 +1227,7 @@ class OpenCodeAdapter(BaseAdapter):
                         duration=duration,
                         error_msg=err_msg,
                         stdout=accumulated_stdout,
-                        stderr=stderr_out or err_msg,
+                        stderr=err_msg,
                         raw_output=accumulated_raw,
                         token_usage=token_usage,
                         metadata=err_meta,

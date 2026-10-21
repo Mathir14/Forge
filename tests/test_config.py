@@ -1,5 +1,6 @@
 import tempfile
 from pathlib import Path
+import pytest
 from forge.core.config import Config
 
 
@@ -430,3 +431,202 @@ def test_dot_notation_get_set():
     assert Config.get_key_from_dict(data, "stages.critic.effort") == "high"
 
 
+# ---------------------------------------------------------------------------
+# Post-terminal grace period configuration tests (v0.1.0b18)
+# ---------------------------------------------------------------------------
+
+def test_post_terminal_grace_seconds_validation():
+    """Verify validation strictly rejects nonnumeric, nonfinite, zero, negative, and bool values."""
+    # 1. Negative values
+    for bad_val in (-1, -0.5, -100):
+        data = {"defaults": {"post_terminal_grace_seconds": bad_val}}
+        errors = Config.validate_dict(data)
+        assert any("strictly positive (> 0)" in e for e in errors), f"Failed to reject {bad_val}"
+
+    # 2. Zero
+    for bad_val in (0, 0.0):
+        data = {"defaults": {"post_terminal_grace_seconds": bad_val}}
+        errors = Config.validate_dict(data)
+        assert any("strictly positive (> 0)" in e for e in errors), f"Failed to reject {bad_val}"
+
+    # 3. Nonnumeric strings and collections
+    for bad_val in ("invalid", "abc", [1, 2], {"a": 1}):
+        data = {"stages": {"critic": {"post_terminal_grace_seconds": bad_val}}}
+        errors = Config.validate_dict(data)
+        assert any("expected numeric value" in e for e in errors), f"Failed to reject {bad_val}"
+
+    # 4. Booleans (bool is a subclass of int in Python)
+    for bad_val in (True, False):
+        data = {"defaults": {"post_terminal_grace_seconds": bad_val}}
+        errors = Config.validate_dict(data)
+        assert any("expected positive number" in e for e in errors), f"Failed to reject bool {bad_val}"
+
+    # 5. Nonfinite (inf, -inf, nan)
+    for bad_val in (float("inf"), float("-inf"), float("nan"), "inf", "-inf", "nan"):
+        data = {"stages": {"critic": {"post_run_override": {"post_terminal_grace_seconds": bad_val}}}}
+        errors = Config.validate_dict(data)
+        assert any("must be finite" in e or "strictly positive" in e for e in errors), f"Failed to reject {bad_val}"
+
+    # 6. Explicit None / null
+    data = {"defaults": {"post_terminal_grace_seconds": None}}
+    errors = Config.validate_dict(data)
+    assert any("expected positive number, got None" in e for e in errors)
+
+    # 7. Valid values pass validation
+    for good_val in (5.0, 2.5, 1, 10, "3.5"):
+        data = {
+            "defaults": {"post_terminal_grace_seconds": good_val},
+            "stages": {
+                "critic": {
+                    "post_terminal_grace_seconds": good_val,
+                    "post_run_override": {"post_terminal_grace_seconds": good_val},
+                }
+            },
+        }
+        errors = Config.validate_dict(data)
+        assert not errors, f"Unexpected validation errors for valid value {good_val}: {errors}"
+
+
+def test_forge_yaml_override_reaches_selected_adapter(tmp_path: Path):
+    """Verify forge.yaml default post_terminal_grace_seconds overrides built-in and reaches adapter."""
+    from forge.cli import _get_adapter
+
+    forge_yaml = tmp_path / "forge.yaml"
+    forge_yaml.write_text(
+        """
+version: "2.0"
+defaults:
+  adapter: "antigravity"
+  post_terminal_grace_seconds: 7.5
+""",
+        encoding="utf-8",
+    )
+    cfg = Config.load(tmp_path)
+    assert cfg.defaults.post_terminal_grace_seconds == 7.5
+
+    adapter = _get_adapter(cfg, "critic", exit_on_error=False)
+    assert adapter.name == "antigravity"
+    assert adapter.post_terminal_grace_seconds == 7.5
+    assert adapter.post_terminal_grace_period == 7.5
+
+
+def test_stage_specific_override_precedence(tmp_path: Path):
+    """Verify configuration precedence: stage override > defaults > built-in default (5.0s)."""
+    from forge.cli import _get_adapter
+
+    forge_yaml = tmp_path / "forge.yaml"
+    forge_yaml.write_text(
+        """
+version: "2.0"
+defaults:
+  adapter: "antigravity"
+  post_terminal_grace_seconds: 4.0
+stages:
+  critic:
+    post_terminal_grace_seconds: 8.5
+    post_run_override:
+      post_terminal_grace_seconds: 12.0
+  tester:
+    adapter: "antigravity"
+    # unconfigured grace period on stage -> inherits default 4.0
+""",
+        encoding="utf-8",
+    )
+    cfg = Config.load(tmp_path)
+
+    # 1. Stage-specific override (critic pre_run)
+    critic_pre = cfg.get_stage_config("critic", phase="pre_run")
+    assert critic_pre.post_terminal_grace_seconds == 8.5
+    critic_pre_adapter = _get_adapter(cfg, "critic", phase="pre_run", exit_on_error=False)
+    assert critic_pre_adapter.post_terminal_grace_seconds == 8.5
+    assert critic_pre_adapter.post_terminal_grace_period == 8.5
+
+    # 2. Stage-specific post_run_override (critic post_run)
+    critic_post = cfg.get_stage_config("critic", phase="post_run")
+    assert critic_post.post_terminal_grace_seconds == 12.0
+    critic_post_adapter = _get_adapter(cfg, "critic", phase="post_run", exit_on_error=False)
+    assert critic_post_adapter.post_terminal_grace_seconds == 12.0
+    assert critic_post_adapter.post_terminal_grace_period == 12.0
+
+    # 3. Defaults inheritance when stage does not specify override (tester)
+    tester_stage = cfg.get_stage_config("tester", phase="pre_run")
+    assert tester_stage.post_terminal_grace_seconds == 4.0
+    tester_adapter = _get_adapter(cfg, "tester", phase="pre_run", exit_on_error=False)
+    assert tester_adapter.post_terminal_grace_seconds == 4.0
+    assert tester_adapter.post_terminal_grace_period == 4.0
+
+    # 4. Built-in default (15.0s) when neither stage nor defaults configure grace period
+    clean_cfg = Config.default()
+    clean_critic = clean_cfg.get_stage_config("critic", phase="pre_run")
+    assert clean_critic.post_terminal_grace_seconds is None
+    clean_adapter = _get_adapter(clean_cfg, "critic", phase="pre_run", exit_on_error=False)
+    assert clean_adapter.post_terminal_grace_seconds == 15.0
+    assert clean_adapter.post_terminal_grace_period == 15.0
+
+
+def test_both_antigravity_and_opencode_receive_grace_period(tmp_path: Path):
+    """Verify both Antigravity and OpenCode adapters receive and configure grace period."""
+    from forge.adapters.registry import AdapterRegistry
+    from forge.cli import _get_adapter
+
+    # Direct registry resolution
+    agy = AdapterRegistry.get("antigravity", post_terminal_grace_seconds=6.5)
+    assert agy.post_terminal_grace_seconds == 6.5
+    assert agy.post_terminal_grace_period == 6.5
+
+    oc = AdapterRegistry.get("opencode", post_terminal_grace_seconds=6.5)
+    assert oc.post_terminal_grace_seconds == 6.5
+    assert oc.post_terminal_grace_period == 6.5
+
+    # Via configuration and _get_adapter
+    forge_yaml = tmp_path / "forge.yaml"
+    forge_yaml.write_text(
+        """
+version: "2.0"
+defaults:
+  post_terminal_grace_seconds: 9.0
+stages:
+  architect:
+    adapter: "opencode"
+  critic:
+    adapter: "antigravity"
+""",
+        encoding="utf-8",
+    )
+    cfg = Config.load(tmp_path)
+
+    oc_inst = _get_adapter(cfg, "architect", exit_on_error=False)
+    assert oc_inst.post_terminal_grace_seconds == 9.0
+    assert oc_inst.post_terminal_grace_period == 9.0
+
+    agy_inst = _get_adapter(cfg, "critic", exit_on_error=False)
+    assert agy_inst.post_terminal_grace_seconds == 9.0
+    assert agy_inst.post_terminal_grace_period == 9.0
+
+
+def test_adapter_direct_validation():
+    """Verify adapter constructors and AdapterRegistry reject invalid grace periods."""
+    from forge.adapters.antigravity import AntigravityAdapter
+    from forge.adapters.opencode import OpenCodeAdapter
+    from forge.adapters.registry import AdapterRegistry
+
+    invalid_values = (-1, 0, float("nan"), float("inf"), "bad", True)
+    for bad in invalid_values:
+        with pytest.raises(ValueError):
+            AntigravityAdapter(post_terminal_grace_seconds=bad)
+        with pytest.raises(ValueError):
+            AntigravityAdapter(post_terminal_grace_period=bad)
+        with pytest.raises(ValueError):
+            OpenCodeAdapter(post_terminal_grace_seconds=bad)
+        with pytest.raises(ValueError):
+            OpenCodeAdapter(post_terminal_grace_period=bad)
+        with pytest.raises(ValueError):
+            AdapterRegistry.get("antigravity", post_terminal_grace_seconds=bad)
+        with pytest.raises(ValueError):
+            AdapterRegistry.get("opencode", post_terminal_grace_seconds=bad)
+
+    # Explicit None for post_terminal_grace_period is rejected
+    with pytest.raises(ValueError):
+        AntigravityAdapter(post_terminal_grace_period=None)
+    with pytest.raises(ValueError):
+        OpenCodeAdapter(post_terminal_grace_period=None)
