@@ -149,7 +149,18 @@ git push origin v0.1.0b16
 | **Release Candidate** | `0.2.0rc1` | `v0.2.0rc1` | TestPyPI / PyPI |
 | **Final / Stable** | `0.2.0` | `v0.2.0` | PyPI |
 
-## 6. Release Notes: v0.1.0b17
+## 6. Release Notes: v0.1.0b18
+
+`v0.1.0b18` resolves persistent Antigravity post-terminal CLI lifecycle issues and hardens cross-platform cleanup across POSIX and native Windows environments:
+
+- **Verified Post-Terminal Forced Cleanup**: In Antigravity CLI, background Go routines (such as `printmode.waitForIdle`) can remain active for up to 30 minutes following terminal event emission and stream draining. Forge now enforces verified post-terminal escalation: when a valid successful terminal event is received, graceful shutdown is dispatched, and the process remains alive past the configured monotonic grace deadline (`post_terminal_grace_seconds`, default 15.0s), Forge escalates to process-tree termination.
+- **Direct OS Process Liveness Confirmation**: Forge re-validates process identity and confirms process death directly against the operating system (`not is_pid_alive(pid)`) before accepting cleanup. Successful termination with a valid terminal result and verified report schema normalizes the stage exit code to 0 with full audit metadata (`graceful_shutdown=True`, `forced_cleanup=True`, `raw_exit_code=proc_code`).
+- **OpenCode & Shared Cleanup Invariant Preservation**: Retained unescalated failure semantics for OpenCode adapter process-lingering, enforced process death confirmation in shared `_safe_cleanup_subprocess`, and preserved strict failure handling for PID mismatches, missing terminal events, and unverified cleanup.
+- **Cross-Platform & Windows Lifecycle Hardening**: Hardened subprocess cleanup on Windows by avoiding OS process identity checks on mock processes, normalizing exit code checks, adding process exit polling latency guards, and scoping POSIX-only signal fixtures.
+
+---
+
+## 7. Release Notes: v0.1.0b17
 
 `v0.1.0b17` delivers dashboard architecture consolidation and post-terminal process lifecycle hardening:
 
