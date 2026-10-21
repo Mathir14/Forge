@@ -628,22 +628,26 @@ class BaseAdapter(ABC):
         success = True
         err = None
         try:
+            is_mock = is_mock_process(proc)
             expected_ticks = getattr(proc, "_start_time_ticks", None)
             if expected_ticks is None and tracker is not None and hasattr(tracker, "record"):
                 expected_ticks = getattr(tracker.record, "start_time_ticks", None)
                 if expected_ticks is not None:
                     setattr(proc, "_start_time_ticks", expected_ticks)
 
+            if not isinstance(expected_ticks, (int, float)):
+                expected_ticks = None
+
             target_pgid = getattr(proc, "_pgid", None)
             if type(target_pgid) is not int:
                 target_pgid = None
                 if tracker is not None and hasattr(tracker, "record"):
                     target_pgid = getattr(tracker.record, "pgid", None)
-                    if target_pgid is not None:
+                    if type(target_pgid) is int:
                         setattr(proc, "_pgid", target_pgid)
 
             pid = getattr(proc, "pid", None)
-            if type(pid) is int and is_pid_alive(pid) and expected_ticks is not None:
+            if not is_mock and type(pid) is int and is_pid_alive(pid) and expected_ticks is not None:
                 if not verify_process_identity(pid, expected_ticks, target_pgid):
                     success = False
                     err = (
