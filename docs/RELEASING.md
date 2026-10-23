@@ -149,7 +149,20 @@ git push origin v0.1.0b16
 | **Release Candidate** | `0.2.0rc1` | `v0.2.0rc1` | TestPyPI / PyPI |
 | **Final / Stable** | `0.2.0` | `v0.2.0` | PyPI |
 
-## 6. Release Notes: v0.1.0b18
+## 6. Release Notes: v0.1.0b19
+
+`v0.1.0b19` delivers verified Git commit integrity, truth-grounded change attribution, observable PKB knowledge persistence, deterministic fallback extraction, and cross-platform post-terminal monotonic timer hardening:
+
+- **Git Commit Integrity & Truth-Grounded Attribution**: Introduced structured `CommitStatus` (`COMMITTED`, `PARTIAL`, `NO_CHANGES`, `FAILED`, `VERIFICATION_FAILED`) and `CommitResult` tracking `commit_sha`, `committed_files`, and `excluded_files`. Enforces post-commit inspection via `git diff-tree` to verify that unintended files are never committed.
+- **Fail-Safe Mixed-Ownership Protection**: Safely excludes files modified before and during an autonomous run from auto-commit, while preventing partial commits from masquerading as complete success (`auto_committed: false`, Commit stage transition demoted to `PARTIAL`, overall workflow halted with `PARTIAL`).
+- **PKB Structured Knowledge Proposals**: Added explicit `KNOWLEDGE_PROPOSALS` prompt instructions and protocol templates for Critic, Architect, Tester, and Reviewer.
+- **Deterministic Fallback Extraction**: Added `KnowledgeExtractor` to automatically convert qualifying Critical and Major findings and unresolved technical debt into structured proposals when explicit proposals are absent, while strictly enforcing role boundaries (Executor and Planner prohibited per INV-PKB-01 and INV-PKB-02).
+- **Observable Knowledge Lifecycle**: Mandated durable proposal outcome artifacts (`<seq>_<role>_proposals.yaml`) for every stage run, captured rejected proposals in machine reports and `diff["rejected"]`, persisted failure details in `knowledge_diff.json`, and truthfully reflected canonical reconciliation status in run metadata.
+- **Cross-Platform Timer Hardening**: Hardened post-terminal stream event decoding against system timer resolution jitter on Windows CI runners.
+
+---
+
+## 7. Release Notes: v0.1.0b18
 
 `v0.1.0b18` resolves persistent Antigravity post-terminal CLI lifecycle issues and hardens cross-platform cleanup across POSIX and native Windows environments:
 
