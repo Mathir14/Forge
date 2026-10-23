@@ -34,6 +34,7 @@ class KnowledgeReconciler:
     ):
         self.project_root = Path(project_root).resolve() if project_root else Path.cwd().resolve()
         self.store = store or KnowledgeStore(self.project_root)
+        self._staged_rejected_proposals: List[Dict[str, Any]] = []
 
     def check_role_permission(self, proposal: KnowledgeProposal) -> Optional[str]:
         """Validate whether proposal.role has authority to emit proposal action & type."""
@@ -90,6 +91,7 @@ class KnowledgeReconciler:
     def load_staged_proposals(self, run_dir: Path) -> List[KnowledgeProposal]:
         """Load all staged proposals from .forge/runs/<run_id>/knowledge_proposals/."""
         proposals: List[KnowledgeProposal] = []
+        self._staged_rejected_proposals = []
         proposals_dir = run_dir / "knowledge_proposals"
         if not proposals_dir.exists():
             return proposals
@@ -109,8 +111,32 @@ class KnowledgeReconciler:
                             proposals.append(proposal)
                         except Exception as e:
                             logger.warning("Skipping invalid proposal in %s: %s", p_file, e)
+                            self._staged_rejected_proposals.append({
+                                "proposal_id": item.get("id", "malformed"),
+                                "reason": f"Malformed proposal in {p_file.name}: {e}",
+                            })
+                    else:
+                        self._staged_rejected_proposals.append({
+                            "proposal_id": "malformed",
+                            "reason": f"Malformed proposal in {p_file.name}: expected dict, got {type(item).__name__}",
+                        })
+
+                # Capture proposals already rejected at stage validation time
+                for r_item in content.get("rejected_proposals", []):
+                    if isinstance(r_item, dict):
+                        p_dict = r_item.get("proposal", {})
+                        pid = p_dict.get("id", "rejected") if isinstance(p_dict, dict) else "rejected"
+                        errs = r_item.get("errors", ["Stage validation rejection"])
+                        self._staged_rejected_proposals.append({
+                            "proposal_id": pid,
+                            "reason": "; ".join(errs) if isinstance(errs, list) else str(errs),
+                        })
             except Exception as e:
                 logger.warning("Failed to load proposals file %s: %s", p_file, e)
+                self._staged_rejected_proposals.append({
+                    "proposal_id": "file_error",
+                    "reason": f"Failed to load {p_file.name}: {e}",
+                })
 
         return proposals
 
@@ -138,7 +164,7 @@ class KnowledgeReconciler:
             "modified": [],
             "disputed": [],
             "deprecated": [],
-            "rejected": [],
+            "rejected": list(self._staged_rejected_proposals),
         }
 
         def record_diff(category: str, fact_id: str) -> None:
@@ -386,7 +412,21 @@ class KnowledgeReconciler:
             diff[k] = sorted(list(dict.fromkeys(diff[k])))
 
         # Persist updated facts
-        self.store.save_all(existing_facts)
+        try:
+            self.store.save_all(existing_facts)
+            diff["persistence_status"] = "PERSISTED"
+        except Exception as e:
+            logger.error("Failed to persist PKB facts to disk: %s", e)
+            diff["persistence_status"] = "FAILED"
+            diff["persistence_error"] = str(e)
+            # Write diff artifact before raising so failure is observable
+            diff_file = run_dir / "knowledge_diff.json"
+            try:
+                with open(diff_file, "w", encoding="utf-8") as f:
+                    json.dump(diff, f, indent=2)
+            except Exception:
+                pass
+            raise
 
         # Write diff artifact to run directory
         diff_file = run_dir / "knowledge_diff.json"

@@ -3,6 +3,7 @@
 from typing import Dict, Any, List, Optional, Set
 from forge.protocol.report import MachineReport
 from forge.core.knowledge import KnowledgeProposal
+from forge.core.extractor import KnowledgeExtractor
 
 
 class MachineReportValidator:
@@ -164,9 +165,24 @@ class MachineReportValidator:
                 )
 
         # 3.2 ADR-015 PKB Protocol Invariants & Proposal Validation
-        proposals_raw = normalized_data.get("KNOWLEDGE_PROPOSALS", [])
+        proposals_raw = normalized_data.get("KNOWLEDGE_PROPOSALS")
         proposals: List[KnowledgeProposal] = []
-        if isinstance(proposals_raw, list):
+        rejected_proposals: List[Dict[str, Any]] = []
+        proposal_reason: Optional[str] = None
+
+        if proposals_raw is None or (isinstance(proposals_raw, list) and len(proposals_raw) == 0):
+            # Automated extraction of qualifying knowledge from findings if role qualifies
+            extracted_props, extraction_reason = KnowledgeExtractor.extract_proposals(
+                role=role,
+                data=normalized_data,
+                raw_markdown=raw_yaml,
+                confidence=normalized_data.get("CONFIDENCE"),
+            )
+            if extracted_props:
+                proposals = extracted_props
+            else:
+                proposal_reason = extraction_reason
+        elif isinstance(proposals_raw, list):
             for idx, p_item in enumerate(proposals_raw):
                 if isinstance(p_item, dict):
                     try:
@@ -182,17 +198,29 @@ class MachineReportValidator:
                             title_lower = p_obj.title.lower()
                             if any(id_lower.endswith(f"-{bc}") or id_lower == bc for bc in bad_components) or \
                                any(f" {bc}" in title_lower or title_lower.endswith(bc) for bc in bad_components):
-                                errors.append(
+                                err_msg = (
                                     f"Protocol invariant violation (INV-PKB-08): Proposal '{p_obj.id}' defines an internal code component ('{p_obj.title}') as a feature. "
                                     "Features must represent observable user/consumer capabilities (e.g. 'User Login'). Internal components belong in architecture."
                                 )
-                        proposals.append(p_obj)
+                                errors.append(err_msg)
+                                p_errs.append(err_msg)
+
+                        if p_errs:
+                            rejected_proposals.append({"proposal": p_item, "errors": p_errs})
+                        else:
+                            proposals.append(p_obj)
                     except Exception as e:
-                        errors.append(f"Invalid knowledge proposal format at index {idx}: {e}")
+                        err_msg = f"Invalid knowledge proposal format at index {idx}: {e}"
+                        errors.append(err_msg)
+                        rejected_proposals.append({"proposal": p_item, "errors": [err_msg]})
                 elif p_item:
-                    errors.append(f"Knowledge proposal at index {idx} must be a dictionary, got {type(p_item).__name__}")
+                    err_msg = f"Knowledge proposal at index {idx} must be a dictionary, got {type(p_item).__name__}"
+                    errors.append(err_msg)
+                    rejected_proposals.append({"proposal": p_item, "errors": [err_msg]})
         elif proposals_raw:
-            errors.append(f"KNOWLEDGE_PROPOSALS must be a list of proposals, got {type(proposals_raw).__name__}")
+            err_msg = f"KNOWLEDGE_PROPOSALS must be a list of proposals, got {type(proposals_raw).__name__}"
+            errors.append(err_msg)
+            rejected_proposals.append({"proposal": proposals_raw, "errors": [err_msg]})
 
         # Invariant INV-PKB-01: Executor must never emit KNOWLEDGE_PROPOSALS
         if role == "EXECUTOR" and proposals:
@@ -266,6 +294,8 @@ class MachineReportValidator:
             issues=issues,
             data=custom_fields,
             proposals=proposals,
+            rejected_proposals=rejected_proposals,
+            proposal_reason=proposal_reason,
             raw_yaml=raw_yaml,
             is_valid=is_valid,
             validation_errors=errors,

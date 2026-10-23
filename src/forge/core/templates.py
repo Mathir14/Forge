@@ -34,6 +34,16 @@ Requirements:
 - REASON is strictly for concise machine signaling, not human explanation. It must always be enclosed in double quotes as a single-line summary (maximum 100 characters). Detailed analysis, narrative rationale, and evidence belong in the Human Report, NEVER in REASON.
 - The entire block must be parseable by yaml.safe_load().
 
+### Project Knowledge Base (PKB) Proposals (ADR-015)
+Roles authorized to propose or verify knowledge (Architect, Tester, Reviewer, Critic) can emit structured proposals under `KNOWLEDGE_PROPOSALS`:
+- `action`: ASSERT, VERIFY, DISPUTE, or DEPRECATE
+- `id`: kebab-case slug (e.g. 'auth-rate-limiter')
+- `type`: 'architecture', 'feature', 'decision', or 'unresolved'
+- `title`: Non-empty title string
+- `summary`: Concise summary of the fact, convention, or debt
+- `evidence`: List of relevant file paths or test artifacts
+Note: Executor and Planner are strictly prohibited from emitting KNOWLEDGE_PROPOSALS (INV-PKB-01, INV-PKB-02).
+
 Base Protocol Schema:
 ```yaml
 ROLE:
@@ -59,6 +69,7 @@ ISSUES:
 
 CONFIDENCE: HIGH
 NEXT_ACTION: "Concise next action summary"
+KNOWLEDGE_PROPOSALS: []
 ```
 """
 

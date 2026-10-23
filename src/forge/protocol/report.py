@@ -17,6 +17,8 @@ class MachineReport:
     issues: Dict[str, List[Any]] = field(default_factory=dict)
     data: Dict[str, Any] = field(default_factory=dict)
     proposals: List[KnowledgeProposal] = field(default_factory=list)
+    rejected_proposals: List[Dict[str, Any]] = field(default_factory=list)
+    proposal_reason: Optional[str] = None
     raw_yaml: str = ""
     is_valid: bool = True
     validation_errors: List[str] = field(default_factory=list)
@@ -33,6 +35,8 @@ class MachineReport:
             "issues": self.issues,
             "data": self.data,
             "proposals": [p.to_dict() for p in self.proposals],
+            "rejected_proposals": list(self.rejected_proposals),
+            "proposal_reason": self.proposal_reason,
             "is_valid": self.is_valid,
             "validation_errors": self.validation_errors,
         }

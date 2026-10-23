@@ -3,8 +3,9 @@ import json
 import logging
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
@@ -92,6 +93,45 @@ class ChangeAttribution:
             if f not in res:
                 res.append(f)
         return res
+
+
+class CommitStatus(str, Enum):
+    COMMITTED = "COMMITTED"
+    PARTIAL = "PARTIAL"
+    NO_CHANGES = "NO_CHANGES"
+    NOT_REQUESTED = "NOT_REQUESTED"
+    FAILED = "FAILED"
+    VERIFICATION_FAILED = "VERIFICATION_FAILED"
+
+
+@dataclass
+class CommitResult:
+    """Detailed result of a Git commit operation in Forge."""
+    status: CommitStatus
+    commit_sha: Optional[str] = None
+    committed_files: List[str] = field(default_factory=list)
+    excluded_files: List[str] = field(default_factory=list)
+    reason: Optional[str] = None
+
+    @property
+    def is_success(self) -> bool:
+        return self.status == CommitStatus.COMMITTED
+
+    @property
+    def is_partial(self) -> bool:
+        return self.status == CommitStatus.PARTIAL
+
+    def __bool__(self) -> bool:
+        return self.is_success
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "commit_sha": self.commit_sha,
+            "committed_files": list(self.committed_files),
+            "excluded_files": list(self.excluded_files),
+            "reason": self.reason,
+        }
 
 
 class GitService:
@@ -798,18 +838,135 @@ class GitService:
                     filtered.append(item)
         return filtered
 
-    def commit_run(self, message: str, baseline: Optional[GitBaseline] = None) -> bool:
-        """Commit changes attributable specifically to the current Forge run relative to baseline."""
+    def get_head_commit(self) -> Optional[str]:
+        """Return the current HEAD commit hash, or None if no commits exist."""
+        if not self.is_git_repo():
+            return None
+        res = self._run(["rev-parse", "HEAD"])
+        if res.returncode == 0:
+            out = res.stdout.strip()
+            return out if out else None
+        return None
+
+    def get_commit_files(self, commit_sha: str) -> List[str]:
+        """Return the list of files modified/added in a specific commit."""
+        if not self.is_git_repo() or not commit_sha:
+            return []
+        res = self._run(["diff-tree", "--no-commit-id", "--name-only", "-r", commit_sha])
+        if res.returncode == 0:
+            return [line.strip() for line in res.stdout.splitlines() if line.strip()]
+        return []
+
+    def commit_run(
+        self,
+        message: str,
+        baseline: Optional[GitBaseline] = None,
+        return_result: bool = False,
+    ) -> Any:
+        """Commit changes attributable specifically to the current Forge run relative to baseline.
+
+        Enforces commit integrity: verifies relationship between intended changes and the resulting commit.
+        Excludes mixed-ownership changes to protect user work.
+        If return_result is True, returns CommitResult.
+        If return_result is False, returns True only on complete success, or False on partial/failed.
+        """
+        if not self.is_git_repo():
+            res = CommitResult(
+                status=CommitStatus.FAILED,
+                reason="Not a git repository",
+            )
+            return res if return_result else False
+
         attr = self.attribute_changes(baseline)
-        if attr.mixed_ownership_changes:
+        intended_files = list(attr.all_run_relevant_changes)
+        pure_files = list(attr.pure_forge_changes)
+        mixed_files = list(attr.mixed_ownership_changes)
+
+        if not intended_files:
+            res = CommitResult(
+                status=CommitStatus.NO_CHANGES,
+                reason="No run-owned changes to commit",
+            )
+            return res if return_result else False
+
+        if not pure_files:
+            logging.warning(
+                "Skipping auto-commit: all %d run-owned file(s) have mixed ownership: %s",
+                len(mixed_files),
+                mixed_files,
+            )
+            res = CommitResult(
+                status=CommitStatus.PARTIAL,
+                committed_files=[],
+                excluded_files=mixed_files,
+                reason=f"0 of {len(intended_files)} file(s) committed ({len(mixed_files)} mixed-ownership file(s) excluded)",
+            )
+            return res if return_result else False
+
+        if mixed_files:
             logging.warning(
                 "Skipping %d mixed-ownership file(s) from commit_run: %s",
-                len(attr.mixed_ownership_changes),
-                attr.mixed_ownership_changes,
+                len(mixed_files),
+                mixed_files,
             )
-        if not attr.pure_forge_changes:
-            return False
-        return self.commit(message, paths=attr.pure_forge_changes)
+
+        head_before = self.get_head_commit()
+        committed = self.commit(message, paths=pure_files)
+        if not committed:
+            res = CommitResult(
+                status=CommitStatus.FAILED,
+                committed_files=[],
+                excluded_files=mixed_files,
+                reason="Git commit command failed",
+            )
+            return res if return_result else False
+
+        head_after = self.get_head_commit()
+        commit_sha = head_after
+        if isinstance(committed, str):
+            commit_sha = committed
+        elif head_after == head_before and head_after is not None:
+            res = CommitResult(
+                status=CommitStatus.FAILED,
+                committed_files=[],
+                excluded_files=mixed_files,
+                reason="Git commit command did not create a new commit",
+            )
+            return res if return_result else False
+
+        if head_after and head_after != head_before:
+            commit_files = self.get_commit_files(head_after)
+            unintended = [f for f in commit_files if f not in pure_files and not self.is_protected_path(f)]
+            if unintended:
+                res = CommitResult(
+                    status=CommitStatus.VERIFICATION_FAILED,
+                    commit_sha=head_after,
+                    committed_files=commit_files,
+                    excluded_files=mixed_files,
+                    reason=f"Commit verification failed: unintended file(s) committed: {unintended}",
+                )
+                return res if return_result else False
+
+        if mixed_files:
+            res = CommitResult(
+                status=CommitStatus.PARTIAL,
+                commit_sha=commit_sha,
+                committed_files=pure_files,
+                excluded_files=mixed_files,
+                reason=f"Partial commit: {len(pure_files)} of {len(intended_files)} file(s) committed, {len(mixed_files)} mixed-ownership file(s) excluded",
+            )
+            return res if return_result else False
+
+        res = CommitResult(
+            status=CommitStatus.COMMITTED,
+            commit_sha=commit_sha,
+            committed_files=pure_files,
+            excluded_files=[],
+            reason=f"All {len(pure_files)} intended file(s) committed",
+        )
+        if not return_result:
+            return committed if isinstance(committed, str) else True
+        return res
 
 
     def commit(self, message: str, paths: Optional[List[str]] = None) -> bool:

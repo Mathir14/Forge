@@ -9,7 +9,7 @@ import yaml
 
 from forge import __version__
 from forge.core.config import Config, StageConfig, ConfigValidationError
-from forge.core.git import GitService, GitBaseline
+from forge.core.git import GitService, GitBaseline, CommitResult, CommitStatus
 from forge.core.role import Role
 from forge.core.run import Run
 from forge.core.context import Context
@@ -1416,23 +1416,55 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
             run.save_metadata()
 
             # Auto-commit if approved and requested
+            commit_status_override = None
+            commit_reason_override = None
             if auto_commit or config.execution.auto_commit:
                 if stages_executed == 0:
                     click.secho("  ⚠️ Auto-commit skipped: no stages were executed during this invocation.", fg="yellow")
-                    _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
+                    _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context, reason="No stages executed")
                 else:
                     task_summary = run.task.strip().splitlines()[0][:70] if (run.task and run.task.strip()) else ""
                     commit_msg = f"feat: {task_summary}"
                     if git.is_git_repo():
-                        if auto_commit_run(git=git, task_summary=task_summary, baseline=git_baseline, run=run, stages_executed=stages_executed):
-                            click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'", fg="green")
-                            _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context)
+                        commit_res = auto_commit_run(
+                            git=git,
+                            task_summary=task_summary,
+                            baseline=git_baseline,
+                            run=run,
+                            stages_executed=stages_executed,
+                            return_result=True,
+                            context=context,
+                        )
+                        if not isinstance(commit_res, CommitResult):
+                            commit_res = CommitResult(
+                                status=CommitStatus.COMMITTED if commit_res else CommitStatus.FAILED,
+                                reason=None if commit_res else "Auto-commit failed",
+                            )
+                        if commit_res.status == CommitStatus.COMMITTED:
+                            sha_str = f" ({commit_res.commit_sha[:8]})" if commit_res.commit_sha else ""
+                            click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'{sha_str}", fg="green")
+                            _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context, reason=commit_res.reason)
+                        elif commit_res.status == CommitStatus.PARTIAL:
+                            click.secho(f"\n⚠️ Auto-commit partial: {commit_res.reason}", fg="yellow", bold=True)
+                            _record_stage_transition(run, "Commit", "PARTIAL", "COMPLETED", role_name="commit", seq=99, context=context, reason=commit_res.reason)
+                            commit_status_override = "PARTIAL"
+                            commit_reason_override = commit_res.reason
+                        elif commit_res.status in (CommitStatus.FAILED, CommitStatus.VERIFICATION_FAILED):
+                            click.secho(f"\n❌ Auto-commit failed: {commit_res.reason}", fg="red", bold=True)
+                            _record_stage_transition(run, "Commit", "FAILED", "COMPLETED", role_name="commit", seq=99, context=context, reason=commit_res.reason)
+                            commit_status_override = "FAILED"
+                            commit_reason_override = commit_res.reason
                         else:
-                            click.secho("  ⚠️ Auto-commit skipped: no changes or git commit error.", fg="yellow")
-                            _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
+                            click.secho("  ℹ️ Auto-commit skipped: no changes to commit.", fg="yellow")
+                            _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context, reason=commit_res.reason)
+
+            if commit_status_override:
+                run.status = commit_status_override
+                _record_final_halt(run, commit_status_override, commit_reason_override)
+                run.save_metadata()
 
             # Reconcile PKB knowledge proposals
-            reconcile_run_knowledge(root, run.run_id, run.run_dir)
+            reconcile_run_knowledge(root, run.run_id, run.run_dir, run=run)
 
             click.secho(f"\n✨ Forge Pipeline completed successfully for {run.run_id}!", fg="green", bold=True)
             click.echo(f"   Artifacts saved in .forge/runs/{run.run_id}/\n")
@@ -1451,21 +1483,58 @@ def run_pipeline(task: Optional[str], from_critic: bool, run_id: Optional[str], 
         sys.exit(1)
 
 
-def reconcile_run_knowledge(project_root: Path, run_id: str, run_dir: Path) -> Optional[Dict[str, Any]]:
+def reconcile_run_knowledge(
+    project_root: Path,
+    run_id: str,
+    run_dir: Path,
+    run: Optional[Run] = None,
+) -> Optional[Dict[str, Any]]:
     """Reconcile staged knowledge proposals into the repository Project Knowledge Base."""
     try:
         from forge.core.reconciler import KnowledgeReconciler
         reconciler = KnowledgeReconciler(project_root)
         diff = reconciler.reconcile_run(run_id, run_dir)
         total_changes = len(diff.get("added", [])) + len(diff.get("modified", [])) + len(diff.get("disputed", [])) + len(diff.get("deprecated", []))
+        rejected_count = len(diff.get("rejected", []))
+
+        pkb_meta = {
+            "reconciled_at": diff.get("reconciled_at"),
+            "total_changes": total_changes,
+            "added": len(diff.get("added", [])),
+            "modified": len(diff.get("modified", [])),
+            "disputed": len(diff.get("disputed", [])),
+            "deprecated": len(diff.get("deprecated", [])),
+            "rejected": rejected_count,
+        }
+
         if total_changes > 0:
             click.secho(
                 f"  🧠 Project Knowledge Base updated: +{len(diff['added'])} ~{len(diff['modified'])} !{len(diff['disputed'])} -{len(diff['deprecated'])}",
                 fg="cyan",
             )
+            pkb_meta["status"] = "PERSISTED"
+            if run is not None:
+                run.metadata["reconcile_canonical"] = True
+                run.metadata["pkb"] = pkb_meta
+                run.save_metadata()
+        else:
+            pkb_meta["status"] = "NO_CHANGES" if rejected_count == 0 else "REJECTED_ONLY"
+            if run is not None:
+                run.metadata["reconcile_canonical"] = False
+                run.metadata["pkb"] = pkb_meta
+                run.save_metadata()
+
         return diff
     except Exception as e:
         logging.warning("Failed to reconcile run knowledge for %s: %s", run_id, e)
+        if run is not None:
+            run.metadata["reconcile_canonical"] = False
+            run.metadata["pkb"] = {
+                "status": "FAILED",
+                "error": str(e),
+                "total_changes": 0,
+            }
+            run.save_metadata()
         return None
 
 
@@ -1475,7 +1544,9 @@ def auto_commit_run(
     baseline: Optional[GitBaseline] = None,
     run: Optional[Run] = None,
     stages_executed: Optional[int] = None,
-) -> bool:
+    return_result: bool = False,
+    context: Optional[Any] = None,
+) -> Any:
     """Production commit orchestration helper for Forge runs.
 
     Computes run-scoped changes attributable specifically to the current Forge run
@@ -1483,19 +1554,23 @@ def auto_commit_run(
     user work and fail-safe on mixed ownership.
     """
     if not git.is_git_repo():
-        return False
+        res = CommitResult(status=CommitStatus.FAILED, reason="Not a git repository")
+        return res if return_result else False
 
     if stages_executed is not None and stages_executed == 0:
         click.secho("  ⚠️ Auto-commit skipped: no stages executed in current invocation.", fg="yellow")
-        return False
+        res = CommitResult(status=CommitStatus.NO_CHANGES, reason="No stages executed in current invocation")
+        return res if return_result else False
 
     if run is not None:
         if getattr(run, "_stages_executed_in_session", None) == 0:
             click.secho("  ⚠️ Auto-commit skipped: no stages executed in current invocation.", fg="yellow")
-            return False
+            res = CommitResult(status=CommitStatus.NO_CHANGES, reason="No stages executed in current invocation")
+            return res if return_result else False
         if run.metadata.get("auto_committed", False):
             click.secho("  ⚠️ Auto-commit skipped: run was already committed.", fg="yellow")
-            return False
+            res = CommitResult(status=CommitStatus.NO_CHANGES, reason="Run was already committed")
+            return res if return_result else False
 
     root_dir = getattr(git, "repo_path", None) or getattr(git, "root_dir", None)
     if root_dir is None and hasattr(git, "toplevel"):
@@ -1510,7 +1585,11 @@ def auto_commit_run(
                 fg="yellow",
                 bold=True,
             )
-            return False
+            res = CommitResult(
+                status=CommitStatus.FAILED,
+                reason="Active writer lease or running background session detected in working tree",
+            )
+            return res if return_result else False
 
     resolved_baseline = baseline
     if resolved_baseline is None and run is not None and hasattr(run, "run_dir"):
@@ -1522,13 +1601,47 @@ def auto_commit_run(
                 import logging
                 logging.warning("Failed to load baseline from %s: %s", baseline_file, e)
 
-    attribution = git.attribute_changes(resolved_baseline)
-    pure_forge_paths = attribution.pure_forge_changes
-    mixed_paths = attribution.mixed_ownership_changes
+    commit_msg = f"feat: {task_summary}"
+    committed_raw = None
 
-    if mixed_paths:
+    if isinstance(git, GitService):
+        result = git.commit_run(commit_msg, baseline=resolved_baseline, return_result=True)
+    else:
+        attribution = git.attribute_changes(resolved_baseline)
+        pure_forge_paths = list(getattr(attribution, "pure_forge_changes", []) or [])
+        mixed_paths = list(getattr(attribution, "mixed_ownership_changes", []) or [])
+        if not pure_forge_paths:
+            result = CommitResult(
+                status=CommitStatus.PARTIAL if mixed_paths else CommitStatus.NO_CHANGES,
+                committed_files=[],
+                excluded_files=mixed_paths,
+                reason=f"0 file(s) committed ({len(mixed_paths)} mixed-ownership file(s) excluded)" if mixed_paths else "No changes to commit",
+            )
+        else:
+            committed = git.commit(commit_msg, paths=pure_forge_paths)
+            committed_raw = committed
+            if not committed:
+                result = CommitResult(status=CommitStatus.FAILED, reason="Git commit failed")
+            elif mixed_paths:
+                result = CommitResult(
+                    status=CommitStatus.PARTIAL,
+                    commit_sha=committed if isinstance(committed, str) else None,
+                    committed_files=pure_forge_paths,
+                    excluded_files=mixed_paths,
+                    reason=f"Partial commit: {len(pure_forge_paths)} committed, {len(mixed_paths)} mixed excluded",
+                )
+            else:
+                result = CommitResult(
+                    status=CommitStatus.COMMITTED,
+                    commit_sha=committed if isinstance(committed, str) else None,
+                    committed_files=pure_forge_paths,
+                    excluded_files=[],
+                    reason=f"All {len(pure_forge_paths)} pure files committed",
+                )
+
+    if result.excluded_files:
         click.secho("\n⚠️ Skipped auto-commit for mixed-ownership file(s):", fg="yellow", bold=True)
-        for p in mixed_paths:
+        for p in result.excluded_files:
             click.secho(f"  - {p}", fg="yellow")
         click.echo(
             "\nThese files had pre-existing user modifications before the Forge run\n"
@@ -1536,15 +1649,42 @@ def auto_commit_run(
             "changes automatically. Review and commit them manually.\n"
         )
 
-    if not pure_forge_paths:
+    if run is not None:
+        if result.status == CommitStatus.COMMITTED:
+            run.metadata["auto_committed"] = True
+            run.metadata["commit_status"] = "COMMITTED"
+            run.metadata["commit_sha"] = result.commit_sha
+            run.metadata["committed_files"] = result.committed_files
+            run.metadata["excluded_files"] = []
+        elif result.status == CommitStatus.PARTIAL:
+            run.metadata["auto_committed"] = False
+            run.metadata["commit_status"] = "PARTIAL"
+            run.metadata["commit_sha"] = result.commit_sha
+            run.metadata["committed_files"] = result.committed_files
+            run.metadata["excluded_files"] = result.excluded_files
+        elif result.status == CommitStatus.NO_CHANGES:
+            run.metadata["auto_committed"] = False
+            run.metadata["commit_status"] = "NO_CHANGES"
+        else:
+            run.metadata["auto_committed"] = False
+            run.metadata["commit_status"] = result.status.value
+            if result.commit_sha:
+                run.metadata["commit_sha"] = result.commit_sha
+        run.save_metadata()
+
+    if return_result:
+        return result
+
+    if run is None:
+        if result.status == CommitStatus.COMMITTED:
+            return committed_raw if committed_raw is not None else True
+        if result.status == CommitStatus.PARTIAL and result.committed_files:
+            return committed_raw if committed_raw is not None else True
         return False
 
-    commit_msg = f"feat: {task_summary}"
-    committed = git.commit(commit_msg, paths=pure_forge_paths)
-    if committed and run is not None:
-        run.metadata["auto_committed"] = True
-        run.save_metadata()
-    return committed
+    if result.status == CommitStatus.COMMITTED:
+        return committed_raw if committed_raw is not None else True
+    return False
 
 
 
@@ -2091,27 +2231,58 @@ def auto_pipeline(
                 run._stages_executed_in_session = stages_executed
 
                 # Auto-commit if approved and requested (only AFTER Critic audit)
+                commit_status_override = None
+                commit_reason_override = None
                 if approved and (auto_commit or config.execution.auto_commit):
                     if stages_executed == 0:
                         click.secho("  ⚠️ Auto-commit skipped: no stages were executed during this invocation.", fg="yellow")
-                        _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
+                        _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context, reason="No stages executed")
                     else:
                         commit_msg = f"feat: {task_summary}"
                         if git.is_git_repo():
-                            if auto_commit_run(git=git, task_summary=task_summary, baseline=git_baseline, run=run, stages_executed=stages_executed):
-                                click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'", fg="green")
-                                _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context)
+                            commit_res = auto_commit_run(
+                                git=git,
+                                task_summary=task_summary,
+                                baseline=git_baseline,
+                                run=run,
+                                stages_executed=stages_executed,
+                                return_result=True,
+                                context=context,
+                            )
+                            if not isinstance(commit_res, CommitResult):
+                                commit_res = CommitResult(
+                                    status=CommitStatus.COMMITTED if commit_res else CommitStatus.FAILED,
+                                    reason=None if commit_res else "Auto-commit failed",
+                                )
+                            if commit_res.status == CommitStatus.COMMITTED:
+                                sha_str = f" ({commit_res.commit_sha[:8]})" if commit_res.commit_sha else ""
+                                click.secho(f"  ✓ Auto-committed changes: '{commit_msg}'{sha_str}", fg="green")
+                                _record_stage_transition(run, "Commit", "APPROVED", "COMPLETED", role_name="commit", seq=99, context=context, reason=commit_res.reason)
+                            elif commit_res.status == CommitStatus.PARTIAL:
+                                click.secho(f"\n⚠️ Auto-commit partial: {commit_res.reason}", fg="yellow", bold=True)
+                                _record_stage_transition(run, "Commit", "PARTIAL", "COMPLETED", role_name="commit", seq=99, context=context, reason=commit_res.reason)
+                                commit_status_override = "PARTIAL"
+                                commit_reason_override = commit_res.reason
+                            elif commit_res.status in (CommitStatus.FAILED, CommitStatus.VERIFICATION_FAILED):
+                                click.secho(f"\n❌ Auto-commit failed: {commit_res.reason}", fg="red", bold=True)
+                                _record_stage_transition(run, "Commit", "FAILED", "COMPLETED", role_name="commit", seq=99, context=context, reason=commit_res.reason)
+                                commit_status_override = "FAILED"
+                                commit_reason_override = commit_res.reason
                             else:
-                                click.secho("  ⚠️ Auto-commit skipped: no changes or git commit error.", fg="yellow")
-                                _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context)
+                                click.secho("  ℹ️ Auto-commit skipped: no changes to commit.", fg="yellow")
+                                _record_stage_transition(run, "Commit", "SKIPPED", "SKIPPED", role_name="commit", seq=99, context=context, reason=commit_res.reason)
 
                 run.task = task
-                run.status = "APPROVED"
-                _record_final_success(run)
+                if commit_status_override:
+                    run.status = commit_status_override
+                    _record_final_halt(run, commit_status_override, commit_reason_override)
+                else:
+                    run.status = "APPROVED"
+                    _record_final_success(run)
                 run.save_metadata()
 
                 # Reconcile PKB knowledge proposals
-                reconcile_run_knowledge(root, run.run_id, run.run_dir)
+                reconcile_run_knowledge(root, run.run_id, run.run_dir, run=run)
 
                 click.secho(f"\n✨ Autonomous Loop finished for {run.run_id} (Status: {run.status})!", fg="green", bold=True)
                 click.echo(f"   Artifacts saved in .forge/runs/{run.run_id}/\n")

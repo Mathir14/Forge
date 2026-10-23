@@ -893,19 +893,29 @@ class Stage:
         if tracker is not None:
             tracker.record_stage_completed(success=success, result_path=saved_json)
 
-        # Stage PKB knowledge proposals if emitted
-        if report and getattr(report, "proposals", None) and hasattr(context, "run") and hasattr(context.run, "run_dir") and context.run.run_dir:
+        # Stage PKB knowledge proposals outcome (always recorded for observability)
+        if hasattr(context, "run") and hasattr(context.run, "run_dir") and context.run.run_dir:
             proposals_dir = context.run.run_dir / "knowledge_proposals"
             proposals_dir.mkdir(parents=True, exist_ok=True)
             seq_prefix = f"{self.role.sequence_number:02d}_" if self.role.sequence_number is not None else ""
             proposal_file = proposals_dir / f"{seq_prefix}{self.role.name.lower()}_proposals.yaml"
             try:
                 import yaml
-                proposal_data = {
+                proposals_list = [p.to_dict() for p in (report.proposals if report else [])]
+                rejected_list = getattr(report, "rejected_proposals", []) if report else []
+                proposal_data: Dict[str, Any] = {
                     "role": self.role.name.lower(),
                     "sequence_number": self.role.sequence_number,
-                    "proposals": [p.to_dict() for p in report.proposals],
+                    "proposals_count": len(proposals_list),
+                    "proposals": proposals_list,
                 }
+                if rejected_list:
+                    proposal_data["rejected_proposals"] = rejected_list
+                if getattr(report, "proposal_reason", None):
+                    proposal_data["reason"] = report.proposal_reason
+                elif not proposals_list:
+                    proposal_data["reason"] = "No qualifying knowledge proposals warranted"
+
                 with open(proposal_file, "w", encoding="utf-8") as pf:
                     yaml.safe_dump(proposal_data, pf, sort_keys=False, indent=2)
             except Exception as e:
