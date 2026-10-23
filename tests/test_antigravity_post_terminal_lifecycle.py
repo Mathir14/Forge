@@ -160,8 +160,10 @@ def test_decode_stream_events_waits_for_natural_exit_monotonic():
 
     def get_rc(wait_timeout=None):
         if wait_timeout and time.monotonic() < delay_until:
-            time.sleep(min(wait_timeout, max(0.0, delay_until - time.monotonic())))
-        if time.monotonic() >= delay_until:
+            wait_end = min(time.monotonic() + wait_timeout, delay_until)
+            while time.monotonic() < wait_end:
+                time.sleep(min(0.01, max(0.001, wait_end - time.monotonic())))
+        if time.monotonic() >= delay_until - 0.005:
             return 0
         return None
 
